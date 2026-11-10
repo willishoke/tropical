@@ -119,7 +119,6 @@ private def planOpBinaryTag? : PlanOp → Option BinaryOpTag
   | .and => some .and | .or => some .or
   | .bitAnd => some .bitAnd | .bitOr => some .bitOr | .bitXor => some .bitXor
   | .lshift => some .lshift | .rshift => some .rshift | .ldexp => some .ldexp
-  | .mulLo32 => some .mulLo32
   | _ => none
 
 private def planOpUnaryTag? : PlanOp → Option UnaryOpTag
@@ -128,12 +127,13 @@ private def planOpUnaryTag? : PlanOp → Option UnaryOpTag
   | .not => some .not | .bitNot => some .bitNot
   | .floatExponent => some .floatExponent
   | .toInt => some .toInt | .toBool => some .toBool | .toFloat => some .toFloat
+  | .toInt32 => some .toInt32
   | _ => none
 
 private def planOpArity : PlanOp → Nat
   | .select | .clamp => 3
   | .neg | .abs | .sqrt | .floor | .ceil | .round
-  | .not | .bitNot | .floatExponent | .toInt | .toBool | .toFloat => 1
+  | .not | .bitNot | .floatExponent | .toInt | .toInt32 | .toBool | .toFloat => 1
   | _ => 2
 
 /-- Interpret one scalar symbol from the total Plan signature. Arity errors are

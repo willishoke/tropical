@@ -399,6 +399,11 @@ theorem toIntE_preserves {builder : Builder} (hBuilder : BuilderWellFormed build
     SigBuildResultWellFormed builder ((toIntE a).run builder) :=
   by simpa [toIntE] using unary_preserves hBuilder .toInt ha
 
+theorem toInt32E_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((toInt32E a).run builder) :=
+  by simpa [toInt32E] using unary_preserves hBuilder .toInt32 ha
+
 theorem neg_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
     {a : Sig} (ha : SigIn builder a) :
     SigBuildResultWellFormed builder ((neg a).run builder) :=
@@ -444,6 +449,19 @@ theorem litI_preserves (mantissa : Int) : ProducesSig (litI mantissa) := by
     (lit_preserves mantissa)
     (fun builder value hBuilder hValue =>
       unary_preserves hBuilder .toInt hValue)
+
+theorem litI32_preserves (n : Int) : ProducesSig (litI32 n) := by
+  unfold litI32
+  split
+  · unfold ProducesSig
+    simpa [toInt32E] using bind_preserves (lit n) (unary .toInt32)
+      (fun builder id => SigIn builder id)
+      (fun builder id => SigIn builder id)
+      (lit_preserves n)
+      (fun builder value hBuilder hValue =>
+        unary_preserves hBuilder .toInt32 hValue)
+  · intro _ _
+    exact True.intro
 
 theorem sumLeftTail_preserves {builder : Builder}
     (hBuilder : BuilderWellFormed builder) {items : List Sig} {acc : Sig}

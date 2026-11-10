@@ -22,7 +22,9 @@ namespace tropical_jit
 // hot-swapping a wider plan never resizes audio-thread storage.
 inline constexpr uint32_t kMaxOutputChannels = 64;
 
-enum class JitScalarType : uint8_t { Float, Int, Bool };
+// Int is the 64-bit integer kind, Int32 the 32-bit one (two's complement,
+// wrapping); Lean emits the code, so these only label the manifest.
+enum class JitScalarType : uint8_t { Float, Int, Bool, Int32 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New flat instruction format (FlatProgram / FlatInstr)
@@ -38,7 +40,7 @@ enum class OpTag : uint8_t
   // arity 2
   Add, Sub, Mul, Div, Mod, FloorDiv,
   Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
-  BitAnd, BitOr, BitXor, LShift, RShift, MulLo32,
+  BitAnd, BitOr, BitXor, LShift, RShift,
   Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
   And, Or,  // logical (truthy coercion: float/int → bool, then and/or)
   // arity 1
@@ -46,7 +48,7 @@ enum class OpTag : uint8_t
   FloatExponent,  // extract IEEE-754 unbiased exponent of a float as a float-valued integer
   // Scalar-type cast ops. Truncate-toward-zero semantics (FPToSI), not floor —
   // a stdlib author wanting floor-to-int writes `to_int(floor(x))`.
-  ToInt, ToBool, ToFloat,
+  ToInt, ToInt32, ToBool, ToFloat,
   // arity 2 (listed here for locality with FloatExponent; Ldexp is binary)
   Ldexp,          // x * 2^n (n is a float-valued integer)
   // arity 3

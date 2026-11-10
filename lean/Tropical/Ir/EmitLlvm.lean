@@ -4,6 +4,7 @@ import Tropical.Plan
 import Tropical.Kernel
 import Tropical.Ir.Stage0
 import Tropical.Ir.EmitCommon
+import Tropical.Ir.ConstFold
 
 /-!
 # EmitLlvm — `FlatPlan → textual LLVM IR`
@@ -48,7 +49,8 @@ kernel reads are computed in f64 on the host. Internal to that realization;
 a JIT artifact carries none.
 
 Registers/temps/arrays are `i64`-backed (float=bitcast, int=raw,
-bool=zext); slots are direct `double`. Instruction operand/dst slots are
+int32=sext, bool=zext); slots are direct `double`, with typed integer lanes
+in the port kernel (`St.typedSlots`). Instruction operand/dst slots are
 already global (the partitioner pre-shifts).
 
 f64 constants are emitted as LLVM hex-bits (`0x…`, raw IEEE-754) so the
@@ -76,7 +78,7 @@ def hex16 (u : UInt64) : String :=
 def f64Lit (x : Float) : String := hex16 x.toBits
 
 def llTy : ScalarType → String
-  | .float => "double" | .int => "i64" | .bool => "i1"
+  | .float => "double" | .int => "i64" | .bool => "i1" | .int32 => "i32"
 
 -- ─────────────────────────────────────────────────────────────
 -- Emitter state + monad
@@ -157,16 +159,19 @@ structure St where
       OUTER accumulator finds the outer alloca. -/
   reduces : Array ReduceCtx := #[]
   routeds : Array RoutedCtx := #[]
-  /-- Port kernel only: int values written to a module slot also land, raw,
-      in a parallel `%islots` (i64) vector, and an int read of a slot whose
-      last emitted write was int loads that word instead of converting the
-      f64 copy back. This is EmitMsl's typed-slot rule (a value crosses a
-      slot at its native type): a wired clock stays exact past 2⁵³ rail
-      units, and a target without an FPU never converts it. The f64 copy is
-      still written for f64 readers (sinks, float reads); LLVM drops it when
-      nothing reads it. -/
+  /-- Port kernel only: integer values written to a module slot also land,
+      raw, in a parallel lane of their own width — `int` in `%islots` (i64),
+      `int32` in `%i32slots` (i32) — and a read of a slot whose last emitted
+      write was an integer loads that word (converting from the lane's kind
+      when the read asks for another) instead of converting the f64 copy
+      back. This is EmitMsl's typed-slot rule (a value crosses a slot at its
+      native type): a wired clock stays exact past 2⁵³ rail units, an int32
+      stays 32 bits wide, and a target without an FPU never converts either.
+      The f64 copy is still written for f64 readers (sinks, float reads);
+      LLVM drops it when nothing reads it. `intSlots` maps a slot to the
+      integer kind of its last write. -/
   typedSlots : Bool := false
-  intSlots : Std.HashSet Nat := {}
+  intSlots : Std.HashMap Nat ScalarType := {}
 
 abbrev M := EStateM String St
 
@@ -197,11 +202,17 @@ def coerce (v : TVal) (to : ScalarType) : M TVal := do
   let r ← fresh
   match v.ty, to with
   | .float, .int  => line s!"{r} = fptosi double {v.ref} to i64"; pure ⟨r, .int⟩
+  | .float, .int32 => line s!"{r} = fptosi double {v.ref} to i32"; pure ⟨r, .int32⟩
   | .float, .bool => line s!"{r} = fcmp une double {v.ref}, 0x0000000000000000"; pure ⟨r, .bool⟩
   | .int,   .float => line s!"{r} = sitofp i64 {v.ref} to double"; pure ⟨r, .float⟩
+  | .int,   .int32 => line s!"{r} = trunc i64 {v.ref} to i32"; pure ⟨r, .int32⟩
   | .int,   .bool => line s!"{r} = icmp ne i64 {v.ref}, 0"; pure ⟨r, .bool⟩
+  | .int32, .float => line s!"{r} = sitofp i32 {v.ref} to double"; pure ⟨r, .float⟩
+  | .int32, .int => line s!"{r} = sext i32 {v.ref} to i64"; pure ⟨r, .int⟩
+  | .int32, .bool => line s!"{r} = icmp ne i32 {v.ref}, 0"; pure ⟨r, .bool⟩
   | .bool,  .float => line s!"{r} = uitofp i1 {v.ref} to double"; pure ⟨r, .float⟩
   | .bool,  .int  => line s!"{r} = zext i1 {v.ref} to i64"; pure ⟨r, .int⟩
+  | .bool,  .int32 => line s!"{r} = zext i1 {v.ref} to i32"; pure ⟨r, .int32⟩
   | _, _ => pure v
 
 def coerceF64 (v : TVal) : M String := do pure (← coerce v .float).ref
@@ -218,6 +229,7 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   let raw ← fresh; line s!"{raw} = load i64, ptr {g}, align 8"
   match ty with
   | .int => pure ⟨raw, .int⟩
+  | .int32 => let b ← fresh; line s!"{b} = trunc i64 {raw} to i32"; pure ⟨b, .int32⟩
   | .float => let b ← fresh; line s!"{b} = bitcast i64 {raw} to double"; pure ⟨b, .float⟩
   | .bool => let b ← fresh; line s!"{b} = trunc i64 {raw} to i1"; pure ⟨b, .bool⟩
 
@@ -244,15 +256,35 @@ def storeSlotF64 (idx : Nat) (v : String) : M Unit := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
   line s!"store double {v}, ptr {g}, align 8"
 
+/-- The integer lane of a kind: its alloca, element type and alignment. -/
+private def intLane : ScalarType → Option (String × String × Nat)
+  | .int => some ("%islots", "i64", 8)
+  | .int32 => some ("%i32slots", "i32", 4)
+  | _ => none
+
 /-- Store a typed value to a module slot (see `St.typedSlots`). -/
 def storeSlotTyped (idx : Nat) (v : TVal) : M Unit := do
-  if (← get).typedSlots && v.ty == .int then
-    let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
-    line s!"store i64 {v.ref}, ptr {g}, align 8"
-    modify fun st => { st with intSlots := st.intSlots.insert idx }
-  else
+  match (← get).typedSlots, intLane v.ty with
+  | true, some (lane, ty, align) =>
+    let g ← fresh; line s!"{g} = getelementptr inbounds {ty}, ptr {lane}, i64 {idx}"
+    line s!"store {ty} {v.ref}, ptr {g}, align {align}"
+    modify fun st => { st with intSlots := st.intSlots.insert idx v.ty }
+  | _, _ =>
     modify fun st => { st with intSlots := st.intSlots.erase idx }
   storeSlotF64 idx (← coerceF64 v)
+
+/-- The integer lane value of slot `idx`, if its last emitted write was an
+    integer (see `St.typedSlots`). -/
+def loadSlotLane? (idx : Nat) : M (Option TVal) := do
+  match (← get).intSlots.get? idx with
+  | none => pure none
+  | some k =>
+    match intLane k with
+    | none => pure none
+    | some (lane, ty, align) =>
+      let g ← fresh; line s!"{g} = getelementptr inbounds {ty}, ptr {lane}, i64 {idx}"
+      let v ← fresh; line s!"{v} = load {ty}, ptr {g}, align {align}"
+      pure (some ⟨v, k⟩)
 
 -- Arrays: an alloca per slot in the port kernel; the `%arrays` pointer
 -- table in the stage-0 pre-pass. Sizes are plan constants either way.
@@ -288,6 +320,7 @@ def arrayRegSlot (operand : NOperand) : M Nat :=
 def resolveOperand : NOperand → M TVal
   | .const v t => match t with
     | .int  => pure ⟨toString (jsonNumberToInt v), .int⟩
+    | .int32 => pure ⟨toString (wrap32 (jsonNumberToInt v)), .int32⟩
     | .bool => pure ⟨if jsonNumberToInt v != 0 then "true" else "false", .bool⟩
     | .float => pure ⟨f64Lit v.toFloat, .float⟩
   | .reg slot _ => do
@@ -320,19 +353,17 @@ def resolveOperand : NOperand → M TVal
     | some .tau => pure ⟨(← get).tauName, .int⟩
     | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
-  | .slot idx .int => do
-    if (← get).intSlots.contains idx then
-      let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
-      let v ← fresh; line s!"{v} = load i64, ptr {g}, align 8"
-      pure ⟨v, .int⟩
-    else
-      let v ← loadSlotF64 idx
-      let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
   | .slot idx t => do
+    -- An integer read of a slot an integer was last written to reads that
+    -- lane (`St.typedSlots`); everything else reads the f64 copy.
+    if t.isInteger then
+      if let some lv ← loadSlotLane? idx then
+        return (← coerce lv t)
     let v ← loadSlotF64 idx
     match t with
     | .float => pure ⟨v, .float⟩
     | .int  => let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
+    | .int32 => let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure ⟨r, .int32⟩
     | .bool => let r ← fresh; line s!"{r} = fcmp one double {v}, 0x0000000000000000"; pure ⟨r, .bool⟩
   -- External inputs never reached the session path (the compile maps them
   -- to constant zero); the port has no such region, so the operand IS zero.
@@ -359,6 +390,10 @@ private def cmpF (pred : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = fcmp {pred} double {a}, {b}"; pure ⟨r, .bool⟩
 private def cmpI (pred : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = icmp {pred} i64 {a}, {b}"; pure ⟨r, .bool⟩
+private def binI32 (op : String) (a b : String) : M TVal := do
+  let r ← fresh; line s!"{r} = {op} i32 {a}, {b}"; pure ⟨r, .int32⟩
+private def cmpI32 (pred : String) (a b : String) : M TVal := do
+  let r ← fresh; line s!"{r} = icmp {pred} i32 {a}, {b}"; pure ⟨r, .bool⟩
 private def callF (fn : String) (a : String) : M TVal := do
   let r ← fresh; line s!"{r} = call double {fn}(double {a})"; pure ⟨r, .float⟩
 
@@ -367,33 +402,50 @@ private def zeroF : String := f64Lit 0.0
 def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal := do
   let aF (i : Nat) := argAs args i .float
   let aI (i : Nat) := argAs args i .int
+  let aI32 (i : Nat) := argAs args i .int32
   let aB (i : Nat) := argAs args i .bool
   let isInt := resultType == .int
-  -- comparison dispatch: int compare if either operand is natively int
-  let eitherInt : M Bool := do
-    pure (((args[0]?).map (·.ty == .int)).getD false ||
-          ((args[1]?).map (·.ty == .int)).getD false)
+  let isI32 := resultType == .int32
+  -- comparison dispatch: int compare if either operand is natively an
+  -- integer; in i32 when an operand is int32 (never mixed with int — the
+  -- compiler and `PlanWellFormed` refuse that), else in i64
+  let argIs (t : ScalarType) : Bool :=
+    ((args[0]?).map (·.ty == t)).getD false || ((args[1]?).map (·.ty == t)).getD false
+  let eitherInt : M Bool := pure (argIs .int || argIs .int32)
+  let cmpInt (pred : String) : M TVal := do
+    if argIs .int32 && !argIs .int then cmpI32 pred (← aI32 0) (← aI32 1)
+    else cmpI pred (← aI 0) (← aI 1)
+  -- zero-guarded integer quotient/remainder (`sdiv`/`srem`), at the result width
+  let guardedI (op : String) : M TVal := do
+    if isI32 then
+      let b ← aI32 1; let q ← binI32 op (← aI32 0) b
+      let z ← cmpI32 "eq" b "0"; let r ← fresh
+      line s!"{r} = select i1 {z.ref}, i32 0, i32 {q.ref}"; pure ⟨r, .int32⟩
+    else
+      let b ← aI 1; let q ← binI op (← aI 0) b
+      let z ← cmpI "eq" b "0"; let r ← fresh
+      line s!"{r} = select i1 {z.ref}, i64 0, i64 {q.ref}"; pure ⟨r, .int⟩
   let op ← match validateScalarOp "EmitLlvm" tag args.size with
     | .ok op => pure op
     | .error e => fail e
   match op with
-  | .add => if isInt then binI "add" (← aI 0) (← aI 1) else binF "fadd" (← aF 0) (← aF 1)
-  | .sub => if isInt then binI "sub" (← aI 0) (← aI 1) else binF "fsub" (← aF 0) (← aF 1)
-  | .mul => if isInt then binI "mul" (← aI 0) (← aI 1) else binF "fmul" (← aF 0) (← aF 1)
+  | .add =>
+    if isI32 then binI32 "add" (← aI32 0) (← aI32 1)
+    else if isInt then binI "add" (← aI 0) (← aI 1) else binF "fadd" (← aF 0) (← aF 1)
+  | .sub =>
+    if isI32 then binI32 "sub" (← aI32 0) (← aI32 1)
+    else if isInt then binI "sub" (← aI 0) (← aI 1) else binF "fsub" (← aF 0) (← aF 1)
+  | .mul =>
+    if isI32 then binI32 "mul" (← aI32 0) (← aI32 1)
+    else if isInt then binI "mul" (← aI 0) (← aI 1) else binF "fmul" (← aF 0) (← aF 1)
   | .div =>
-    if isInt then
-      let b ← aI 1; let q ← binI "sdiv" (← aI 0) b
-      let z ← cmpI "eq" b "0"; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, i64 0, i64 {q.ref}"; pure ⟨r, .int⟩
+    if isInt || isI32 then guardedI "sdiv"
     else
       let b ← aF 1; let q ← binF "fdiv" (← aF 0) b
       let z ← cmpF "oeq" b zeroF; let r ← fresh
       line s!"{r} = select i1 {z.ref}, double {zeroF}, double {q.ref}"; pure ⟨r, .float⟩
   | .mod =>
-    if isInt then
-      let b ← aI 1; let q ← binI "srem" (← aI 0) b
-      let z ← cmpI "eq" b "0"; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, i64 0, i64 {q.ref}"; pure ⟨r, .int⟩
+    if isInt || isI32 then guardedI "srem"
     else
       let a ← aF 0; let b ← aF 1
       let z ← cmpF "oeq" b zeroF
@@ -404,39 +456,35 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       let r ← fresh
       line s!"{r} = select i1 {z.ref}, double {zeroF}, double {m.ref}"; pure ⟨r, .float⟩
   | .floorDiv =>
-    if isInt then
-      let b ← aI 1; let q ← binI "sdiv" (← aI 0) b
-      let z ← cmpI "eq" b "0"; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, i64 0, i64 {q.ref}"; pure ⟨r, .int⟩
+    if isInt || isI32 then guardedI "sdiv"
     else
       let b ← aF 1; let q ← binF "fdiv" (← aF 0) b
       let z ← cmpF "oeq" b zeroF; let dv ← fresh
       line s!"{dv} = select i1 {z.ref}, double {zeroF}, double {q.ref}"
       callF "@llvm.floor.f64" dv
-  | .less      => if (← eitherInt) then cmpI "slt" (← aI 0) (← aI 1) else cmpF "olt" (← aF 0) (← aF 1)
-  | .lessEq    => if (← eitherInt) then cmpI "sle" (← aI 0) (← aI 1) else cmpF "ole" (← aF 0) (← aF 1)
-  | .greater   => if (← eitherInt) then cmpI "sgt" (← aI 0) (← aI 1) else cmpF "ogt" (← aF 0) (← aF 1)
-  | .greaterEq => if (← eitherInt) then cmpI "sge" (← aI 0) (← aI 1) else cmpF "oge" (← aF 0) (← aF 1)
-  | .equal     => if (← eitherInt) then cmpI "eq"  (← aI 0) (← aI 1) else cmpF "oeq" (← aF 0) (← aF 1)
-  | .notEqual  => if (← eitherInt) then cmpI "ne"  (← aI 0) (← aI 1) else cmpF "une" (← aF 0) (← aF 1)
+  | .less      => if (← eitherInt) then cmpInt "slt" else cmpF "olt" (← aF 0) (← aF 1)
+  | .lessEq    => if (← eitherInt) then cmpInt "sle" else cmpF "ole" (← aF 0) (← aF 1)
+  | .greater   => if (← eitherInt) then cmpInt "sgt" else cmpF "ogt" (← aF 0) (← aF 1)
+  | .greaterEq => if (← eitherInt) then cmpInt "sge" else cmpF "oge" (← aF 0) (← aF 1)
+  | .equal     => if (← eitherInt) then cmpInt "eq" else cmpF "oeq" (← aF 0) (← aF 1)
+  | .notEqual  => if (← eitherInt) then cmpInt "ne" else cmpF "une" (← aF 0) (← aF 1)
   | .and => let r ← fresh; line s!"{r} = and i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
   | .or  => let r ← fresh; line s!"{r} = or i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
-  | .bitAnd => binI "and" (← aI 0) (← aI 1)
-  | .mulLo32 =>
-    let a ← aI 0; let b ← aI 1
-    let a32 ← fresh; line s!"{a32} = trunc i64 {a} to i32"
-    let b32 ← fresh; line s!"{b32} = trunc i64 {b} to i32"
-    let p ← fresh; line s!"{p} = mul i32 {a32}, {b32}"
-    let r ← fresh; line s!"{r} = sext i32 {p} to i64"; pure ⟨r, .int⟩
-  | .bitOr  => binI "or"  (← aI 0) (← aI 1)
-  | .bitXor => binI "xor" (← aI 0) (← aI 1)
-  | .lshift => binI "shl" (← aI 0) (← aI 1)
-  | .rshift => binI "ashr" (← aI 0) (← aI 1)
+  | .bitAnd => if isI32 then binI32 "and" (← aI32 0) (← aI32 1) else binI "and" (← aI 0) (← aI 1)
+  | .bitOr  => if isI32 then binI32 "or" (← aI32 0) (← aI32 1) else binI "or"  (← aI 0) (← aI 1)
+  | .bitXor => if isI32 then binI32 "xor" (← aI32 0) (← aI32 1) else binI "xor" (← aI 0) (← aI 1)
+  | .lshift => if isI32 then binI32 "shl" (← aI32 0) (← aI32 1) else binI "shl" (← aI 0) (← aI 1)
+  | .rshift => if isI32 then binI32 "ashr" (← aI32 0) (← aI32 1) else binI "ashr" (← aI 0) (← aI 1)
   | .neg =>
-    if isInt then binI "sub" "0" (← aI 0) else
+    if isI32 then binI32 "sub" "0" (← aI32 0)
+    else if isInt then binI "sub" "0" (← aI 0) else
     let r ← fresh; line s!"{r} = fneg double {← aF 0}"; pure ⟨r, .float⟩
   | .abs =>
-    if isInt then
+    if isI32 then
+      let v ← aI32 0; let neg ← binI32 "sub" "0" v
+      let lt ← cmpI32 "slt" v "0"; let r ← fresh
+      line s!"{r} = select i1 {lt.ref}, i32 {neg.ref}, i32 {v}"; pure ⟨r, .int32⟩
+    else if isInt then
       let v ← aI 0; let neg ← binI "sub" "0" v
       let lt ← cmpI "slt" v "0"; let r ← fresh
       line s!"{r} = select i1 {lt.ref}, i64 {neg.ref}, i64 {v}"; pure ⟨r, .int⟩
@@ -464,18 +512,26 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       match a.ty with
       | .bool  => let r ← fresh; line s!"{r} = xor i1 {a.ref}, true"; pure ⟨r, .bool⟩
       | .int   => let r ← fresh; line s!"{r} = icmp eq i64 {a.ref}, 0"; pure ⟨r, .bool⟩
+      | .int32 => let r ← fresh; line s!"{r} = icmp eq i32 {a.ref}, 0"; pure ⟨r, .bool⟩
       | .float => let r ← fresh; line s!"{r} = fcmp oeq double {a.ref}, {zeroF}"; pure ⟨r, .bool⟩
-  | .bitNot => let r ← fresh; line s!"{r} = xor i64 {← aI 0}, -1"; pure ⟨r, .int⟩
+  | .bitNot =>
+    if isI32 then let r ← fresh; line s!"{r} = xor i32 {← aI32 0}, -1"; pure ⟨r, .int32⟩
+    else let r ← fresh; line s!"{r} = xor i64 {← aI 0}, -1"; pure ⟨r, .int⟩
   | .toInt   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
+  | .toInt32 => match args[0]? with | some a => coerce a .int32 | none => fail "ToInt32 missing operand"
   | .toBool  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
   | .toFloat => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
   | .clamp =>
-    if isInt then
-      let val ← aI 0; let lo ← aI 1; let hi ← aI 2
-      let gt ← cmpI "sgt" val lo; let loc ← fresh
-      line s!"{loc} = select i1 {gt.ref}, i64 {val}, i64 {lo}"
-      let lt ← cmpI "slt" loc hi; let r ← fresh
-      line s!"{r} = select i1 {lt.ref}, i64 {loc}, i64 {hi}"; pure ⟨r, .int⟩
+    if isInt || isI32 then
+      let (ty, val, lo, hi) ←
+        if isI32 then pure ("i32", ← aI32 0, ← aI32 1, ← aI32 2)
+        else pure ("i64", ← aI 0, ← aI 1, ← aI 2)
+      let gt ← fresh; line s!"{gt} = icmp sgt {ty} {val}, {lo}"
+      let loc ← fresh
+      line s!"{loc} = select i1 {gt}, {ty} {val}, {ty} {lo}"
+      let lt ← fresh; line s!"{lt} = icmp slt {ty} {loc}, {hi}"
+      let r ← fresh
+      line s!"{r} = select i1 {lt}, {ty} {loc}, {ty} {hi}"; pure ⟨r, resultType⟩
     else
       let val ← aF 0; let lo ← aF 1; let hi ← aF 2
       let gt ← cmpF "ogt" val lo; let loc ← fresh
@@ -489,6 +545,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
         match a.ty with
         | .bool  => pure a.ref
         | .int   => do let r ← fresh; line s!"{r} = icmp ne i64 {a.ref}, 0"; pure r
+        | .int32 => do let r ← fresh; line s!"{r} = icmp ne i32 {a.ref}, 0"; pure r
         | .float => do let r ← fresh; line s!"{r} = fcmp une double {a.ref}, {zeroF}"; pure r
     let t ← argAs args 1 resultType
     let f ← argAs args 2 resultType
@@ -797,11 +854,10 @@ private def outIndex (outputChannelCount target : Nat) : M String := do
 
 /-- Sinks into the output. `.f64` (the port default) mixes each sink's inputs
     and applies its gain in binary64. `.i32` is the integer output a target
-    without an FPU stores: each sink must be one input at gain 1, and its
-    value is converted toward zero (`fptosi`), which is exact for an int
-    program output (an exact integer in the slot). LLVM folds that
-    int→double→int round trip when the value's range fits the mantissa, so
-    no soft-float conversion survives for a bounded int output. -/
+    without an FPU stores: each sink must be one input at gain 1. An `int32`
+    program output is stored as it is, from its slot's 32-bit lane; an `int`
+    one keeps its low 32 bits. Any other value is converted toward zero
+    (`fptosi`) from its f64 copy, which is exact for an integer in the slot. -/
 def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
     (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
   let (ty, zero, align) ← match outElem with
@@ -821,8 +877,12 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
       | .i32 =>
         if sink.inputs.size != 1 || sink.gain.toFloat != 1.0 then
           fail s!"EmitLlvm: an i32 output needs one sink input at gain 1 (target {sink.target})"
-        let v ← loadSlotF64 sink.inputs[0]!
-        let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure r
+        let slot := sink.inputs[0]!
+        match ← loadSlotLane? slot with
+        | some lv => pure (← coerce lv .int32).ref
+        | none =>
+          let v ← loadSlotF64 slot
+          let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure r
       | _ => do
         let mut acc := zeroF
         for slotIdx in sink.inputs do
@@ -904,6 +964,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
     line s!"%slots = alloca double, i64 {slotCount}, align 8"
     line s!"%temps = alloca i64, i64 {registerCount}, align 8"
     line s!"%islots = alloca i64, i64 {slotCount}, align 8"
+    -- The int32 lane is not zeroed: it is read only after an int32 write to
+    -- the same slot (`St.intSlots`), and an unused alloca costs nothing.
+    line s!"%i32slots = alloca i32, i64 {slotCount}, align 4"
     for i in [0:sizes.size] do
       line s!"%arr{i} = alloca i64, i64 {max (sizes[i]?.getD 0) 1}, align 8"
     zeroCells "%temps" registerCount

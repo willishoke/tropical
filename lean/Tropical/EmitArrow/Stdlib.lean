@@ -426,22 +426,23 @@ def buildFixedSinOsc (arena : Arena)
     }
 
 /-- `FixedSinOsc` for 32-bit integer hardware: the same DDS phase on ℤ/2³²
-    (`phaseQ32Lo`, bit-identical), and a Q1.15 sine (`fixedSinQ15Sig`), so the
-    output is an int in `[-32767, 32767]` meaning `out / 32768`. Every product
-    is a 32-bit one, which is what a Cortex-M0+ (`MULS`, 32×32→32) runs
-    without a libcall; see `design/typed-kernel.md` "Embedded objects". -/
+    (`phaseQ32`, the same residue), and a Q1.15 sine (`fixedSinQ15Sig`), all
+    in `int32`, so the output is an `int32` in `[-32767, 32767]` meaning
+    `out / 32768`. Every product is a 32-bit one, which is what a Cortex-M0+
+    (`MULS`, 32×32→32) runs without a libcall; see `design/typed-kernel.md`
+    "Embedded objects". -/
 def buildFixedSinOscQ15 (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   assemble arena "FixedSinOscQ15"
-      #[{ name := "out", type? := some (.scalar .int) }] #[] do
+      #[{ name := "out", type? := some (.scalar .int32) }] #[] do
     let freq ← inputRef ⟨0⟩
     let clk ← inputRef ⟨1⟩
     let offset ← inputRef ⟨2⟩
     let twoPow32 ← lit 4294967296
     let inc ← toIntE (← div (← mul freq twoPow32) (← sampleRate))
     let off ← toIntE (← mul offset twoPow32)
-    let phaseQ ← phaseQ32Lo inc off clk
+    let phaseQ ← phaseQ32 inc off clk
     let body ← fixedSinQ15Sig phaseQ
     let freqInput ← freqDecl "freq" 1
     let defaultClock ← clockSig

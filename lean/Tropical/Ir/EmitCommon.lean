@@ -46,7 +46,7 @@ def expectArrayReg (backend : String) (operand : NOperand) : Except String Nat :
 def planOpArity : PlanOp → Nat
   | .select | .clamp => 3
   | .neg | .abs | .sqrt | .floor | .ceil | .round
-  | .not | .bitNot | .floatExponent | .toInt | .toBool | .toFloat => 1
+  | .not | .bitNot | .floatExponent | .toInt | .toInt32 | .toBool | .toFloat => 1
   | _ => 2
 
 /-- Decode a scalar-op tag and reject malformed instruction arity before a

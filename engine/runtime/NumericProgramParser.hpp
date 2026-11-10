@@ -47,7 +47,6 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"Equal",       T::Equal},
     {"NotEqual",    T::NotEqual},
     {"BitAnd",      T::BitAnd},
-    {"MulLo32",     T::MulLo32},
     {"BitOr",       T::BitOr},
     {"BitXor",      T::BitXor},
     {"LShift",      T::LShift},
@@ -70,6 +69,7 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"Ldexp",         T::Ldexp},
     {"FloatExponent", T::FloatExponent},
     {"ToInt",       T::ToInt},
+    {"ToInt32",     T::ToInt32},
     {"ToBool",      T::ToBool},
     {"ToFloat",     T::ToFloat},
     {"WriteSlot",   T::WriteSlot},
@@ -90,6 +90,7 @@ inline tropical_jit::JitScalarType parse_scalar_type(const std::string & s)
   if (s == "float") return tropical_jit::JitScalarType::Float;
   if (s == "int")  return tropical_jit::JitScalarType::Int;
   if (s == "bool") return tropical_jit::JitScalarType::Bool;
+  if (s == "int32") return tropical_jit::JitScalarType::Int32;
   throw std::runtime_error(
     "NumericProgramParser: unknown scalar type '" + s + "'");
 }

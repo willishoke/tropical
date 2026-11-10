@@ -30,8 +30,11 @@ the frame count is a literal (shapes are static), and the rate is a literal.
 ## Divergences from EmitLlvm, all deliberate
 
 * **f32 values, i64 clocks.** `.float` is `float` (Apple GPUs have no
-  f64); `.int` is native `long` — the Q48.16/Q0.32/Q2.30 integer
-  datapath is bit-identical to the JIT (design/fixed-carrier.md). The
+  f64); `.int` is native `long` and `.int32` native `int` — the
+  Q48.16/Q0.32/Q2.30 integer datapath is bit-identical to the JIT
+  (design/fixed-carrier.md). int32 add/sub/mul/neg/shl run in `uint`
+  and reinterpret back (`as_type<int>`), so their wrap is defined, not
+  left to signed overflow. The
   f32 surface is the enumerated residue (envelope exp, param landings,
   the DAC scale), tolerance-gated by `metal_vs_jit`.
 * **Thread-private TYPED slots.** Module slots are same-sample dataflow
@@ -95,8 +98,13 @@ def i64Lit (n : Int) : String :=
   if n == -9223372036854775808 then "(-9223372036854775807L - 1L)"
   else s!"{n}L"
 
+/-- An i32 MSL literal (`int`); INT32_MIN needs the same dodge as i64's. -/
+def i32Lit (n : Int) : String :=
+  if n == -2147483648 then "(-2147483647 - 1)"
+  else s!"{n}"
+
 def mslTy : ScalarType → String
-  | .float => "float" | .int => "long" | .bool => "bool"
+  | .float => "float" | .int => "long" | .bool => "bool" | .int32 => "int"
 
 -- ─────────────────────────────────────────────────────────────
 -- Constant → MSL text (the fold domain itself is in Ir.ConstFold)
@@ -109,6 +117,7 @@ def cvalText : CVal → String
   | .f x => f32Lit x
   | .i n => i64Lit n
   | .b v => if v then "true" else "false"
+  | .i32 n => i32Lit n
 
 -- ─────────────────────────────────────────────────────────────
 -- Emitter state + monad
@@ -270,11 +279,17 @@ def coerce (v : TVal) (to : ScalarType) : M TVal := do
   | none =>
     match v.ty, to with
     | .float, .int  => bindVal .int s!"long({v.ref})"
+    | .float, .int32 => bindVal .int32 s!"int({v.ref})"
     | .float, .bool => bindVal .bool s!"({v.ref} != 0.0f)"
     | .int,   .float => bindVal .float s!"float({v.ref})"
+    | .int,   .int32 => bindVal .int32 s!"as_type<int>(uint({v.ref}))"
     | .int,   .bool => bindVal .bool s!"({v.ref} != 0L)"
+    | .int32, .float => bindVal .float s!"float({v.ref})"
+    | .int32, .int => bindVal .int s!"long({v.ref})"
+    | .int32, .bool => bindVal .bool s!"({v.ref} != 0)"
     | .bool,  .float => bindVal .float s!"float({v.ref})"
     | .bool,  .int  => bindVal .int s!"long({v.ref})"
+    | .bool,  .int32 => bindVal .int32 s!"int({v.ref})"
     | _, _ => pure v
 
 def coerceF32 (v : TVal) : M String := do pure (← coerce v .float).ref
@@ -286,14 +301,17 @@ def coerceF32 (v : TVal) : M String := do pure (← coerce v .float).ref
 def tempVarName (slot : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"tf{slot}" | .int => s!"ti{slot}" | .bool => s!"tb{slot}"
+  | .int32 => s!"tw{slot}"
 
 def routedTempVarName (slot : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"rtf{slot}" | .int => s!"rti{slot}" | .bool => s!"rtb{slot}"
+  | .int32 => s!"rtw{slot}"
 
 def coopTempVarName (slot : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"qf{slot}" | .int => s!"qi{slot}" | .bool => s!"qb{slot}"
+  | .int32 => s!"qw{slot}"
 
 private def activeTempVarName (slot : Nat) (ty : ScalarType) : M String := do
   let st ← get
@@ -350,6 +368,7 @@ def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
 def slotVarName (idx : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"slf{idx}" | .int => s!"sli{idx}" | .bool => s!"slb{idx}"
+  | .int32 => s!"slw{idx}"
 
 /-- A slot read, as a typed TVal: constant if the last write folded;
     the typed thread-private local if written earlier in this kernel;
@@ -389,6 +408,7 @@ def storeSlot (idx : Nat) (v : TVal) : M Unit := do
 def resolveOperand : NOperand → M TVal
   | .const v t => match t with
     | .int  => let n := jsonNumberToInt v; pure ⟨i64Lit n, .int, some (.i (wrap64 n))⟩
+    | .int32 => let n := wrap32 (jsonNumberToInt v); pure ⟨i32Lit n, .int32, some (.i32 n)⟩
     | .bool => let b := jsonNumberToInt v != 0
                pure ⟨if b then "true" else "false", .bool, some (.b b)⟩
     | .float => let x := v.toFloat; pure ⟨f32Lit x, .float, some (.f x)⟩
@@ -443,27 +463,49 @@ private def callF (fn : String) (a : String) : M TVal :=
 def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal := do
   let aF (i : Nat) := argAs args i .float
   let aI (i : Nat) := argAs args i .int
+  let aI32 (i : Nat) := argAs args i .int32
   let aB (i : Nat) := argAs args i .bool
   let isInt := resultType == .int
-  let eitherInt : M Bool := do
-    pure (((args[0]?).map (·.ty == .int)).getD false ||
-          ((args[1]?).map (·.ty == .int)).getD false)
+  let isI32 := resultType == .int32
+  let argIs (t : ScalarType) : Bool :=
+    ((args[0]?).map (·.ty == t)).getD false || ((args[1]?).map (·.ty == t)).getD false
+  let eitherInt : M Bool := pure (argIs .int || argIs .int32)
+  -- integer compare: in `int` when an operand is int32 (never mixed with
+  -- `long` — the compiler refuses that), else in `long`
+  let cmpInt (op : String) : M TVal := do
+    if argIs .int32 && !argIs .int then cmpI op (← aI32 0) (← aI32 1)
+    else cmpI op (← aI 0) (← aI 1)
+  -- int32 ring ops in `uint`, reinterpreted back: a defined wrap
+  let wrapI32 (op : String) (a b : String) : M TVal :=
+    bindVal .int32 s!"as_type<int>(uint({a}) {op} uint({b}))"
   let op ← match validateScalarOp "EmitMsl" tag args.size with
     | .ok op => pure op
     | .error e => fail e
   match op with
-  | .add => if isInt then binI "+" (← aI 0) (← aI 1) else binF "+" (← aF 0) (← aF 1)
-  | .sub => if isInt then binI "-" (← aI 0) (← aI 1) else binF "-" (← aF 0) (← aF 1)
-  | .mul => if isInt then binI "*" (← aI 0) (← aI 1) else binF "*" (← aF 0) (← aF 1)
+  | .add =>
+    if isI32 then wrapI32 "+" (← aI32 0) (← aI32 1)
+    else if isInt then binI "+" (← aI 0) (← aI 1) else binF "+" (← aF 0) (← aF 1)
+  | .sub =>
+    if isI32 then wrapI32 "-" (← aI32 0) (← aI32 1)
+    else if isInt then binI "-" (← aI 0) (← aI 1) else binF "-" (← aF 0) (← aF 1)
+  | .mul =>
+    if isI32 then wrapI32 "*" (← aI32 0) (← aI32 1)
+    else if isInt then binI "*" (← aI 0) (← aI 1) else binF "*" (← aF 0) (← aF 1)
   | .div =>
-    if isInt then
+    if isI32 then
+      let a ← aI32 0; let b ← aI32 1
+      bindVal .int32 s!"({b} == 0 ? 0 : ({a} / {b}))"
+    else if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} / {b}))"
     else
       let a ← aF 0; let b ← aF 1
       bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} / {b}))"
   | .mod =>
-    if isInt then
+    if isI32 then
+      let a ← aI32 0; let b ← aI32 1
+      bindVal .int32 s!"({b} == 0 ? 0 : ({a} % {b}))"
+    else if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} % {b}))"
     else
@@ -472,32 +514,45 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       let fq ← callF "floor" q.ref
       bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} - {fq.ref} * {b}))"
   | .floorDiv =>
-    if isInt then
+    if isI32 then
+      let a ← aI32 0; let b ← aI32 1
+      bindVal .int32 s!"({b} == 0 ? 0 : ({a} / {b}))"
+    else if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} / {b}))"
     else
       let a ← aF 0; let b ← aF 1
       let dv ← bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} / {b}))"
       callF "floor" dv.ref
-  | .less      => if (← eitherInt) then cmpI "<"  (← aI 0) (← aI 1) else cmpF "<"  (← aF 0) (← aF 1)
-  | .lessEq    => if (← eitherInt) then cmpI "<=" (← aI 0) (← aI 1) else cmpF "<=" (← aF 0) (← aF 1)
-  | .greater   => if (← eitherInt) then cmpI ">"  (← aI 0) (← aI 1) else cmpF ">"  (← aF 0) (← aF 1)
-  | .greaterEq => if (← eitherInt) then cmpI ">=" (← aI 0) (← aI 1) else cmpF ">=" (← aF 0) (← aF 1)
-  | .equal     => if (← eitherInt) then cmpI "==" (← aI 0) (← aI 1) else cmpF "==" (← aF 0) (← aF 1)
-  | .notEqual  => if (← eitherInt) then cmpI "!=" (← aI 0) (← aI 1) else cmpF "!=" (← aF 0) (← aF 1)
+  | .less      => if (← eitherInt) then cmpInt "<"  else cmpF "<"  (← aF 0) (← aF 1)
+  | .lessEq    => if (← eitherInt) then cmpInt "<=" else cmpF "<=" (← aF 0) (← aF 1)
+  | .greater   => if (← eitherInt) then cmpInt ">"  else cmpF ">"  (← aF 0) (← aF 1)
+  | .greaterEq => if (← eitherInt) then cmpInt ">=" else cmpF ">=" (← aF 0) (← aF 1)
+  | .equal     => if (← eitherInt) then cmpInt "==" else cmpF "==" (← aF 0) (← aF 1)
+  | .notEqual  => if (← eitherInt) then cmpInt "!=" else cmpF "!=" (← aF 0) (← aF 1)
   | .and => bindVal .bool s!"({← aB 0} && {← aB 1})"
   | .or  => bindVal .bool s!"({← aB 0} || {← aB 1})"
-  | .bitAnd => binI "&" (← aI 0) (← aI 1)
-  | .mulLo32 => bindVal .int s!"(long)(int)((uint){← aI 0} * (uint){← aI 1})"
-  | .bitOr  => binI "|" (← aI 0) (← aI 1)
-  | .bitXor => binI "^" (← aI 0) (← aI 1)
-  | .lshift => binI "<<" (← aI 0) (← aI 1)
-  | .rshift => binI ">>" (← aI 0) (← aI 1)   -- long >> long is arithmetic in MSL
+  | .bitAnd =>
+    if isI32 then bindVal .int32 s!"({← aI32 0} & {← aI32 1})" else binI "&" (← aI 0) (← aI 1)
+  | .bitOr =>
+    if isI32 then bindVal .int32 s!"({← aI32 0} | {← aI32 1})" else binI "|" (← aI 0) (← aI 1)
+  | .bitXor =>
+    if isI32 then bindVal .int32 s!"({← aI32 0} ^ {← aI32 1})" else binI "^" (← aI 0) (← aI 1)
+  | .lshift =>
+    if isI32 then wrapI32 "<<" (← aI32 0) (← aI32 1) else binI "<<" (← aI 0) (← aI 1)
+  | .rshift =>
+    -- `>>` on a signed operand is arithmetic in MSL
+    if isI32 then bindVal .int32 s!"({← aI32 0} >> {← aI32 1})" else binI ">>" (← aI 0) (← aI 1)
   | .neg =>
-    if isInt then bindVal .int s!"(0L - {← aI 0})"
+    if isI32 then wrapI32 "-" "0" (← aI32 0)
+    else if isInt then bindVal .int s!"(0L - {← aI 0})"
     else bindVal .float s!"(-{← aF 0})"
   | .abs =>
-    if isInt then
+    if isI32 then
+      let v ← aI32 0
+      let n ← wrapI32 "-" "0" v
+      bindVal .int32 s!"({v} < 0 ? {n.ref} : {v})"
+    else if isInt then
       let v ← aI 0
       bindVal .int s!"({v} < 0L ? (0L - {v}) : {v})"
     else callF "fabs" (← aF 0)
@@ -522,13 +577,20 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       match a.ty with
       | .bool  => bindVal .bool s!"(!{a.ref})"
       | .int   => bindVal .bool s!"({a.ref} == 0L)"
+      | .int32 => bindVal .bool s!"({a.ref} == 0)"
       | .float => bindVal .bool s!"({a.ref} == 0.0f)"
-  | .bitNot => bindVal .int s!"(~{← aI 0})"
+  | .bitNot =>
+    if isI32 then bindVal .int32 s!"(~{← aI32 0})" else bindVal .int s!"(~{← aI 0})"
   | .toInt   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
+  | .toInt32 => match args[0]? with | some a => coerce a .int32 | none => fail "ToInt32 missing operand"
   | .toBool  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
   | .toFloat => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
   | .clamp =>
-    if isInt then
+    if isI32 then
+      let v ← aI32 0; let lo ← aI32 1; let hi ← aI32 2
+      let lc ← bindVal .int32 s!"({v} > {lo} ? {v} : {lo})"
+      bindVal .int32 s!"({lc.ref} < {hi} ? {lc.ref} : {hi})"
+    else if isInt then
       let v ← aI 0; let lo ← aI 1; let hi ← aI 2
       let lc ← bindVal .int s!"({v} > {lo} ? {v} : {lo})"
       bindVal .int s!"({lc.ref} < {hi} ? {lc.ref} : {hi})"
@@ -543,6 +605,7 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
         match a.ty with
         | .bool  => pure a.ref
         | .int   => pure s!"({a.ref} != 0L)"
+        | .int32 => pure s!"({a.ref} != 0)"
         | .float => pure s!"({a.ref} != 0.0f)"
     let t ← argAs args 1 resultType
     let f ← argAs args 2 resultType
@@ -694,6 +757,8 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       && instr.loopCount ≥ Tropical.Plan.metalCoopReduceThreshold
       && initV.cv.isSome
     if coop then
+      if instr.resultType == .int32 then
+        fail "EmitMsl: a cooperative int32 reduction has no lane-partial arena (the partials are float or long)"
       let dynamic := instr.args.size > 1
       if dynamic then
         line s!"reduce_trips = uint({bound});"

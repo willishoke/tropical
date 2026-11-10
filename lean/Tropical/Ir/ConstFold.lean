@@ -6,8 +6,8 @@ import Tropical.Plan
 The fourth interpretation of the scalar-op signature `PlanOp`, alongside the
 LLVM and MSL text emitters and the type-inference: evaluation into VALUES. Given
 constant arguments, `foldOp` computes the constant result with the kernel's
-exact semantics — f64 float math, i64 two's-complement wraparound, int-if-either
-comparison dispatch, div/mod zero-guards, `fptosi` truncation. It is
+exact semantics — f64 float math, i64 and i32 two's-complement wraparound,
+int-if-either comparison dispatch, div/mod zero-guards, `fptosi` truncation. It is
 PARTIAL by design (`none` = "don't fold": an unfoldable op like Ldexp/
 FloatExponent, or a value that refuses like a non-finite float→int) — the caller
 then emits the op at runtime.
@@ -24,11 +24,13 @@ open Tropical.Plan (ScalarType PlanOp)
 
 /-- A value known at emit time. Floats carry full f64 precision through
     the fold; they round to f32 only if/when they materialize as kernel
-    text. Ints are i64 two's-complement (wrapped after every op). -/
+    text. `i` is an `int` (i64 two's-complement, wrapped after every op),
+    `i32` an `int32` (i32 two's-complement, its value in `[-2³¹, 2³¹)`). -/
 inductive CVal where
   | f (x : Float)
   | i (n : Int)
   | b (v : Bool)
+  | i32 (n : Int)
 deriving Inhabited
 
 /-- Wrap an arbitrary-precision Int to i64 two's-complement — the fold
@@ -45,6 +47,19 @@ def toU64 (x : Int) : Nat :=
 def bit64 (f : Nat → Nat → Nat) (a b : Int) : Int :=
   wrap64 (Int.ofNat (f (toU64 a) (toU64 b)))
 
+/-- Wrap an arbitrary-precision Int to i32 two's-complement: the canonical
+    representative of its residue modulo 2³² in `[-2³¹, 2³¹)`. -/
+def wrap32 (x : Int) : Int :=
+  ((x + 2147483648) % 4294967296) - 2147483648
+
+/-- Two's-complement u32 image of an Int (its least residue modulo 2³²). -/
+def toU32 (x : Int) : Nat :=
+  (((x % 4294967296) + 4294967296) % 4294967296).toNat
+
+/-- i32 bitwise op via the u32 image. -/
+def bit32 (f : Nat → Nat → Nat) (a b : Int) : Int :=
+  wrap32 (Int.ofNat (f (toU32 a) (toU32 b)))
+
 /-- f64 → i64 truncation toward zero (`fptosi` / MSL `long(f)`). Refuses
     non-finite / out-of-range (the caller then declines to fold). -/
 def truncToInt? (v : Float) : Option Int :=
@@ -52,71 +67,105 @@ def truncToInt? (v : Float) : Option Int :=
   else if v >= 0.0 then some (Int.ofNat v.toUInt64.toNat)
   else some (-(Int.ofNat (-v).toUInt64.toNat))
 
+/-- f64 → i32 truncation toward zero (`fptosi … to i32` / MSL `int(f)`).
+    Refuses non-finite and anything outside `(-2³¹ − 1, 2³¹)`, where the
+    targets disagree (LLVM's result is poison). -/
+def truncToInt32? (v : Float) : Option Int := do
+  let n ← truncToInt? v
+  if -2147483648 ≤ n && n ≤ 2147483647 then some n else none
+
 def CVal.ty : CVal → ScalarType
-  | .f _ => .float | .i _ => .int | .b _ => .bool
+  | .f _ => .float | .i _ => .int | .b _ => .bool | .i32 _ => .int32
 
 /-- Coerce a constant between scalar types with the kernel's exact
-    semantics (fptosi truncation, sitofp nearest, truthiness). `none`
-    means "don't fold" (e.g. non-finite float→int). -/
+    semantics (fptosi truncation, sitofp nearest, truthiness, `int → int32`
+    keeps the low 32 bits, `int32 → int` sign-extends). `none` means "don't
+    fold" (e.g. non-finite float→int). -/
 def CVal.coerce? : CVal → ScalarType → Option CVal
   | v, t =>
     if v.ty == t then some v else
     match v, t with
     | .f x, .int  => (truncToInt? x).map .i
+    | .f x, .int32 => (truncToInt32? x).map .i32
     | .f x, .bool => some (.b (x != 0.0))
     | .i n, .float => some (.f (Float.ofInt n))
+    | .i n, .int32 => some (.i32 (wrap32 n))
     | .i n, .bool => some (.b (n != 0))
+    | .i32 n, .float => some (.f (Float.ofInt n))
+    | .i32 n, .int => some (.i n)
+    | .i32 n, .bool => some (.b (n != 0))
     | .b v, .float => some (.f (if v then 1.0 else 0.0))
     | .b v, .int  => some (.i (if v then 1 else 0))
+    | .b v, .int32 => some (.i32 (if v then 1 else 0))
     | v, _ => some v
 
 /-- Fold one op over constant args, mirroring `emitOp`'s runtime
     semantics exactly: float math in f64 (what the CPU kernel computes),
-    int math wrapped to i64, comparisons dispatched int-if-either-int,
-    div/mod zero-guards, fptosi truncation. `none` = "don't fold" —
-    either the tag is unfoldable (Ldexp/FloatExponent bit tricks stay
-    runtime) or a value refuses (non-finite → int). -/
+    int math wrapped to i64 and int32 math to i32, comparisons dispatched
+    int-if-either-integer, div/mod zero-guards, fptosi truncation. `none` =
+    "don't fold" — either the tag is unfoldable (Ldexp/FloatExponent bit
+    tricks stay runtime) or a value refuses (non-finite → int, a shift amount
+    outside the word, the one i32 quotient that overflows). -/
 def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option CVal := do
   let aF (i : Nat) : Option Float := do
     match (← args[i]?).coerce? .float with | some (.f x) => some x | _ => none
   let aI (i : Nat) : Option Int := do
     match (← args[i]?).coerce? .int with | some (.i n) => some n | _ => none
+  let aI32 (i : Nat) : Option Int := do
+    match (← args[i]?).coerce? .int32 with | some (.i32 n) => some n | _ => none
   let aB (i : Nat) : Option Bool := do
     match (← args[i]?).coerce? .bool with | some (.b v) => some v | _ => none
   let isInt := resultType == .int
+  let isI32 := resultType == .int32
+  let isIntegerTy (v : CVal) : Bool := v.ty == .int || v.ty == .int32
   let eitherInt :=
-    (((args[0]?).map (·.ty == .int)).getD false ||
-     ((args[1]?).map (·.ty == .int)).getD false)
-  -- int compare path coerces BOTH to int (mirrors argAs .int)
+    (((args[0]?).map isIntegerTy).getD false ||
+     ((args[1]?).map isIntegerTy).getD false)
+  -- int compare path coerces BOTH to int (mirrors argAs .int); an int32
+  -- operand sign-extends, so its order is its value's
   let cmpInt (p : Int → Int → Bool) : Option CVal := do pure (.b (p (← aI 0) (← aI 1)))
   let cmpFlt (p : Float → Float → Bool) : Option CVal := do pure (.b (p (← aF 0) (← aF 1)))
+  -- an i32 quotient or remainder: zero-guarded like i64's. `INT32_MIN / -1`
+  -- and `INT32_MIN % -1` have no defined runtime result (LLVM's `sdiv`/`srem`
+  -- are poison there), so they are not folded.
+  let quot32 (q : Int → Int → Int) : Option CVal := do
+    let a ← aI32 0; let b ← aI32 1
+    if b == 0 then pure (.i32 0)
+    else if a == -2147483648 && b == -1 then none
+    else pure (.i32 (q a b))
   let some op := Tropical.Plan.PlanOp.ofString? tag | none
   match op with
   | .add =>
-    if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a + b)))
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (wrap32 (a + b)))
+    else if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a + b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a + b))
   | .sub =>
-    if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a - b)))
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (wrap32 (a - b)))
+    else if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a - b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a - b))
   | .mul =>
-    if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a * b)))
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (wrap32 (a * b)))
+    else if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a * b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a * b))
   | .div =>
-    if isInt then do
+    if isI32 then quot32 Int.tdiv
+    else if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tdiv a b)))
     else do
       let a ← aF 0; let b ← aF 1
       pure (.f (if b == 0.0 then 0.0 else a / b))
   | .mod =>
-    if isInt then do
+    if isI32 then quot32 Int.tmod
+    else if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tmod a b)))
     else do
       let a ← aF 0; let b ← aF 1
       pure (.f (if b == 0.0 then 0.0 else a - (a / b).floor * b))
   | .floorDiv =>
-    if isInt then do
+    if isI32 then quot32 Int.tdiv
+    else if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tdiv a b)))
     else do
@@ -130,24 +179,37 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
   | .notEqual  => if eitherInt then cmpInt (fun a b => a != b) else cmpFlt (fun a b => a != b)
   | .and => do let a ← aB 0; let b ← aB 1; pure (.b (a && b))
   | .or  => do let a ← aB 0; let b ← aB 1; pure (.b (a || b))
-  | .bitAnd => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· &&& ·) a b))
-  | .mulLo32 => do
-    let a ← aI 0; let b ← aI 1
-    let p := (a * b) % 4294967296
-    pure (.i (if p ≥ 2147483648 then p - 4294967296 else p))
-  | .bitOr  => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ||| ·) a b))
-  | .bitXor => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ^^^ ·) a b))
-  | .lshift => do
-    let a ← aI 0; let sh ← aI 1
-    if sh < 0 || sh > 63 then none else pure (.i (wrap64 (a <<< sh.toNat)))
-  | .rshift => do
-    let a ← aI 0; let sh ← aI 1
-    if sh < 0 || sh > 63 then none else pure (.i (a >>> sh.toNat))  -- Int >>> is arithmetic (floor)
+  | .bitAnd =>
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (bit32 (· &&& ·) a b))
+    else do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· &&& ·) a b))
+  | .bitOr =>
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (bit32 (· ||| ·) a b))
+    else do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ||| ·) a b))
+  | .bitXor =>
+    if isI32 then do let a ← aI32 0; let b ← aI32 1; pure (.i32 (bit32 (· ^^^ ·) a b))
+    else do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ^^^ ·) a b))
+  | .lshift =>
+    if isI32 then do
+      let a ← aI32 0; let sh ← aI32 1
+      if sh < 0 || sh > 31 then none else pure (.i32 (wrap32 (a <<< sh.toNat)))
+    else do
+      let a ← aI 0; let sh ← aI 1
+      if sh < 0 || sh > 63 then none else pure (.i (wrap64 (a <<< sh.toNat)))
+  | .rshift =>
+    if isI32 then do
+      let a ← aI32 0; let sh ← aI32 1
+      if sh < 0 || sh > 31 then none else pure (.i32 (a >>> sh.toNat))
+    else do
+      let a ← aI 0; let sh ← aI 1
+      if sh < 0 || sh > 63 then none else pure (.i (a >>> sh.toNat))  -- Int >>> is arithmetic (floor)
   | .neg =>
-    if isInt then do let v ← aI 0; pure (.i (wrap64 (-v)))
+    if isI32 then do let v ← aI32 0; pure (.i32 (wrap32 (-v)))
+    else if isInt then do let v ← aI 0; pure (.i (wrap64 (-v)))
     else do let v ← aF 0; pure (.f (-v))
   | .abs =>
-    if isInt then do
+    if isI32 then do
+      let v ← aI32 0; pure (.i32 (if v < 0 then wrap32 (-v) else v))
+    else if isInt then do
       let v ← aI 0; pure (.i (if v < 0 then wrap64 (-v) else v))
     else do let v ← aF 0; pure (.f v.abs)
   | .sqrt  => do let v ← aF 0; pure (.f v.sqrt)
@@ -158,13 +220,21 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
     match ← args[0]? with
     | .b v => pure (.b (!v))
     | .i n => pure (.b (n == 0))
+    | .i32 n => pure (.b (n == 0))
     | .f x => pure (.b (x == 0.0))
-  | .bitNot => do let v ← aI 0; pure (.i (bit64 (· ^^^ ·) v (-1)))
+  | .bitNot =>
+    if isI32 then do let v ← aI32 0; pure (.i32 (bit32 (· ^^^ ·) v (-1)))
+    else do let v ← aI 0; pure (.i (bit64 (· ^^^ ·) v (-1)))
   | .toInt   => do (← args[0]?).coerce? .int
+  | .toInt32 => do (← args[0]?).coerce? .int32
   | .toBool  => do (← args[0]?).coerce? .bool
   | .toFloat => do (← args[0]?).coerce? .float
   | .clamp =>
-    if isInt then do
+    if isI32 then do
+      let v ← aI32 0; let lo ← aI32 1; let hi ← aI32 2
+      let lc := if v > lo then v else lo
+      pure (.i32 (if lc < hi then lc else hi))
+    else if isInt then do
       let v ← aI 0; let lo ← aI 1; let hi ← aI 2
       let lc := if v > lo then v else lo
       pure (.i (if lc < hi then lc else hi))
@@ -176,6 +246,7 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
     let cond ← match ← args[0]? with
       | .b v => some v
       | .i n => some (n != 0)
+      | .i32 n => some (n != 0)
       | .f x => some (x != 0.0)
     let v ← if cond then args[1]? else args[2]?
     v.coerce? resultType

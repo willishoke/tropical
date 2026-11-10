@@ -90,7 +90,6 @@ def planOpOfBinary : BinaryOpTag → PlanOp
   | .lshift => .lshift | .rshift => .rshift
   | .and => .and | .or => .or
   | .ldexp => .ldexp
-  | .mulLo32 => .mulLo32
 
 /-- Lift the IR unary tag into the plan-op signature. -/
 def planOpOfUnary : UnaryOpTag → PlanOp
@@ -99,6 +98,7 @@ def planOpOfUnary : UnaryOpTag → PlanOp
   | .not => .not | .bitNot => .bitNot
   | .floatExponent => .floatExponent
   | .toInt => .toInt | .toBool => .toBool | .toFloat => .toFloat
+  | .toInt32 => .toInt32
 
 -- ─────────────────────────────────────────────────────────────
 -- Slot tables
@@ -257,6 +257,15 @@ private def resolveNumericLiteralType (n : JsonNumber) (expected : Option Scalar
     unless jsIsInteger n do
       throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to int. Wrap the source in to_int() to narrow explicitly."
     pure .int
+  | some .int32 =>
+    -- An int32 literal is a value of ℤ/2³² written in its signed range; a
+    -- bit pattern above 2³¹ − 1 is spelled as its negative representative.
+    unless jsIsInteger n do
+      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to int32. Wrap the source in toInt32 to narrow explicitly."
+    let (m, _) := normNum n
+    unless -2147483648 ≤ m && m ≤ 2147483647 do
+      throw s!"Lossy conversion: literal {jsNumString n} is outside int32's range [-2147483648, 2147483647]. Spell the bit pattern as its signed value."
+    pure .int32
   | some .bool =>
     unless jsIsZeroOrOne n do
       throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to bool. Wrap the source in to_bool() to narrow explicitly."
@@ -328,6 +337,17 @@ private def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
     pure (.scalar (.reg dst rt) rt)
   | r => pure r
 
+/-- Is `id` a bare numeric literal? Such a literal takes its sort from its
+    context, so next to an `int32` operand it is an `int32` constant (the
+    rule `compileBinary`/`compileTernary` apply after the operands compile). -/
+private def isNumLit (arena : ExprArena) (id : ExprId) : Bool :=
+  match arena.deref id with
+  | some (.num _) => true
+  | _ => false
+
+private def isInt32Scalar (r : CompileResult) : Bool :=
+  !r.isArray && r.scalarType == .int32
+
 /- The arena is a PARAMETER of the walk, not emitter state: nothing
    below can intern, so the graph being compiled is frozen for the
    whole traversal (the one synthesized node — the port-default `0` —
@@ -352,11 +372,23 @@ def compileNode (arena : ExprArena) (hw : arena.wf = true) (id : ExprId)
     let key := s!"{id.idx}:{expectedKey expected}"
     if let some r := (← get).memo.get? key then
       return r
+    -- A node that compiles to int32 under an expectation other than int32
+    -- gets that sort from an int32 leaf, not from the expectation (literals
+    -- beside an int32 operand are int32 whatever the context; the operands
+    -- of a cast or comparison carry their own), so it compiles to the same
+    -- instructions under every expectation and one copy serves them all.
+    -- Under an int32 expectation a literal-only subtree is int32 too, so
+    -- only results compiled under another expectation are shared.
+    let key32 := s!"{id.idx}:*int32"
+    if let some r := (← get).memo.get? key32 then
+      return r
     let st ← get
     let r ← withStage (some (Staging.stageOf arena st.stageCtx id))
       (compileNodeUncached arena hw id.idx node
         (ExprArena.forall_children_lt hw hd) expected)
     modify fun s => { s with memo := s.memo.insert key r }
+    if isInt32Scalar r && expected != some .int32 then
+      modify fun s => { s with memo := s.memo.insert key32 r }
     return r
 termination_by (id.idx, 2)
 
@@ -432,6 +464,8 @@ private def compilePack (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
   let slot ← allocArraySlot size
   let args ← elements.attach.mapM fun ⟨el, _⟩ => do
     let r ← compileNode arena hw el expected
+    if isInt32Scalar r then
+      throw "emit_resolved: an int32 array element; arrays hold float elements, so convert explicitly (toFloat)"
     pure (if r.isArray then NOperand.const (0 : Nat) .float else r.op)
   emit (Tropical.Plan.instrPack slot args)
   pure (.array (.arrayReg slot) size .float)
@@ -444,7 +478,7 @@ private def compileBinary (arena : ExprArena) (hw : arena.wf = true) (bound : Na
     (expected : Option ScalarType) : EmitM CompileResult := do
   let propagated := if expected == some .bool then none else expected
   let argExpected : Option ScalarType :=
-    if op.isBitwise then some .int
+    if op.isBitwise then (if expected == some .int32 then some .int32 else some .int)
     else if op.isComparison then none
     else propagated
   let l ← compileNode arena hw lhs argExpected
@@ -453,10 +487,17 @@ private def compileBinary (arena : ExprArena) (hw : arena.wf = true) (bound : Na
       if l.isArray then some .float
       else if l.scalarType == .bool then none
       else some l.scalarType
+    else if isInt32Scalar l then some .int32
     else argExpected
   let r ← compileNode arena hw rhs secondExpected
+  -- A literal on the left of an int32 operand is an int32 constant too.
+  let l ← if isInt32Scalar r && !isInt32Scalar l && isNumLit arena lhs then
+      compileNode arena hw lhs (some .int32)
+    else pure l
   let l ← unboxIfUnit l
   let r ← unboxIfUnit r
+  if let some msg := op.kindMix? #[l.scalarType, r.scalarType] then
+    throw s!"emit_resolved: {msg}"
   let rt := op.resultType #[l.scalarType, r.scalarType]
   match l, r with
   | .scalar lop _, .scalar rop _ =>
@@ -480,14 +521,17 @@ private def compileUnary (arena : ExprArena) (hw : arena.wf = true) (bound : Nat
   let argExpected : Option ScalarType :=
     if op.isTranscendental then none
     else if op.isComparison then none
-    else if op == .bitNot then some .int
+    else if op == .bitNot then (if expected == some .int32 then some .int32 else some .int)
     -- `ToInt` narrows its argument *from* float; it must not propagate an
     -- outer `int` expectation onto a float source (e.g. `toInt(f0 * 2.414…)`
     -- where the result is used in an int context). Leave the arg unconstrained.
-    else if op == .toInt then none
+    -- `ToInt32` likewise: its argument keeps its own sort.
+    else if op == .toInt || op == .toInt32 then none
     else expected
   let a ← compileNode arena hw arg argExpected
   let a ← unboxIfUnit a
+  if let some msg := op.kindMix? #[a.scalarType] then
+    throw s!"emit_resolved: {msg}"
   let rt := op.resultType #[a.scalarType]
   match a with
   | .scalar aop _ =>
@@ -510,9 +554,21 @@ private def compileTernary (arena : ExprArena) (hw : arena.wf = true) (bound : N
   let a ← compileNode arena hw n1 condExpected
   let b ← compileNode arena hw n2 armExpected
   let c ← compileNode arena hw n3 armExpected
+  -- Literals among the value operands (clamp: all three; select: the arms)
+  -- of an int32 operand are int32 constants.
+  let valueA := op != .select
+  let anyI32 := (valueA && isInt32Scalar a) || isInt32Scalar b || isInt32Scalar c
+  let a ← if anyI32 && valueA && !isInt32Scalar a && isNumLit arena n1 then
+      compileNode arena hw n1 (some .int32) else pure a
+  let b ← if anyI32 && !isInt32Scalar b && isNumLit arena n2 then
+      compileNode arena hw n2 (some .int32) else pure b
+  let c ← if anyI32 && !isInt32Scalar c && isNumLit arena n3 then
+      compileNode arena hw n3 (some .int32) else pure c
   let a ← unboxIfUnit a
   let b ← unboxIfUnit b
   let c ← unboxIfUnit c
+  if let some msg := op.kindMix? #[a.scalarType, b.scalarType, c.scalarType] then
+    throw s!"emit_resolved: {msg}"
   let rt := op.resultType #[a.scalarType, b.scalarType, c.scalarType]
   if !a.isArray && !b.isArray && !c.isArray then
     let dst ← allocReg
@@ -678,6 +734,8 @@ private def compileSetElement (arena : ExprArena) (hw : arena.wf = true) (bound 
   let arr ← compileNode arena hw arrNode
   let idx ← compileNode arena hw idxNode
   let val ← compileNode arena hw valNode
+  if isInt32Scalar val then
+    throw "emit_resolved: an int32 array element; arrays hold float elements, so convert explicitly (toFloat)"
   match arr with
   | .scalar .. =>
     let size := 1

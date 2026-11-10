@@ -67,15 +67,23 @@ private def arrayDst? : DstSlot → Option Nat
 private def planOpArity : PlanOp → Nat
   | .select | .clamp => 3
   | .neg | .abs | .sqrt | .floor | .ceil | .round
-  | .not | .bitNot | .floatExponent | .toInt | .toBool | .toFloat => 1
+  | .not | .bitNot | .floatExponent | .toInt | .toInt32 | .toBool | .toFloat => 1
   | _ => 2
+
+/-- The instruction's result sort is the one its op infers from its operand
+    sorts, and the operands do not mix `int32` with `int` or `float`
+    (`PlanOp.kindMix?`): a hand-written plan cannot ask a backend for the
+    implicit crossing the compiler refuses. -/
+private def wellKinded (op : PlanOp) (argTypes : Array ScalarType)
+    (resultType : ScalarType) : Bool :=
+  resultType == op.resultType argTypes && (op.kindMix? argTypes).isNone
 
 private def scalarOpWellFormed (plan : FlatPlan) (frames : List RegionFrame)
     (instr : NInstr) (op : PlanOp) : Bool :=
   scalarDstWellFormed plan instr.dst
     && instr.args.size == planOpArity op
     && instr.args.all (scalarOperandWellFormed plan frames)
-    && instr.resultType == op.resultType (instr.args.filterMap operandScalarType?)
+    && wellKinded op (instr.args.filterMap operandScalarType?) instr.resultType
 
 private def elementwiseOpWellFormed (plan : FlatPlan)
     (frames : List RegionFrame) (instr : NInstr) (op : PlanOp)
@@ -94,7 +102,7 @@ private def elementwiseOpWellFormed (plan : FlatPlan)
               && instr.loopCount <= (plan.arraySlotSizes[slot]?.getD 0)
         | _ => false
       else stride == 0 && scalarOperandWellFormed plan frames operand
-    && instr.resultType == op.resultType (instr.args.filterMap operandScalarType?)
+    && wellKinded op (instr.args.filterMap operandScalarType?) instr.resultType
 
 private def smallInstrWellFormed (plan : FlatPlan)
     (frames : List RegionFrame) (instr : NInstr) : Bool :=

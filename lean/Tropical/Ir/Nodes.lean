@@ -94,8 +94,6 @@ inductive BinaryOpTag where
   | and | or
   | bitAnd | bitOr | bitXor | lshift | rshift
   | floorDiv | ldexp
-  /-- `a · b` modulo 2³², sign-extended to the int rail: a 32-bit multiply. -/
-  | mulLo32
 deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 def BinaryOpTag.wire : BinaryOpTag → String
@@ -105,7 +103,7 @@ def BinaryOpTag.wire : BinaryOpTag → String
   | .and => "and" | .or => "or"
   | .bitAnd => "bitAnd" | .bitOr => "bitOr" | .bitXor => "bitXor"
   | .lshift => "lshift" | .rshift => "rshift"
-  | .floorDiv => "floorDiv" | .ldexp => "ldexp" | .mulLo32 => "mulLo32"
+  | .floorDiv => "floorDiv" | .ldexp => "ldexp"
 
 def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "add" => some .add | "sub" => some .sub | "mul" => some .mul
@@ -115,7 +113,7 @@ def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "and" => some .and | "or" => some .or
   | "bitAnd" => some .bitAnd | "bitOr" => some .bitOr | "bitXor" => some .bitXor
   | "lshift" => some .lshift | "rshift" => some .rshift
-  | "floorDiv" => some .floorDiv | "ldexp" => some .ldexp | "mulLo32" => some .mulLo32
+  | "floorDiv" => some .floorDiv | "ldexp" => some .ldexp
   | _ => none
 
 theorem BinaryOpTag.ofWire_wire (t : BinaryOpTag) :
@@ -126,6 +124,8 @@ inductive UnaryOpTag where
   | neg | not | bitNot
   | sqrt | abs | floor | ceil | round
   | floatExponent | toInt | toBool | toFloat
+  /-- To `int32`: the low 32 bits of an `int`, `float` truncated toward zero. -/
+  | toInt32
 deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 def UnaryOpTag.wire : UnaryOpTag → String
@@ -133,7 +133,7 @@ def UnaryOpTag.wire : UnaryOpTag → String
   | .sqrt => "sqrt" | .abs => "abs" | .floor => "floor"
   | .ceil => "ceil" | .round => "round"
   | .floatExponent => "floatExponent" | .toInt => "toInt"
-  | .toBool => "toBool" | .toFloat => "toFloat"
+  | .toBool => "toBool" | .toFloat => "toFloat" | .toInt32 => "toInt32"
 
 def UnaryOpTag.ofWire? : String → Option UnaryOpTag
   | "neg" => some .neg | "not" => some .not | "bitNot" => some .bitNot
@@ -141,6 +141,7 @@ def UnaryOpTag.ofWire? : String → Option UnaryOpTag
   | "ceil" => some .ceil | "round" => some .round
   | "floatExponent" => some .floatExponent | "toInt" => some .toInt
   | "toBool" => some .toBool | "toFloat" => some .toFloat
+  | "toInt32" => some .toInt32
   | _ => none
 
 theorem UnaryOpTag.ofWire_wire (t : UnaryOpTag) :
