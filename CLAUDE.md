@@ -209,10 +209,13 @@ tropical_plan_7 / FlatPlan
   └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
 ```
 
-The JIT uses f64 values plus i64 rails and is the native reference and scope
-path. WebAssembly shares the LLVM f64/i64 semantics. Metal uses an f32 value
-path plus the exact i64 clock rail; on Metal sessions the JIT remains
-dual-loaded for `render_window` and reference comparisons.
+The JIT uses f64 values plus exact integer rails, `int` (i64) and `int32`
+(i32, two's complement, wrapping), and is the native reference and scope
+path. WebAssembly shares the LLVM f64/i64/i32 semantics. Metal uses an f32
+value path plus the same exact `int` and `int32` kinds; on Metal sessions the
+JIT remains dual-loaded for `render_window` and reference comparisons.
+Integer widths are meaning and hold on every target; `int32` never mixes with
+`int` or `float` without an explicit cast (`toInt32`, `toInt`, `toFloat`).
 
 `NumericProgramParser` is now a manifest reader. Lean owns code generation:
 the C++ runtime receives textual LLVM plus plan metadata, compiles the text, and

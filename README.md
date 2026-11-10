@@ -80,9 +80,9 @@ conditions, machines, and percentiles live in the
 
 | Target | Numeric regime | Role |
 |---|---|---|
-| LLVM → ORC JIT | f64 values plus i64 rails | native reference, random-access scopes, portable native audio |
-| LLVM → wasm32 | shared LLVM f64/i64 semantics | precompiled browser player |
-| MSL → Metal | f32 values plus exact i64 clock rail | heavy live modal audio on supported Apple builds |
+| LLVM → ORC JIT | f64 values plus i64 and i32 rails | native reference, random-access scopes, portable native audio |
+| LLVM → wasm32 | shared LLVM f64/i64/i32 semantics | precompiled browser player |
+| MSL → Metal | f32 values plus exact i64 and i32 rails | heavy live modal audio on supported Apple builds |
 
 Metal-enabled sessions dual-load the JIT artifact: a dedicated worker renders
 exact-epoch Metal tiles while the audio callback consumes prepared slices;

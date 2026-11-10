@@ -372,7 +372,7 @@ module). Beside the object it writes `k.o.manifest.json`: the
 symbol, N, the per-port layout and format, and the numeric contract.
 
 **Numeric contract.** IEEE binary64 for float values, two's-complement
-wrapping i64 for ints, round-to-nearest-even, no FP contraction and no
+wrapping i64 for `int` and i32 for `int32`, round-to-nearest-even, no FP contraction and no
 fast-math. `EmitLlvm` writes no `fast`/`contract`/`afn` flags and no
 `llvm.fmuladd`, and the toolchain keeps `AllowFPOpFusion = Standard`, so
 no FMA is ever formed. Removing unrolling and vectorization changes no
@@ -406,13 +406,15 @@ SECTIONS {
 ```
 
 **The kernel.** `FixedSinOscQ15` is `FixedSinOsc` for 32-bit integer
-hardware. Its DDS phase on ℤ/2³² (`phaseQ32Lo`) is bit-identical to
-`FixedSinOsc`'s and uses only 32-bit products: the whole-sample product is
-wanted mod 2³², which is the low word that `MULS` computes, and the
-fraction's product is split at bit 16 of the increment. The sine
-(`fixedSinQ15Sig`) rounds the phase to 16 bits, folds it to a signed quarter
-turn and evaluates an odd degree-7 polynomial in Horner form, with 16-bit
-operands, 32-bit products and rounding shifts. The output is an int in
+hardware, written in `int32`. Its DDS phase on ℤ/2³² (`phaseQ32`) is the
+same residue as `FixedSinOsc`'s and uses only 32-bit products: the
+whole-sample product is wanted mod 2³², which is the low word that `MULS`
+computes, and the fraction's product is split at bit 16 of the increment.
+The sine (`fixedSinQ15Sig`) rounds the phase to 16 bits, folds it to a
+signed quarter turn and evaluates an odd degree-7 polynomial in Horner form,
+with 16-bit operands, 32-bit products and rounding shifts. Past the phase
+rounding no intermediate exceeds 2²⁹ in magnitude (checked over all 2¹⁶
+rounded phases), so nothing there wraps. The output is an `int32` in
 [-32767, 32767] that means `out / 32768` (Q1.15 in an i32; it also fits an
 i16). Error, measured exhaustively over all 2¹⁶ rounded phases: 1.63 LSB
 against `32768 sin(2π h/2¹⁶)`. Rounding the phase to 16 bits adds at most
@@ -420,13 +422,13 @@ against `32768 sin(2π h/2¹⁶)`. Rounding the phase to 16 bits adds at most
 3.2 LSB (9.8e-5). The measured worst case over 65 536 frames is 2.67 LSB.
 
 On the M0+ table (ALU and `MULS` 1 cycle, loads and stores 2, taken branch
-2, `BL` 3) the hot loop is 102 instructions, 8 of them `MULS`, and takes
-118–122 cycles per frame. At N = 16 a call costs at most 1 989 cycles, of
-which 37 are prologue and epilogue. That is about 9% of a 1 333-cycle
-sample budget at 64 MHz and 48 kHz. Flash is 260 bytes for
-`tropical_kernel`. The `_argv` thunk inlines a second copy (264 bytes),
-which `--gc-sections` drops when nothing references it. Stack is 32 bytes,
-and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
+2, `BL` 3) the hot loop is 75 instructions, 8 of them `MULS`, and takes
+90–93 cycles per frame (118–122 when the int rail was i64; see "The `int32`
+kind" below). At N = 16 a call costs at most 1 521 cycles, of which 33 are
+prologue and epilogue. That is about 7% of a 1 333-cycle sample budget at
+64 MHz and 48 kHz. Flash is 200 bytes for `tropical_kernel`. The `_argv`
+thunk inlines a second copy (204 bytes), which `--gc-sections` drops when
+nothing references it. Stack is 28 bytes, and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
 soft-float helpers. The host object matches the JIT sample for sample over
 65 536 frames, and also at τ = 2⁴⁰ samples. The wasm32 object, linked with
 `wasm-ld` and run in Bun, matches the host object over the same 65 536
@@ -442,19 +444,62 @@ products are only wanted mod 2³².
 
 **What the spike changed in the core.**
 
-- `mulLo32` is a new op: `a · b` mod 2³², sign-extended onto the int rail.
-  LLVM does not narrow `(a·b << 32) >> 32` over i64 `mul` on thumbv6m. It
-  calls `__muldi3`, and the disassembly showed that before the op existed.
-  The op is written as `trunc`/`mul i32`/`sext` (EmitMsl:
-  `(long)(int)((uint)a * (uint)b)`).
-- Int values cross module slots raw. Slots were f64 in `EmitLlvm`, so a
+- The spike's `mulLo32` op (`a · b` mod 2³², sign-extended onto the i64
+  rail) is retired; the `int32` kind replaced it. LLVM does not narrow
+  `(a·b << 32) >> 32` over i64 `mul` on thumbv6m (it calls `__muldi3`), so a
+  32-bit multiply has to be spelled as one, and `int32`'s `mul` is.
+- Integer values cross module slots raw. Slots were f64 in `EmitLlvm`, so a
   wired clock went i64 → f64 → i64, which is a soft-float call pair per
   frame on a no-FPU target and loses bits past 2⁵³ rail units on any
-  target. An int write now also lands in `%islots`, and an int read of a
-  slot whose last emitted write was int loads that word. This is the rule
-  EmitMsl already follows.
+  target. An integer write now also lands in a lane of its own width,
+  `%islots` (i64) for `int` and `%i32slots` (i32) for `int32`, and an
+  integer read of a slot whose last emitted write was an integer loads that
+  word. This is the rule EmitMsl already follows (its slots are typed
+  locals, `long` and `int`). The `i32` output sink stores an `int32`
+  program output from its lane directly.
 - The port functions are `nounwind`, so the object does not reference an
   EH personality routine.
+
+**The `int32` kind (2026-11-10).** Integer widths are meaning; number
+formats for reals are a target's choice. `int32` is a scalar kind next to
+the 64-bit `int`: two's complement on ℤ/2³² on every target (`i32` in LLVM,
+`int` in MSL). Add, sub, mul, neg and left shift wrap modulo 2³²; right
+shift is arithmetic; division and remainder truncate toward zero and give 0
+for a zero divisor, as `int`'s do. Results that `int` leaves undefined stay
+undefined at the same places, scaled to the word: a shift amount outside
+[0, 31], and `INT32_MIN / -1` or `INT32_MIN % -1` (LLVM's result is poison).
+The constant folder declines to fold those; it folds everything else with
+`wrap32`, and `ConstFoldLaws` proves its int32 routes (ring laws for
+`wrap32`, `wrap32 ∘ wrap64 = wrap32`, the shift and quotient refusals, and
+the edge cases `INT32_MIN · -1`, `INT32_MAX + 1`, `2¹⁶ · 2¹⁶`).
+
+There is no implicit crossing. An op never takes an `int32` operand
+together with an `int` or `float` one, and a float-only op (`sqrt`,
+`floor`, …) takes no `int32`; the compiler refuses these
+(`PlanOp.kindMix?`) and `PlanWellFormed` refuses them in a hand-written
+plan.
+The casts are the crossings: `toInt32` keeps an `int`'s low 32 bits or
+truncates a `float` toward zero (undefined outside the i32 range, as
+`toInt` is outside i64's), `toInt` sign-extends, `toFloat` converts. `bool`
+promotes to `int32` as it does to `int`. A bare literal beside an `int32`
+operand, on either side, is an `int32` constant, and must lie in
+[-2³¹, 2³¹) (a bit pattern above 2³¹ − 1 is spelled as its negative); a
+compound literal expression does not adopt the kind, so it is written with
+`litI32` or after the `int32` operand. Builders author with `toInt32E` and
+`litI32`. The patch bay connects an `int32` output only to an `int32` input
+(and widens `bool` into one); any other connection spells the cast in the
+wire. Arrays hold floats, so an `int32` array element is refused.
+
+`int32` sits inside `tropical_plan_7` as an additive change
+(`compatibility-matrix.md`). The gates: `tropicaltest`'s `int32-model`
+renders every op through the JIT and compares it bit for bit with the same
+word computed on `Int` (across the input's 2³¹ wrap, and through a 32-bit
+slot from `FixedSinOscQ15`); `wasm_vs_jit` compares WASM and JIT bit for
+bit on `FixedSinOscQ15` and the op zoo; `metal_vs_jit` requires
+`FixedSinOscQ15` bit-identical on the GPU at τ = 0 and τ = 2⁴⁰. The
+rewrite left `FixedSinOscQ15`'s output bit-identical: three renders frozen
+before it (`tests/golden/embedded/`) still hold, and so do renders at
+τ = 10¹² samples.
 
 **Gaps left open (smallest honest fix for each).**
 
@@ -465,12 +510,12 @@ products are only wanted mod 2³².
    per-port element type for params (`i32` with a Q format, or `i64`) that
    the emitter loads as an int and that never enters an f64 slot. `Elem`
    already carries the vocabulary.
-2. *The int rail is i64.* `mulLo32` keeps the products 32-bit, but each
-   rounding shift after a product is still an i64 add-and-shift (about four
-   extra cycles), and the clamp and the loop counter are 64-bit. That costs
-   roughly 25 of the 120 cycles per frame. Fix: an `int32` scalar kind
-   (ℤ/2³², the phase's own ring), or emitter range analysis that narrows
-   values proven to fit 32 bits.
+2. *The int rail was i64.* Closed by the `int32` kind: the rounding shifts
+   and the clamp are now 32-bit (90–93 cycles per frame, from 118–122).
+   What stays 64-bit in the frame loop is the port's own: the frame counter
+   (`%s` is an i64; about 7 cycles of add-with-carry and compare) and the
+   read of τ, an i64 by type, whose sample count spans both words. A
+   32-bit counter when the static frame count fits would remove the first.
 3. *The output's Q format is a flag, not a type.* `--out-elem i32` needs
    one sink input at gain 1 and stores the int output directly. `Q1.15`
    comes from `--out-format`, not from the program. Fix: give int output

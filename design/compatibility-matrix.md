@@ -51,6 +51,20 @@ patch-bay front door.
 | Plan-4 compatibility CTest and fixture payload | acceptance evidence | deleted; useful program input remains |
 | Plan 6's integer `tick` time source | source 0 was the sample index | refused with a recompile message: Plan 7's source 0 is the fixed-point τ (Q48.16, `fixed-carrier.md`), so a Plan 6 document cannot be reinterpreted |
 | `tau:i64q32` kernel manifests | the Q32.32 clock rail (2026-10-28 to 2026-11-01, unreleased) | refused by the native and web manifest readers: τ's element type names the rail's format, and the rail is now Q48.16 (`i64q16`) |
+| the `MulLo32` scalar op | a 32-bit multiply on the i64 rail (2026-11-09 to 2026-11-10, unreleased) | refused as an unknown tag by the Lean decoder and the native manifest reader; the `int32` kind's `Mul` is the 32-bit multiply |
+
+## Additive changes within Plan 7
+
+A change stays inside `tropical_plan_7` when every existing document still
+decodes to the same function and a document using the new vocabulary is
+refused, not reinterpreted, by a reader that predates it. A change that
+gives an existing spelling a new meaning bumps the schema (Plan 6 → 7
+redefined source 0, so a Plan 6 document is refused).
+
+- `int32` scalar type and the `ToInt32` op (2026-11-10). A new
+  `scalar_type`/`result_type` value and a new tag; no existing spelling
+  changes meaning, and an older reader refuses both as unknown. Retiring
+  `MulLo32` at the same time is a refusal, not a reinterpretation.
 
 ## Required rejection behavior
 
