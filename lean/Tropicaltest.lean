@@ -256,6 +256,17 @@ def main (args : List String) : IO UInt32 := do
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
 
+  -- ── (f″) Embedded goldens (tests/golden/embedded/*.hash) ───────────────────
+  -- Integer-output programs for targets without an FPU (`FixedSinOscQ15`):
+  -- outputs are integers far outside the device bound, so these patches live
+  -- beside their hashes, not in `patches/` (the device-bound corpus).
+  IO.println "embedded goldens:"
+  for name in ← sortedNames "tests/golden/embedded" ".hash" do
+    let patchPath := s!"tests/golden/embedded/{name}.json"
+    if ← System.FilePath.pathExists patchPath then
+      total := total + 1
+      if !(← runGolden writeMode name patchPath s!"tests/golden/embedded/{name}.hash") then failed := failed + 1
+
   -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
   IO.println "device boundary (the safety class):"
   total := total + 1
