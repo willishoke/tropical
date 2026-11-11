@@ -675,10 +675,15 @@ def buildOpZoo (arena : Arena) : Except String (Arena × ProgramIdx) :=
 /-- The int32 coverage word: every int32 op at runtime, seeded from `x` so
     nothing folds — the wrapping ring ops (an LCG step, a shift into the sign
     bit, `-(x ∣ INT32_MIN)`, which is `INT32_MIN` itself at `x = 0`), the
-    arithmetic right shift of negative words, guarded division and remainder,
-    comparison and select, clamp, abs, bitNot, and the casts both ways
-    (`int` product truncated to its low word, `float` truncated toward zero).
-    `int32ZooModel` is the same word computed on `Int` with `wrap32`. -/
+    arithmetic right shift of negative words, division and remainder (by a
+    nonzero divisor, and by a RUNTIME divisor that is 0 for odd `x` and -1 for
+    even `x` over the numerator `x ∣ INT32_MIN`, so `INT32_MIN / -1` happens
+    at `x = 0`), shifts by a runtime amount in `[0, 63]` (reduced modulo 32),
+    comparison and select, clamp, abs, bitNot, and the casts both ways (`int`
+    product truncated to its low word, `float` truncated toward zero, and
+    `x · 2¹⁷` saturating for `|x| ≥ 2¹⁴`). `tropicaltest`'s `int32-model`
+    gate checks the JIT against the reference semantics
+    (`Semantics.Scalar.algebra`) on this word. -/
 def int32ZooWord (x : Sig) : BuildM Sig := do
   let lcg ← add (← mul x (← lit 1103515245)) (← lit 12345)
   let mixed ← binary .bitXor lcg (← rshift lcg (← lit 16))
@@ -692,6 +697,14 @@ def int32ZooWord (x : Sig) : BuildM Sig := do
   let inv ← unary .bitNot x
   let viaInt ← toInt32E (← mul (← toIntE lcg) (← litI 3000000000))
   let viaFloat ← toInt32E (← mul (← toFloatE x) (← lit 5 1))
+  -- the total edges, at runtime
+  let edgeNum ← bitOr x (← litI32 (-2147483648))
+  let edgeDiv ← sub (← bitAnd x (← lit 1)) (← lit 1)
+  let edgeQ ← div edgeNum edgeDiv
+  let edgeR ← binary .mod edgeNum edgeDiv
+  let edgeShl ← lshift lcg (← bitAnd x (← lit 63))
+  let edgeShr ← rshift edgeNum (← bitAnd (← rshift x (← lit 3)) (← lit 63))
+  let edgeSat ← toInt32E (← mul (← toFloatE x) (← lit 131072))
   let a ← binary .bitXor mixed high
   let b ← add a minned
   let c ← sub b quot
@@ -700,36 +713,12 @@ def int32ZooWord (x : Sig) : BuildM Sig := do
   let f ← binary .bitXor e ab
   let g ← add f inv
   let h ← binary .bitXor g viaInt
-  add h viaFloat
-
-/-- `int32ZooWord` on `Int`, through the constant folder's `wrap32`/`bit32`:
-    the reference the JIT's int32 lowering must reproduce bit for bit. -/
-def int32ZooModel (x : Int) : Int :=
-  let w := Tropical.Ir.wrap32
-  let b32 := Tropical.Ir.bit32
-  let lcg := w (w (x * 1103515245) + 12345)
-  let mixed := b32 (· ^^^ ·) lcg (lcg >>> 16)
-  let high := w (x <<< 27)
-  let minned := w (-(b32 (· ||| ·) x (-2147483648)))
-  let quot := Int.tdiv lcg (b32 (· ||| ·) (b32 (· &&& ·) x 7) 1)
-  let rem := Int.tmod lcg 1000
-  let sel : Int := if lcg < 0 then 3 else 5
-  let lc := if mixed > -1000000 then mixed else -1000000
-  let clamped := if lc < 1000000 then lc else 1000000
-  let v := w (x - 100)
-  let ab := if v < 0 then w (-v) else v
-  let inv := b32 (· ^^^ ·) x (-1)
-  let viaInt := w (Tropical.Ir.wrap64 (lcg * 3000000000))
-  let viaFloat := Int.tdiv x 2
-  let a := b32 (· ^^^ ·) mixed high
-  let b := w (a + minned)
-  let c := w (b - quot)
-  let d := b32 (· ^^^ ·) c rem
-  let e := w (d + w (clamped * sel))
-  let f := b32 (· ^^^ ·) e ab
-  let g := w (f + inv)
-  let h := b32 (· ^^^ ·) g viaInt
-  w (h + viaFloat)
+  let i ← add h viaFloat
+  let j ← binary .bitXor i edgeQ
+  let k ← add j edgeR
+  let l ← binary .bitXor k edgeShl
+  let m ← add l edgeShr
+  binary .bitXor m edgeSat
 
 /-- `Int32Zoo`: input `x : int32` (default: the sample index's low word),
     output `out = int32ZooWord x / 2³¹`, a float in `[-1, 1)`. Registered as a
@@ -743,6 +732,199 @@ def buildInt32Zoo (arena : Arena) : Except String (Arena × ProgramIdx) :=
     pure {
       inputs := #[{ name := "x", type? := some (.scalar .int32), defaultSig := some x0 }]
       assigns := #[(.port ⟨0⟩, out)] }
+
+/-! ### Integer edge values — the programs of the `int-edge` gate
+
+Each program computes every integer op of one sort on boundary operands, at
+runtime, and reads the result out exactly. Operand `j` of a pair comes from
+Pack tables of 16-bit pieces indexed by the frame (`(p₃ ≪ 48) ∣ … ∣ p₀`, so
+`INT64_MIN` and friends arrive exactly on every target, f32 Metal included),
+and a result leaves as four 16-bit pieces of its sign-extended 64-bit word,
+one per frame, which every target's output carries exactly. Frame
+`k = o·F + 4·p + q` is piece `q` of op `o` on pair `p` (`F = 4 · pairs`). -/
+
+/-- Boundary values of an integer sort. -/
+def intEdgeValues : ScalarKind → Array Int
+  | .int32 => #[-2147483648, 2147483647, -1, 0, 1, 2, -2, -2147483647, 65536, 46341]
+  | _ => #[-9223372036854775808, 9223372036854775807, -1, 0, 1, 2, -2,
+      -9223372036854775807, 2147483647, 4294967296]
+
+/-- Shift amounts around both widths, negative and past the word included. -/
+def intEdgeShifts : Array Int := #[-1, 0, 1, 31, 32, 33, 63, 64, 65]
+
+/-- Knuth's MMIX LCG on ℤ/2⁶⁴: the seeded random sample. -/
+def edgeLcg (s : Nat) : Nat :=
+  (s * 6364136223846793005 + 1442695040888963407) % 18446744073709551616
+
+/-- `count` words of a sort from the seed `seed` (signed, full range). -/
+def edgeRandomWords (k : ScalarKind) (seed count : Nat) : Array Int := Id.run do
+  let mut s := seed
+  let mut out := #[]
+  for _ in [0:count] do
+    s := edgeLcg s
+    let w : Int := if k == .int32 then Int.ofNat (s / 4294967296) - 2147483648
+      else Int.ofNat s - 9223372036854775808
+    out := out.push w
+  return out
+
+/-- The operand pairs of the arithmetic, bitwise and comparison ops: every
+    boundary value against every other (runtime zero and -1 divisors under
+    `MIN` included), then six seeded random pairs. -/
+def intEdgePairs (k : ScalarKind) : Array (Int × Int) :=
+  let v := intEdgeValues k
+  let r := edgeRandomWords k 0x7e57 12
+  v.flatMap (fun a => v.map (a, ·)) ++ (List.range 6).toArray.map fun i => (r[2*i]!, r[2*i+1]!)
+
+/-- The operand pairs of the shifts: every boundary value by every edge
+    amount, then sixteen random words by random amounts in `[-70, 70]`. -/
+def intEdgeShiftPairs (k : ScalarKind) : Array (Int × Int) :=
+  let v := intEdgeValues k
+  let r := edgeRandomWords k 0x5ee5 16
+  let amounts := (edgeRandomWords .int 0xa11 16).map fun w => w % 141 - 70
+  v.flatMap (fun a => intEdgeShifts.map (a, ·)) ++
+    (List.range 16).toArray.map fun i => (r[i]!, amounts[i]!)
+
+/-- The ops of the edge zoo for sort `k`: name, result kind, and the builder
+    over the pair `(a, b)` and the shift pair `(a₂, s)`. -/
+def intEdgeOps (k : ScalarKind) :
+    Array (String × ScalarKind × (Sig → Sig → Sig → Sig → BuildM Sig)) := #[
+  ("add", k, fun a b _ _ => add a b),
+  ("sub", k, fun a b _ _ => sub a b),
+  ("mul", k, fun a b _ _ => mul a b),
+  ("div", k, fun a b _ _ => div a b),
+  ("mod", k, fun a b _ _ => binary .mod a b),
+  ("floorDiv", k, fun a b _ _ => binary .floorDiv a b),
+  ("bitAnd", k, fun a b _ _ => bitAnd a b),
+  ("bitOr", k, fun a b _ _ => bitOr a b),
+  ("bitXor", k, fun a b _ _ => binary .bitXor a b),
+  ("lshift", k, fun _ _ a s => lshift a s),
+  ("rshift", k, fun _ _ a s => rshift a s),
+  ("less", .bool, fun a b _ _ => binary .lt a b),
+  ("lessEq", .bool, fun a b _ _ => binary .lte a b),
+  ("greater", .bool, fun a b _ _ => binary .gt a b),
+  ("greaterEq", .bool, fun a b _ _ => binary .gte a b),
+  ("equal", .bool, fun a b _ _ => binary .eq a b),
+  ("notEqual", .bool, fun a b _ _ => binary .neq a b),
+  ("neg", k, fun a _ _ _ => neg a),
+  ("abs", k, fun a _ _ _ => absE a),
+  ("bitNot", k, fun a _ _ _ => unary .bitNot a),
+  ("clamp", k, fun a b _ _ => do clampE a b (← neg b)),
+  ("select", k, fun a b _ _ => do selectE a b (← neg b)),
+  ("toBool", .bool, fun a _ _ _ => unary .toBool a),
+  ("not", .bool, fun a _ _ _ => unary .not a),
+  ("toFloat", .float, fun a _ _ _ => toFloatE a),
+  (if k == .int32 then "toInt" else "toInt32",
+    (if k == .int32 then .int else .int32),
+    fun a _ _ _ => if k == .int32 then toIntE a else toInt32E a)]
+
+/-- The 16-bit piece `i` of a word's two's-complement image. -/
+def edgePiece (v : Int) (i : Nat) : Nat :=
+  ((v % 18446744073709551616).toNat / (65536 ^ i)) % 65536
+
+/-- An operand of sort `k` read at pair index `p` from piece tables. -/
+def edgeOperand (k : ScalarKind) (vals : Array Int) (p : Sig) : BuildM Sig := do
+  let n := if k == .int32 then 2 else 4
+  let mut acc ← toIntE (← index (← arr (← vals.mapM fun v => lit (edgePiece v 0))) p)
+  for i in [1:n] do
+    let piece ← toIntE (← index (← arr (← vals.mapM fun v => lit (edgePiece v i))) p)
+    acc ← bitOr acc (← lshift piece (← lit (16 * i)))
+  if k == .int32 then toInt32E acc else pure acc
+
+/-- Piece `q` of a result of kind `kind`: a 16-bit piece of its sign-extended
+    64-bit word, or (a float result) the value itself at `q = 0`. -/
+def edgeReadout (kind : ScalarKind) (r q : Sig) : BuildM Sig := do
+  if kind == .float then
+    return ← selectE (← binary .eq q (← lit 0)) r (← lit 0)
+  let r64 ← if kind == .int then pure r else toIntE r
+  let piece (i : Nat) : BuildM Sig := do
+    toFloatE (← bitAnd (← rshift r64 (← lit (16 * i))) (← lit 65535))
+  selectE (← binary .eq q (← lit 0)) (← piece 0)
+    (← selectE (← binary .eq q (← lit 1)) (← piece 1)
+      (← selectE (← binary .eq q (← lit 2)) (← piece 2) (← piece 3)))
+
+/-- Frames per op of the edge program of sort `k`. -/
+def intEdgeFramesPerOp (k : ScalarKind) : Nat := 4 * (intEdgePairs k).size
+
+/-- The edge program's output: every op of `intEdgeOps k`, multiplexed by
+    the frame. The pair tables have one size (`intEdgePairs` and
+    `intEdgeShiftPairs` both hold 106). -/
+def intEdgeSig (k : ScalarKind) : BuildM Sig := do
+  let pairs := intEdgePairs k
+  let shiftPairs := intEdgeShiftPairs k
+  let fpo := intEdgeFramesPerOp k
+  -- `litI`: an int divisor, so the frame arithmetic is integer (a bare
+  -- literal beside an `int` under no expectation would be a float)
+  let t ← sampleIndex
+  let o ← div t (← litI fpo)
+  let r ← binary .mod t (← litI fpo)
+  let p ← rshift r (← lit 2)
+  let q ← bitAnd r (← lit 3)
+  let a ← edgeOperand k (pairs.map (·.1)) p
+  let b ← edgeOperand k (pairs.map (·.2)) p
+  let a2 ← edgeOperand k (shiftPairs.map (·.1)) p
+  let s ← edgeOperand k (shiftPairs.map (·.2)) p
+  let ops := intEdgeOps k
+  let mut out ← lit 0
+  for i' in [0:ops.size] do
+    let i := ops.size - 1 - i'
+    let (_, kind, build) := ops[i]!
+    let readout ← edgeReadout kind (← build a b a2 s) q
+    out ← selectE (← binary .eq o (← litI i)) readout out
+  pure out
+
+/-- `IntEdge64` / `IntEdge32`: the edge program of a sort, a float output. -/
+def buildIntEdge (k : ScalarKind) (arena : Arena) : Except String (Arena × ProgramIdx) :=
+  assemble arena (if k == .int32 then "IntEdge32" else "IntEdge64")
+      #[{ name := "out", type? := some (.scalar .float) }] #[] do
+    pure { assigns := #[(.port ⟨0⟩, ← intEdgeSig k)] }
+
+/-- The float inputs of the conversion program, as `lit mantissa exponent`
+    (value `mantissa · 10^-exponent`), each exact in f32 or saturating either
+    way, then the three specials by code (1 = +∞, 2 = -∞, 3 = NaN, built at
+    runtime from `10³⁰⁰²`, which is ∞ in f64 and f32 alike). -/
+def intEdgeFloats : Array (Int × Nat × Nat) := #[
+  (0, 0, 0), (5, 1, 0), (-5, 1, 0), (15, 1, 0), (-25, 1, 0),
+  (2147483648, 0, 0), (-2147483648, 0, 0), (-2147483904, 0, 0),
+  (4294967296, 0, 0), (1099511627776, 0, 0), (-1099511627776, 0, 0),
+  (4611686018427387904, 0, 0), (9223372036854775808, 0, 0),
+  (-9223372036854775808, 0, 0), (18446744073709551616, 0, 0),
+  ((10 : Int) ^ 30, 0, 0), (-(10 : Int) ^ 30, 0, 0), (12345675, 2, 0), (-775, 2, 0),
+  ((10 : Int) ^ 300, 0, 1), ((10 : Int) ^ 300, 0, 2), ((10 : Int) ^ 300, 0, 3)]
+
+/-- The conversion ops: `toInt` and `toInt32` of a float, saturating. -/
+def intEdgeConvOps : Array (String × ScalarKind) := #[("toInt", .int), ("toInt32", .int32)]
+
+def intEdgeConvFramesPerOp : Nat := 4 * intEdgeFloats.size
+
+def intEdgeConvSig : BuildM Sig := do
+  let fpo := intEdgeConvFramesPerOp
+  -- `litI`: an int divisor, so the frame arithmetic is integer (a bare
+  -- literal beside an `int` under no expectation would be a float)
+  let t ← sampleIndex
+  let o ← div t (← litI fpo)
+  let r ← binary .mod t (← litI fpo)
+  let p ← rshift r (← lit 2)
+  let q ← bitAnd r (← lit 3)
+  let f ← index (← arr (← intEdgeFloats.mapM fun (m, e, _) => lit m e)) p
+  let code ← index (← arr (← intEdgeFloats.mapM fun (_, _, c) => lit c)) p
+  let inf ← mul f f
+  let x ← selectE (← binary .eq code (← lit 1)) inf
+    (← selectE (← binary .eq code (← lit 2)) (← neg inf)
+      (← selectE (← binary .eq code (← lit 3)) (← sub inf inf) f))
+  let toI ← edgeReadout .int (← toIntE x) q
+  let toI32 ← edgeReadout .int32 (← toInt32E x) q
+  selectE (← binary .eq o (← litI 0)) toI
+    (← selectE (← binary .eq o (← litI 1)) toI32 (← lit 0))
+
+/-- `IntEdgeConv`: float → int and float → int32 on the edge floats. -/
+def buildIntEdgeConv (arena : Arena) : Except String (Arena × ProgramIdx) :=
+  assemble arena "IntEdgeConv" #[{ name := "out", type? := some (.scalar .float) }] #[] do
+    pure { assigns := #[(.port ⟨0⟩, ← intEdgeConvSig)] }
+
+/-- The edge programs, by registered name. -/
+def intEdgeFixtures : Array (String × (Arena → Except String (Arena × ProgramIdx))) := #[
+  ("IntEdge64", buildIntEdge .int), ("IntEdge32", buildIntEdge .int32),
+  ("IntEdgeConv", buildIntEdgeConv)]
 
 abbrev ModesM := BuildM (Array ModalMode)
 

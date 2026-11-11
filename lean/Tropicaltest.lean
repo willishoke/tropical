@@ -66,6 +66,12 @@ def arrowBlockGates : Nat := 106
 set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
+  if args.contains "--int-only" then
+    let a ← Tropical.Tropicaltest.Int32.runInt32Model
+    let b ← Tropical.Tropicaltest.Int32.runIntEdge
+    let c ← Tropical.Tropicaltest.Int32.runInt32Refusals
+    let d ← Tropical.Tropicaltest.Int32.runInt32WellKinded
+    return if a && b && c && d then 0 else 1
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--emitarrow-only" || args.contains "--arena-native-only" then
@@ -268,10 +274,13 @@ def main (args : List String) : IO UInt32 := do
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/embedded/{name}.hash") then failed := failed + 1
 
-  -- ── (f‴) The int32 scalar kind: JIT ≡ the Int model, refusals, plan kinds ──
-  IO.println "int32 scalar kind:"
+  -- ── (f‴) The integer kinds: JIT (and Metal) ≡ the reference semantics,
+  --        the edge-value differential, refusals, plan kinds ──
+  IO.println "integer kinds (int32, total integer semantics):"
   total := total + 1
   if !(← Tropical.Tropicaltest.Int32.runInt32Model) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Int32.runIntEdge) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.Int32.runInt32Refusals) then failed := failed + 1
   total := total + 1

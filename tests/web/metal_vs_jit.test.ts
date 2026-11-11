@@ -199,6 +199,34 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     expect(snr).toBeGreaterThan(135)
   })
 
+  // The integer edge-value programs (`--fixtures`; see wasm_vs_jit and
+  // tropicaltest's `int-edge`): every integer result is a 16-bit piece, exact
+  // in f32, so the GPU must match the JIT on every frame except the `toFloat`
+  // op's segment (op 24 of 26), whose float result is f32 on Metal.
+  for (const [program, frames, floatOp] of [
+    ['IntEdge64', 26 * 106 * 4, 24], ['IntEdge32', 26 * 106 * 4, 24],
+    ['IntEdgeConv', 2 * 22 * 4, -1]] as Array<[string, number, number]>) {
+    test(`${program} — integer edge values, bit-identical on the GPU`, () => {
+      const perOp = program === 'IntEdgeConv' ? 22 * 4 : 106 * 4
+      const patch = planFile(`${program}-patch`, JSON.stringify({
+        schema: 'tropical_program_2', name: `mvj_${program.toLowerCase()}`,
+        body: { op: 'block', decls: [{ op: 'instanceDecl', name: 'e', program, inputs: {} }],
+          assigns: [{ op: 'outputAssign', name: 'dac.out',
+                      expr: { op: 'ref', instance: 'e', output: 'out' } }] },
+      }))
+      const plan = planFile(program, compilePatch(patch, true))
+      const ref = render('render-bytes', plan, frames)
+      const gpu = render('render-metal', plan, frames)
+      let mismatches = 0
+      for (let i = 0; i < frames; i++) {
+        if (Math.floor(i / perOp) === floatOp) continue
+        if (gpu[i] !== ref[i]) mismatches++
+      }
+      console.log(`    ${program}: ${mismatches} integer-result mismatches over ${frames} frames`)
+      expect(mismatches).toBe(0)
+    })
+  }
+
   test('tz-flanger — warped reads, reduced phases', () => {
     gate('tz-flanger', 'web/patches/tz-flanger.json', 4096, 125)
   })

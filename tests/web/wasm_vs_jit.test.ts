@@ -206,6 +206,25 @@ function int32ZooProgram(wired: boolean): ProgramFile {
   }
 }
 
+// The integer edge-value programs (`IntEdge64`, `IntEdge32`, `IntEdgeConv`,
+// registered by `--fixtures`; `EmitArrow.intEdgeSig`): every `int` and `int32`
+// op on MIN, MAX, -1, 0, 1, runtime divisors 0 and -1, shift amounts past the
+// word, and NaN/±∞/out-of-range floats into the conversions, read out as exact
+// 16-bit pieces. `tropicaltest`'s `int-edge` gate holds the JIT to the
+// reference semantics on these programs; here WASM is held to the JIT bit for
+// bit (before the total semantics, the zero and MIN/-1 divisors trapped).
+// Frames: 26 ops × 106 pairs × 4 pieces, and 2 ops × 22 floats × 4 pieces.
+const INT_EDGE: Array<[string, number]> = [
+  ['IntEdge64', 26 * 106 * 4], ['IntEdge32', 26 * 106 * 4], ['IntEdgeConv', 2 * 22 * 4]]
+function intEdgeProgram(program: string): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: `eq_${program.toLowerCase()}`,
+    body: { op: 'block', decls: [{ op: 'instanceDecl', name: 'e', program, inputs: {} }],
+            assigns: [dacOut('e', 'out')] },
+  }
+}
+
 async function expectBitIdentical(name: string, prog: ProgramFile, N: number): Promise<void> {
   const wire = compileViaLean(prog)
   const nat = runNative(wire, N)
@@ -323,6 +342,12 @@ describe('wasm vs native JIT', () => {
   test('int32 op zoo, input wired from an int32 output (32-bit slot) — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('Int32Zoo ← FixedSinOscQ15', int32ZooProgram(true), 512)
   })
+
+  for (const [program, frames] of INT_EDGE) {
+    test(`${program} (integer edge values, total semantics) — WASM ≡ JIT bit for bit`, async () => {
+      await expectBitIdentical(program, intEdgeProgram(program), frames)
+    })
+  }
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
     const prog = opZooProgram()
