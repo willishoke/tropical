@@ -37,7 +37,13 @@ def liftIfNeeded : SessionM Unit := do
     let st ← get
     let counter := (st.nameCounters.get? "__wire").getD 0 + 1
     let synthName := s!"__wire_{counter}"
-    let lifted ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs with
+    -- an `int32` source output keeps its kind on the lifted input
+    let refKind (inst out : String) : Option Tropical.Parse.ScalarKind := do
+      let info ← st.findInstance? inst
+      let port ← info.progMeta.outputs.find? (·.name == out)
+      let k ← port.typeStr.bind Tropical.Parse.ScalarKind.ofWire?
+      if k == .int32 then some k else none
+    let lifted ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs refKind with
       | .error msg => internalError msg
       | .ok r => pure r
     -- The raw lifted program joins the store under its name — the RAW

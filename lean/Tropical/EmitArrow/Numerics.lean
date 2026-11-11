@@ -67,47 +67,41 @@ def fixedCosCycSig (phaseQ : Sig) : BuildM Sig := do
   let wrapped ← bitAnd shifted mask
   fixedSinCycSig wrapped
 
-/-- `a · b` reduced to its low 32 bits, sign-extended back to the int rail:
-    exactly the product a 32-bit `MULS` computes (the `mulLo32` op). It is an
-    op, not `(a·b << 32) >> 32` over i64 `mul`: LLVM does not narrow that
-    pattern on thumbv6m (it calls `__muldi3`), while the op emits
-    `trunc`/`mul i32`/`sext`. Equal to `a · b` whenever the product fits in a
-    signed 32-bit word; the Q15 datapaths below keep every product inside
-    that range. -/
-def mulLo32 (a b : Sig) : BuildM Sig := binary .mulLo32 a b
-
-/-- The DDS phase on ℤ/2³² with 32-bit products only: `inc · τ / clockOne`
-    mod 2³², bit-identical to `FixedSinOsc`'s phase. The whole-sample product
-    `inc · ⌊τ⌋` is wanted only modulo 2³² (its low word, one `MULS`). The
-    fraction's product `inc · frac >> 16` is split at bit 16 of the
-    increment, `inc = hi·2¹⁶ + lo`: `hi · frac` is again wanted mod 2³², and
-    `⌊lo · frac / 2¹⁶⌋ < 2¹⁶` is bits 16..31 of a product below 2³², so the
-    split is exact (floor of a sum whose first term is a multiple of 2¹⁶).
-    So every product is a `mulLo32`: the first two are wanted mod 2³² anyway,
-    and the third's bits 16..31 survive its sign extension and the 16-bit
-    mask. -/
-def phaseQ32Lo (inc offset clk : Sig) : BuildM Sig := do
+/-- The DDS phase on ℤ/2³², in `int32`: `inc · τ / clockOne` mod 2³², the
+    same residue as `FixedSinOsc`'s phase (its signed representative). The
+    32-bit word ops wrap modulo 2³², so each product is one 32×32→32
+    multiply. τ splits into the whole-sample count and the fraction
+    (`τ = whole·2¹⁶ + frac`); only `whole`'s low word matters, since
+    `inc · whole` is wanted mod 2³². The fraction's product `⌊inc · frac /
+    2¹⁶⌋` is split at bit 16 of the increment, `inc = hi·2¹⁶ + lo` with
+    `0 ≤ lo < 2¹⁶`: `hi · frac` is again wanted mod 2³² (so `hi`'s low word,
+    bits 16..47 of `inc`, is cast from the int rail, not from `inc`'s low
+    word), and `⌊lo · frac / 2¹⁶⌋ < 2¹⁶` is bits 16..31 of a product below
+    2³², recovered exactly by the arithmetic shift and the 16-bit mask. The
+    split is exact: the floor of a sum whose first term is an integer. `inc`
+    and `offset` are `int`s and loop-invariant; `clk` is the clock. -/
+def phaseQ32 (inc offset clk : Sig) : BuildM Sig := do
   let shift16 ← lit 16
   let mask16 ← lit 65535
-  let whole ← rshift clk (← clockFracLit)
-  let frac ← bitAnd clk (← clockFracMaskLit)
-  let incHi ← rshift inc shift16
-  let incLo ← bitAnd inc mask16
-  let pWhole ← mulLo32 inc whole
-  let pHi ← mulLo32 incHi frac
-  let pLo ← bitAnd (← rshift (← mulLo32 incLo frac) shift16) mask16
-  let acc ← add (← add (← add pWhole pHi) pLo) offset
-  bitAnd acc (← lit 4294967295)
+  let whole ← toInt32E (← rshift clk (← clockFracLit))
+  let frac ← toInt32E (← bitAnd clk (← clockFracMaskLit))
+  let incHi ← toInt32E (← rshift inc shift16)
+  let incLo ← toInt32E (← bitAnd inc mask16)
+  let pWhole ← mul (← toInt32E inc) whole
+  let pHi ← mul incHi frac
+  let pLo ← bitAnd (← rshift (← mul incLo frac) shift16) mask16
+  add (← add (← add pWhole pHi) pLo) (← toInt32E offset)
 
-/-- `sin(2π · phase / 2³²)` in Q1.15 (`1.0 = 32768`) from a Q0.32 phase, with
-    16-bit operands and 32-bit products only (every product below 2³¹ in
-    magnitude, so `mulLo32` is exact). The phase is rounded to 16 bits, folded
-    to a signed quarter turn `r ∈ [-2¹⁴, 2¹⁴]` with the half-turn's sign, and
-    an odd degree-7 polynomial in `x = r / 2¹⁴` is evaluated in Horner form
-    with round-to-nearest shifts (`z = x²` in Q14). Coefficients
+/-- `sin(2π · phase / 2³²)` in Q1.15 (`1.0 = 32768`) from an `int32` Q0.32
+    phase, entirely in `int32`. The phase is rounded to 16 bits, folded to a
+    signed quarter turn `r ∈ [-2¹⁴, 2¹⁴]` with the half-turn's sign, and an
+    odd degree-7 polynomial in `x = r / 2¹⁴` is evaluated in Horner form with
+    round-to-nearest shifts (`z = x²` in Q14). Coefficients
     `[51474, -21169, 2604, -141] / 32768` are the integer minimax fit of this
     exact datapath. The result is clamped to `[-32767, 32767]`, so it also
-    fits an `i16`.
+    fits an `i16`. Below the rounding (whose add wraps, as the phase does) no
+    intermediate exceeds 2²⁹ in magnitude, so nothing past it wraps (checked
+    exhaustively over the 2¹⁶ rounded phases).
 
     Error bound (exhaustive over all 2¹⁶ rounded phases): at most 1.63 LSB
     (`2⁻¹⁵`) against `32768 · sin(2π h / 2¹⁶)`; the 32→16-bit phase rounding
@@ -120,17 +114,17 @@ def fixedSinQ15Sig (phaseQ : Sig) : BuildM Sig := do
   let n ← rshift (← add h (← lit 16384)) (← lit 15)
   let r ← sub h (← lshift n (← lit 15))
   let parity ← bitAnd n (← lit 1)
-  let sign ← sub (← litI 1) (← mul (← litI 2) parity)
-  let x ← mulLo32 sign r
-  let z ← rshift (← add (← mulLo32 x x) half14) shift14
+  let sign ← sub (← lit 1) (← mul (← lit 2) parity)
+  let x ← mul sign r
+  let z ← rshift (← add (← mul x x) half14) shift14
   let step (c acc : Sig) : BuildM Sig := do
-    sub c (← rshift (← add (← mulLo32 acc z) half14) shift14)
+    sub c (← rshift (← add (← mul acc z) half14) shift14)
   let acc7 ← lit 141
   let acc5 ← step (← lit 2604) acc7
   let acc3 ← step (← lit 21169) acc5
   let acc1 ← step (← lit 51474) acc3
-  let y ← rshift (← add (← mulLo32 x acc1) half14) shift14
-  clamp y (← litI (-32767)) (← litI 32767)
+  let y ← rshift (← add (← mul x acc1) half14) shift14
+  clamp y (← lit (-32767)) (← lit 32767)
 
 def fixedOutQ (fracBits : Nat) (x : Sig) : BuildM Sig := do
   let xf ← toFloatE x

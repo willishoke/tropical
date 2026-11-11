@@ -8,6 +8,7 @@ import Tropical.Semantics.Program
 import Tropical.Semantics.Strata
 import Tropical.Semantics.Plan
 import Tropical.Semantics.PlanWellFormed
+import Tropical.Semantics.Scalar
 import Tropical.Semantics.Staging
 import Tropical.Semantics.ModalUniverse
 

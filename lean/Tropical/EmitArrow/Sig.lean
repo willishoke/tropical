@@ -179,6 +179,22 @@ def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
   binary .ldexp mantissa exponent
 
 def toIntE (a : Sig) : BuildM Sig := unary .toInt a
+
+/-- The cast to `int32`: an `int`'s low 32 bits, a `float` truncated toward
+    zero and saturated to the word (NaN → 0). `int32` arithmetic wraps on
+    ℤ/2³² (`add`, `sub`, `mul`, `lshift` are the 32-bit word ops), every op
+    is total (see `ConstFold`), and an `int32` never meets an `int` or
+    `float` operand without a cast; a bare literal (or a literal-only
+    subtree) next to an `int32` operand is `int32`. `toIntE` sign-extends
+    back, `toFloatE` converts. -/
+def toInt32E (a : Sig) : BuildM Sig := unary .toInt32 a
+
+/-- A standalone `int32` constant (`litI`'s 32-bit counterpart), refused at
+    build time outside `[-2³¹, 2³¹)`: a bit pattern above `2³¹ − 1` is
+    written as its negative representative. -/
+def litI32 (n : Int) : BuildM Sig :=
+  if -2147483648 ≤ n ∧ n ≤ 2147483647 then do toInt32E (← lit n)
+  else throw s!"litI32: {n} is outside int32's range [-2147483648, 2147483647]"
 def neg (a : Sig) : BuildM Sig := unary .neg a
 def absE (a : Sig) : BuildM Sig := unary .abs a
 def floatExponentE (a : Sig) : BuildM Sig := unary .floatExponent a

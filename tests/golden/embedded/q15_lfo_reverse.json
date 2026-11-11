@@ -1,0 +1,1 @@
+{"schema":"tropical_program_2","name":"q15_lfo_reverse","body":{"op":"block","decls":[{"op":"instanceDecl","name":"lfo","program":"FixedSinOscQ15","inputs":{"freq":-987.6,"phase":0.7}}],"assigns":[{"op":"outputAssign","name":"dac.out","expr":{"op":"ref","instance":"lfo","output":"out"}}]}}

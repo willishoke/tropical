@@ -24,16 +24,16 @@ open Tropical.Expr (getField? getStrField?)
     the widening lattice below is what belongs to the wiring layer. -/
 abbrev ScalarKind := Tropical.Parse.ScalarKind
 
-/-- Widening lattice rank: bool → int → float. -/
-def rank : ScalarKind → Nat
-  | .bool => 0 | .int => 1 | .float => 2
+/-- The widening order a connection may cross implicitly: bool → int → float,
+    and bool → int32 (`ScalarKind.widensTo`, the one relation the compiler
+    also enforces at instance inputs and output ports). `int32` widens to
+    nothing: the patch bay never turns it into an `int` or a `float` silently
+    (a 64-bit or soft-float conversion the wire does not show), so such a wire
+    spells the cast (`toInt`, `toFloat`). -/
+def widens (src dst : ScalarKind) : Bool := src.widensTo dst
 
-def widens (src dst : ScalarKind) : Bool := rank src ≤ rank dst
-
-def narrowingHint : ScalarKind → String
-  | .int   => "to_int()"
-  | .bool  => "to_bool()"
-  | .float => "to_float()"
+/-- The wire-expression cast into `dst` (the `tropical_program_2` op name). -/
+def narrowingHint (dst : ScalarKind) : String := s!"{dst.castName}()"
 
 /-- An array element: display name plus the underlying scalar kind
     (aliases carry their base). -/
@@ -117,6 +117,9 @@ def checkArrayConnection (srcIn dstIn : Option PortType) (refExpr : Tropical.Wir
   match src, dst with
   | .scalar sk, .scalar dk =>
     if sk == dk || widens sk dk then return { compatible := true }
+    if sk == .int32 then
+      return { compatible := false,
+               error := some s!"Kind mismatch: int32 does not convert implicitly to {portTypeToString dst} — wrap source in {narrowingHint dk} to convert explicitly" }
     return { compatible := false,
              error := some s!"Lossy conversion: cannot narrow {portTypeToString src} to {portTypeToString dst} — wrap source in {narrowingHint dk} to narrow explicitly" }
   | .scalar _, .array _ dstShape =>

@@ -209,6 +209,8 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     coeffArraySlots := natArr j "coeff_array_slots" }
   if !plan.outputLayoutWellFormed then
     throw "PlanDecode: output channel count must be positive and sink targets must be unique and in range"
+  if let some e := plan.kindError? then
+    throw s!"PlanDecode: ill-kinded plan: {e}"
   pure plan
 
 /-- Parse a tropical_plan_7 JSON object into a `FlatPlan`. -/

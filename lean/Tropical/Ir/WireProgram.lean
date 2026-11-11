@@ -167,8 +167,12 @@ decreasing_by
 
 /-- Port of `liftWireToProgram`: build the raw lifted `Program`.
     Returns the program AND the sorted free refs (the caller wires
-    each `instance__port` input back to its source). -/
-def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {}) :
+    each `instance__port` input back to its source). `refKind` names the
+    declared kind of a free ref's source output when the lifted input must
+    carry it: an `int32` source, which no other input kind accepts (every
+    other input stays undeclared, a float, as it always was). -/
+def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {})
+    (refKind : String → String → Option ScalarKind := fun _ _ => none) :
     Except String LiftResult := do
   let refs ← freeRefs expr
   -- Sort by canonical key — deterministic input order across calls.
@@ -177,7 +181,8 @@ def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {}) :
   -- Double-underscore separator avoids collisions with user port names; dots
   -- in instance paths flatten to underscores.
   let inputDecls : Array InputDecl := sortedRefs.map fun ref =>
-    { name := ref.inputName }
+    { name := ref.inputName,
+      type? := (refKind ref.instanceName ref.outputName).map PortType.scalar }
   let refToInput := sortedRefs.mapIdx fun i ref =>
     (wireKeyOf ref.instanceName ref.outputName, i)
   let outputDecl : OutputDecl := { name := "out", type? := inferOutputPortType expr }

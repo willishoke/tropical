@@ -320,9 +320,9 @@ allocates no persistent state-register backing store. See the
 
 | Target | Numeric regime | Product role | Correctness evidence |
 |---|---|---|---|
-| LLVM → ORC JIT | f64 value path plus i64 rails | Native reference, scopes/random-access windows, and portable native audio | frozen audio and plan goldens; native realization checks; trust-ledger obligations |
+| LLVM → ORC JIT | f64 value path plus i64 and i32 integer rails | Native reference, scopes/random-access windows, and portable native audio | frozen audio and plan goldens; native realization checks; trust-ledger obligations |
 | LLVM → wasm32 | The same LLVM/f64 and i64 semantics, hosted in WebAssembly | Precompiled browser player | [`wasm_vs_jit`](../tests/web/wasm_vs_jit.test.ts) and precompiled-plan checks |
-| MSL → Metal | f32 value path plus exact i64 clock rail; stage-0 coefficients originate in CPU f64 and narrow at upload | Heavy live modal audio on supported Apple builds; JIT remains dual-loaded for scopes/reference | [`metal_vs_jit`](../tests/web/metal_vs_jit.test.ts), MSL goldens, and Metal runtime tests |
+| MSL → Metal | f32 value path plus exact i64 and i32 integer rails; stage-0 coefficients originate in CPU f64 and narrow at upload | Heavy live modal audio on supported Apple builds; JIT remains dual-loaded for scopes/reference | [`metal_vs_jit`](../tests/web/metal_vs_jit.test.ts), MSL goldens, and Metal runtime tests |
 
 Metal is selected with `TROPICAL_BACKEND=metal` on a Metal-enabled build.
 The runtime dual-loads the JIT artifact: `process()` uses Metal, while

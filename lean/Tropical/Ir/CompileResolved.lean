@@ -94,11 +94,15 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     nestedInputArraySlots := ctx.nestedInputArraySlots
     nestedOutputArraySlots := ctx.nestedOutputArraySlots }
 
+  -- the declared scalar kind of each output (an array port's elements are float)
+  let outputPortTypes := prog.outputs.map fun d => match d.type? with
+    | some (.scalar k) => k
+    | _ => .float
   let program ← Tropical.Ir.Emit.emitResolvedProgram
     outputExprs outputPortScalarCounts
     inputPortTypes emitSlots arena
     { instances := prog.instances, enclosing := prog }
-    ctx.staging
+    ctx.staging outputPortTypes
 
   return {
     registerCount := program.registerCount

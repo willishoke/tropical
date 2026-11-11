@@ -29,7 +29,10 @@ Plan 7 has no state-initialization or legacy temp-mix carriers. Runtime
 consumers reject older schemas instead of translating them. Plan 7 is plan 6
 with the time source redefined: source 0 (`tau`) is the Q48.16 coordinate
 (`Ir/ClockFormat.lean`) where plan 6's was the integer sample index, so a plan 6 document would
-decode to a different function, and is refused instead.
+decode to a different function, and is refused instead. The `int32` scalar
+type and the `ToInt32` op were added within Plan 7 (2026-11-10): no existing
+spelling changes meaning and an older reader refuses them as unknown
+(`design/compatibility-matrix.md`, "Additive changes within Plan 7").
 
 Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
@@ -147,11 +150,8 @@ inductive PlanOp where
   | less | lessEq | greater | greaterEq | equal | notEqual
   | and | or
   | bitAnd | bitOr | bitXor | lshift | rshift | ldexp
-  /-- `a · b` modulo 2³², sign-extended: the product a 32-bit `MULS`
-      computes, on the i64 rail. Int-only. -/
-  | mulLo32
   | neg | abs | sqrt | floor | ceil | round
-  | not | bitNot | floatExponent | toInt | toBool | toFloat
+  | not | bitNot | floatExponent | toInt | toInt32 | toBool | toFloat
   | select | clamp
 deriving BEq, Repr, Inhabited
 
@@ -165,11 +165,11 @@ def PlanOp.name : PlanOp → String
   | .and => "And" | .or => "Or"
   | .bitAnd => "BitAnd" | .bitOr => "BitOr" | .bitXor => "BitXor"
   | .lshift => "LShift" | .rshift => "RShift" | .ldexp => "Ldexp"
-  | .mulLo32 => "MulLo32"
   | .neg => "Neg" | .abs => "Abs" | .sqrt => "Sqrt"
   | .floor => "Floor" | .ceil => "Ceil" | .round => "Round"
   | .not => "Not" | .bitNot => "BitNot" | .floatExponent => "FloatExponent"
-  | .toInt => "ToInt" | .toBool => "ToBool" | .toFloat => "ToFloat"
+  | .toInt => "ToInt" | .toInt32 => "ToInt32" | .toBool => "ToBool"
+  | .toFloat => "ToFloat"
   | .select => "Select" | .clamp => "Clamp"
 
 /-- Parse a plan wire tag into the scalar-op signature — the single validation
@@ -182,11 +182,11 @@ def PlanOp.ofString? : String → Option PlanOp
   | "And" => some .and | "Or" => some .or
   | "BitAnd" => some .bitAnd | "BitOr" => some .bitOr | "BitXor" => some .bitXor
   | "LShift" => some .lshift | "RShift" => some .rshift | "Ldexp" => some .ldexp
-  | "MulLo32" => some .mulLo32
   | "Neg" => some .neg | "Abs" => some .abs | "Sqrt" => some .sqrt
   | "Floor" => some .floor | "Ceil" => some .ceil | "Round" => some .round
   | "Not" => some .not | "BitNot" => some .bitNot | "FloatExponent" => some .floatExponent
-  | "ToInt" => some .toInt | "ToBool" => some .toBool | "ToFloat" => some .toFloat
+  | "ToInt" => some .toInt | "ToInt32" => some .toInt32
+  | "ToBool" => some .toBool | "ToFloat" => some .toFloat
   | "Select" => some .select | "Clamp" => some .clamp
   | _ => none
 
@@ -200,8 +200,6 @@ theorem PlanOp.ofString_name (op : PlanOp) :
     be exhaustive). -/
 def PlanOp.isBitwise : PlanOp → Bool
   | .bitAnd | .bitOr | .bitXor | .lshift | .rshift | .bitNot => true
-  -- not bitwise, but int-only the same way: int result, int operands
-  | .mulLo32 => true
   | _ => false
 
 def PlanOp.isComparison : PlanOp → Bool
@@ -213,27 +211,57 @@ def PlanOp.isTranscendental : PlanOp → Bool
   | .sqrt | .floor | .ceil | .round | .ldexp | .floatExponent => true
   | _ => false
 
+/-- The join of two sorts: `bool` promotes to either integer kind, `int` to
+    `float`. `int32` meets `int` or `float` only in plans `kindMix?` refuses;
+    the join is total anyway (the wider sort) so inference stays a function. -/
 def promoteTypes (a b : ScalarType) : ScalarType :=
   if a == .float || b == .float then .float
   else if a == .int || b == .int then .int
+  else if a == .int32 || b == .int32 then .int32
   else .bool
 
 /-- The type-inference algebra over the signature: the result sort of an op from
-    its argument sorts. Casts fix the sort; bitwise → int, comparison → bool,
-    transcendental → float; `select`/`clamp` read the arm/value sort; the rest
-    promote across args (head as seed — `promoteTypes` is idempotent). -/
+    its argument sorts. Casts fix the sort; bitwise → the integer kind of the
+    operands (`int32` if any operand is `int32`, else `int`), comparison →
+    bool, transcendental → float; `select`/`clamp` read the arm/value sort; the
+    rest promote across args (head as seed — `promoteTypes` is idempotent). -/
 def PlanOp.resultType : PlanOp → Array ScalarType → ScalarType
   | .toInt,   _ => .int
+  | .toInt32, _ => .int32
   | .toBool,  _ => .bool
   | .toFloat, _ => .float
   | op, argTypes =>
-    if op.isBitwise then .int
+    if op.isBitwise then
+      if argTypes.any (· == .int32) then .int32 else .int
     else if op.isComparison then .bool
     else if op.isTranscendental then .float
     else match op with
       | .select => promoteTypes (argTypes[1]?.getD .float) (argTypes[2]?.getD .float)
       | .clamp => argTypes[0]?.getD .float
       | _ => if argTypes.isEmpty then .float else argTypes.foldl promoteTypes argTypes[0]!
+
+/-- The one place `int32` meets the other sorts. An `int32` operand never
+    shares an op with an `int` or `float` operand: an implicit widening would
+    hide a 64-bit (or soft-float) op behind a 32-bit-looking expression, and a
+    narrowing would drop bits. `bool` operands promote (to 0/1) as they do for
+    `int`. A transcendental op (`sqrt`, `floor`, …) computes on floats, so it
+    takes no `int32` operand either. Exempt are the casts, which ARE the
+    crossings, the logical ops (`not`/`and`/`or` read truthiness), and
+    `select`'s condition. `some msg` names the mix. -/
+def PlanOp.kindMix? (op : PlanOp) (argTypes : Array ScalarType) : Option String :=
+  let checked : Array ScalarType := match op with
+    | .toInt | .toInt32 | .toBool | .toFloat | .not | .and | .or => #[]
+    | .select => argTypes.extract 1 argTypes.size
+    | _ => argTypes
+  if checked.any (· == .int32) then
+    if op.isTranscendental then
+      some s!"{op.name} computes on float and takes no int32; convert explicitly (toFloat)"
+    else
+      match checked.find? (fun t => t == .int || t == .float) with
+      | some other =>
+        some s!"{op.name} mixes int32 with {other.wire}; convert explicitly (toInt32, toInt, toFloat)"
+      | none => none
+  else none
 
 structure NInstr where
   tag : String
@@ -615,6 +643,14 @@ def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
     the plan-side storage/sharing analyses cannot disagree. -/
 def metalCoopReduceThreshold : Nat := 32
 
+/-- Is this top-level `ReduceBegin` wide enough, and of a kind, for the
+    cooperative lowering? The lane partials are float or long arenas, so an
+    `int32` accumulator stays on the serial loop at any width (same result:
+    the serial loop is the reference order). The one predicate the emitter
+    and every plan-side analysis below read. -/
+def NInstr.isMetalCoopReduceCandidate (instr : NInstr) : Bool :=
+  instr.loopCount ≥ metalCoopReduceThreshold && instr.resultType != .int32
+
 /-- Does the plan contain a reduce region the cooperative lowering will run
     lane-parallel? Top-level only: a region nested in a routed span or in
     another reduce stays serial (it already runs per-lane or per-iteration). -/
@@ -627,7 +663,7 @@ def FlatPlan.hasMetalCoopReduce (p : FlatPlan) : Bool := Id.run do
     | "RoutedSumEnd" => routedDepth := routedDepth - 1
     | "ReduceBegin" =>
       if routedDepth == 0 && reduceDepth == 0
-          && instr.loopCount ≥ metalCoopReduceThreshold then
+          && instr.isMetalCoopReduceCandidate then
         return true
       reduceDepth := reduceDepth + 1
     | "ReduceEnd" => reduceDepth := reduceDepth - 1
@@ -656,7 +692,7 @@ def FlatPlan.metalCoopReduceInfo (p : FlatPlan) : Bool × Bool × Bool := Id.run
     | "RoutedSumEnd" => routedDepth := routedDepth - 1
     | "ReduceBegin" =>
       if routedDepth == 0 && reduceDepth == 0
-          && instr.loopCount ≥ metalCoopReduceThreshold then
+          && instr.isMetalCoopReduceCandidate then
         if instr.resultType == .float then hasFloat := true else hasInt := true
         if instr.args.size > 1 then hasDyn := true
       reduceDepth := reduceDepth + 1
@@ -702,7 +738,7 @@ def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run
         outside := outside.insert key
     if instr.tag == "ReduceBegin" then
       if coopSpan > 0 then coopSpan := coopSpan + 1
-      else if depth == 0 && instr.loopCount ≥ metalCoopReduceThreshold then
+      else if depth == 0 && instr.isMetalCoopReduceCandidate then
         coopSpan := 1
     if instr.tag == "RoutedSumEnd" then depth := depth - 1
   let mut shared : Std.HashSet String := {}
@@ -712,7 +748,7 @@ def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run
     if instr.tag == "RoutedSumBegin" then depth := depth + 1
     if instr.tag == "ReduceBegin" then
       if coopSpan > 0 then coopSpan := coopSpan + 1
-      else if depth == 0 && instr.loopCount ≥ metalCoopReduceThreshold then
+      else if depth == 0 && instr.isMetalCoopReduceCandidate then
         coopSpan := 1
     if depth > 0 || coopSpan > 0 then
       for operand in instr.args do
@@ -723,7 +759,7 @@ def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run
   return shared
 
 private def scalarStorageBytes : ScalarType → Nat
-  | .float => 4 | .int => 8 | .bool => 1
+  | .float => 4 | .int => 8 | .bool => 1 | .int32 => 4
 
 /-- Static threadgroup-storage contract for cooperative Metal. Ordinary arrays
     and scalar values captured by an all-lane routed region live in threadgroup
@@ -822,5 +858,139 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("sources", Json.arr (p.sources.map fun s =>
       Json.mkObj [("kind", Json.str s.wire)]))
   return Json.mkObj fields.toList
+
+-- ─────────────────────────────────────────────────────────────
+-- Kind checking — the plan-level half of "int32 never mixes"
+-- ─────────────────────────────────────────────────────────────
+
+/-- The instruction tags a Plan-7 document may carry: the scalar ops
+    (`PlanOp`) and the structural instructions. -/
+def structuralTags : List String :=
+  ["Pack", "Index", "SetElement", "WriteSlot", "ReduceBegin", "ReduceEnd",
+   "RoutedSumBegin", "RoutedSumYield", "RoutedSumEnd"]
+
+def isKnownTag (tag : String) : Bool :=
+  (PlanOp.ofString? tag).isSome || structuralTags.contains tag
+
+/-- The integer value of a JSON number, if it is one. -/
+private def jsonInteger? (n : JsonNumber) : Option Int :=
+  let scale : Int := (10 : Int) ^ n.exponent
+  if n.mantissa % scale == 0 then some (n.mantissa / scale) else none
+
+/-- A constant must be a value of its declared kind: an `int32` constant an
+    integer in `[-2³¹, 2³¹)`, an `int` one in `[-2⁶³, 2⁶³)` (a plan never
+    carries a bit pattern for the backends to wrap). -/
+private def constKindError? (v : JsonNumber) : ScalarType → Option String
+  | .int32 =>
+    match jsonInteger? v with
+    | some n => if -2147483648 ≤ n && n ≤ 2147483647 then none
+                else some s!"int32 constant {v} is outside [-2147483648, 2147483647]"
+    | none => some s!"int32 constant {v} is not an integer"
+  | .int =>
+    match jsonInteger? v with
+    | some n => if -9223372036854775808 ≤ n && n ≤ 9223372036854775807 then none
+                else some s!"int constant {v} is outside the i64 range"
+    | none => some s!"int constant {v} is not an integer"
+  | _ => none
+
+/-- The kind an operand is read at. An array operand's elements are float. -/
+def NOperand.kind : NOperand → ScalarType
+  | .const _ t | .input _ t | .reg _ t | .param _ t | .source _ t | .slot _ t => t
+  | .loopIdx _ => .int
+  | .arrayReg _ | .sessionArrayReg _ => .float
+
+private structure KindScan where
+  /-- the result sort of the last instruction (in execution order) that
+      wrote each temp -/
+  temps : Std.HashMap Nat ScalarType := {}
+  /-- the kinds of open `ReduceBegin`s, innermost first -/
+  reduces : List ScalarType := []
+
+private def operandKindError? (st : KindScan) (sources : Array SourceKind) :
+    NOperand → Option String
+  | .const v t => constKindError? v t
+  | .reg slot t =>
+    match st.temps.get? slot with
+    | some k => if k == t then none
+                else some s!"temp {slot} is read as {t.wire} but was produced as {k.wire}"
+    | none => none   -- no producer in scope (zero-initialised scratch)
+  | .source index t =>
+    match sources[index]? with
+    | some .tau => if t == .int then none else some s!"source tau is int, read as {t.wire}"
+    | some .rate => if t == .float then none else some s!"source rate is float, read as {t.wire}"
+    | none => none
+  | _ => none
+
+private def mustWiden (what : String) (src dst : ScalarType) : Option String :=
+  if src.widensTo dst then none
+  else some s!"{what}: a {src.wire} value cannot be stored as {dst.wire} (int32 converts only by an explicit cast)"
+
+/-- Kind-check one instruction against the scan state, then record what it
+    produces. -/
+private def checkInstrKinds (sources : Array SourceKind) (st : KindScan)
+    (instr : NInstr) : Except String KindScan := do
+  let fail (msg : String) : Except String KindScan := throw s!"{instr.tag}: {msg}"
+  unless isKnownTag instr.tag do
+    throw s!"unknown instruction tag '{instr.tag}'"
+  for a in instr.args do
+    if let some e := operandKindError? st sources a then return ← fail e
+  let argKinds := instr.args.map NOperand.kind
+  let record (st : KindScan) : KindScan :=
+    match instr.dst with
+    | .temp t => { st with temps := st.temps.insert t instr.resultType }
+    | _ => st
+  if let some op := PlanOp.ofString? instr.tag then
+    if instr.resultType != op.resultType argKinds then
+      return ← fail s!"result sort {instr.resultType.wire} is not the sort {(op.resultType argKinds).wire} its operands give"
+    if let some msg := op.kindMix? argKinds then return ← fail msg
+    return record st
+  match instr.tag with
+  | "WriteSlot" =>
+    for k in argKinds do
+      if let some e := mustWiden "the stored value" k instr.resultType then return ← fail e
+    pure st
+  | "Pack" | "RoutedSumYield" =>
+    for k in argKinds do
+      if let some e := mustWiden "an array element" k .float then return ← fail e
+    pure st
+  | "SetElement" =>
+    if let some k := argKinds[2]? then
+      if let some e := mustWiden "an array element" k .float then return ← fail e
+    pure st
+  | "Index" =>
+    if instr.resultType == .int32 then
+      return ← fail "an array element is float; an int32 read spells the cast (toInt32)"
+    pure (record st)
+  | "ReduceBegin" =>
+    if let some k := argKinds[0]? then
+      if let some e := mustWiden "the accumulator's initial value" k instr.resultType then
+        return ← fail e
+    pure { record st with reduces := instr.resultType :: st.reduces }
+  | "ReduceEnd" =>
+    match st.reduces with
+    | k :: rest =>
+      if k != instr.resultType then
+        return ← fail s!"closes a {k.wire} accumulator as {instr.resultType.wire}"
+      pure { record st with reduces := rest }
+    | [] => pure (record st)   -- delimiter structure is `PlanWellFormed`'s
+  | _ => pure (record st)
+
+/-- The plan's kind error, if any. Every instruction, in execution order:
+    a known tag; constants within their kind; each `reg` operand read at the
+    sort its producer wrote; a scalar op's result sort the one its operands
+    give, with no `int32` mixed with `int` or `float` (`PlanOp.kindMix?`);
+    `WriteSlot`, `ReduceBegin`'s initial value and array elements reached by
+    widening only (`ScalarKind.widensTo`); no `int32` read out of an array.
+    `PlanDecode` refuses a document that fails it and both kernel emitters
+    refuse such a plan, so no backend is ever asked for an implicit crossing
+    (or a constant to wrap) that the compiler would refuse. -/
+def FlatPlan.kindError? (p : FlatPlan) : Option String := Id.run do
+  let mut st : KindScan := {}
+  let instrs := p.linearInstrs
+  for h : i in [0:instrs.size] do
+    match checkInstrKinds p.sources st instrs[i] with
+    | .ok st' => st := st'
+    | .error e => return some s!"instruction {i}: {e}"
+  return none
 
 end Tropical.Plan

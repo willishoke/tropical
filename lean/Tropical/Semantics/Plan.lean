@@ -86,7 +86,7 @@ private def findLoopValue (frames : List (LoopFrame α)) (id : Nat) :
 arrays are deliberately refused at the wire-ready Plan boundary. -/
 def evalOperand (alg : Algebra α) (inputs : PlanInputs α)
     (state : PlanState α) : NOperand → Result α
-  | .const value _ => alg.literal value
+  | .const value ty => alg.sortedLiteral ty value
   | .input slot _ => lookupPlanValue "operand.input" "input" inputs.inputs slot
   | .reg slot _ => lookupPlanValue "operand.reg" "temp" state.temps slot
   | .arrayReg slot => lookupPlanArray "operand.arrayReg" "array" state.arrays slot
@@ -119,7 +119,6 @@ private def planOpBinaryTag? : PlanOp → Option BinaryOpTag
   | .and => some .and | .or => some .or
   | .bitAnd => some .bitAnd | .bitOr => some .bitOr | .bitXor => some .bitXor
   | .lshift => some .lshift | .rshift => some .rshift | .ldexp => some .ldexp
-  | .mulLo32 => some .mulLo32
   | _ => none
 
 private def planOpUnaryTag? : PlanOp → Option UnaryOpTag
@@ -128,28 +127,31 @@ private def planOpUnaryTag? : PlanOp → Option UnaryOpTag
   | .not => some .not | .bitNot => some .bitNot
   | .floatExponent => some .floatExponent
   | .toInt => some .toInt | .toBool => some .toBool | .toFloat => some .toFloat
+  | .toInt32 => some .toInt32
   | _ => none
 
 private def planOpArity : PlanOp → Nat
   | .select | .clamp => 3
   | .neg | .abs | .sqrt | .floor | .ceil | .round
-  | .not | .bitNot | .floatExponent | .toInt | .toBool | .toFloat => 1
+  | .not | .bitNot | .floatExponent | .toInt | .toInt32 | .toBool | .toFloat => 1
   | _ => 2
 
-/-- Interpret one scalar symbol from the total Plan signature. Arity errors are
-structural refusals; carrier operations retain their own explicit refusals. -/
-def evalPlanOp (alg : Algebra α) (op : PlanOp)
+/-- Interpret one scalar symbol from the total Plan signature at the
+instruction's result sort (`int32` and `int` are different operations on the
+same symbol; see `Algebra`). Arity errors are structural refusals; carrier
+operations retain their own explicit refusals. -/
+def evalPlanOp (alg : Algebra α) (op : PlanOp) (resultType : ScalarType)
     (args : Array (Value α)) : Result α := do
   if args.size != planOpArity op then
     planError "PlanOp" s!"{op.name} expects {planOpArity op} args, got {args.size}"
   else
     match planOpBinaryTag? op, planOpUnaryTag? op with
-    | some tag, _ => alg.binary tag args[0]! args[1]!
-    | _, some tag => alg.unary tag args[0]!
+    | some tag, _ => alg.sortedBinary resultType tag args[0]! args[1]!
+    | _, some tag => alg.sortedUnary resultType tag args[0]!
     | none, none =>
         match op with
-        | .clamp => alg.clamp args[0]! args[1]! args[2]!
-        | .select => alg.select args[0]! args[1]! args[2]!
+        | .clamp => alg.sortedClamp resultType args[0]! args[1]! args[2]!
+        | .select => alg.sortedSelect resultType args[0]! args[1]! args[2]!
         | _ => planError "PlanOp" s!"unhandled scalar symbol {op.name}"
 
 private def writeScalarDst (state : PlanState α) (dst : DstSlot)
@@ -217,7 +219,7 @@ def execElementwiseInstr (alg : Algebra α) (inputs : PlanInputs α)
       let args ← List.foldlM (fun (args : Array (Value α)) position => do
           pure (args.push (← evalElementwiseOperand alg inputs state instr position index)))
         #[] (List.range instr.args.size)
-      pure (values.push (← evalPlanOp alg op args)))
+      pure (values.push (← evalPlanOp alg op instr.resultType args)))
     #[] (List.range instr.loopCount)
   writeArrayDst state instr.dst values
 
@@ -230,12 +232,14 @@ def execSmallInstr (alg : Algebra α) (inputs : PlanInputs α)
     match instr.dst with
     | .temp _ | .moduleSlot _ =>
         let args ← evalOperands alg inputs state instr.args
-        writeScalarDst state instr.dst (← evalPlanOp alg op args)
+        writeScalarDst state instr.dst (← evalPlanOp alg op instr.resultType args)
     | .array _ | .sessionArray _ => execElementwiseInstr alg inputs state instr op
   else
     match instr.tag with
     | "Pack" =>
-        writeArrayDst state instr.dst (← evalOperands alg inputs state instr.args)
+        -- arrays hold float elements: each element is stored at `float`
+        let values ← evalOperands alg inputs state instr.args
+        writeArrayDst state instr.dst (← values.mapM (alg.atSort .float))
     | "Index" =>
         if instr.args.size != 2 then
           planError "instruction.Index" s!"expected 2 args, got {instr.args.size}"
@@ -246,7 +250,8 @@ def execSmallInstr (alg : Algebra α) (inputs : PlanInputs α)
         if instr.args.size != 1 then
           planError "instruction.WriteSlot" s!"expected 1 arg, got {instr.args.size}"
         else
-          writeScalarDst state instr.dst (← evalOperand alg inputs state instr.args[0]!)
+          writeScalarDst state instr.dst
+            (← alg.atSort instr.resultType (← evalOperand alg inputs state instr.args[0]!))
     | "SetElement" =>
         if instr.args.size != 3 then
           planError "instruction.SetElement" s!"expected 3 args, got {instr.args.size}"
