@@ -7,14 +7,19 @@ report around them:
   * libcalls — `llvm-nm -u` on the thumbv6m object must list nothing (no
     __aeabi_*, __mul*, __div*, soft-float helpers). Exit 1 otherwise.
   * cycles — a static count from `llvm-objdump` on the Cortex-M0+ timing
-    table (ARM DDI 0484, zero wait states): ALU and MULS 1, LDR/STR 2,
+    table (ARM DDI 0484, zero wait states), assuming the single-cycle
+    multiplier (the M0+'s 32-cycle iterative multiplier is a build option;
+    the report states the assumption as `timing_model`): ALU and MULS 1, LDR/STR 2,
     PUSH/POP 1+N, POP with PC 3+N (N counting PC), B 2, B<cond> 2 taken and
     1 not taken, BL 3, BX 2. The sample loop is found from its back edges and
     entered at the block the prologue branches to. Every path once around the
     loop is enumerated, so the per-frame range is the cheapest and the
     dearest path, data-dependent branches (the output clamp) included; a call
     is entry path + (N - 1) frames + the last frame, which leaves through the
-    exit branch into the epilogue. Calibrated against an ARMv6-M emulator on
+    exit branch into the epilogue. The enumeration is exhaustive or the
+    script exits non-zero: a path that revisits an instruction (an inner
+    loop) or more paths than the limit means no bound, so none is printed.
+    Calibrated against an ARMv6-M emulator on
     the TRM table: the #252 LFO object measured 20 + 114/frame + 10 (worst
     block 1902), the int32 LFO 17 + 86/frame + 10 (worst 1451); both lie in
     the computed ranges.
@@ -38,6 +43,12 @@ import argparse, json, os, re, subprocess, sys
 TRIPLES = [("host", ""), ("thumbv6m", "thumbv6m-none-eabi"),
            ("wasm32", "wasm32-unknown-unknown")]
 LIBCALL = re.compile(r"__aeabi_|__mul|__div|__mod|__udiv|__add|__sub|__fix|__float|__extend|__trunc|__cmp|__eq|__ne|__lt|__le|__gt|__ge|__un|memcpy|memset")
+# The cycle table the counts assume, stated in every report: the Cortex-M0+
+# multiplier is a build-time option, and the counts hold only for the
+# single-cycle one.
+TIMING_MODEL = ("Cortex-M0+ (ARM DDI 0484), zero wait states, single-cycle "
+                "multiplier: MULS = 1 cycle. A part built with the small iterative "
+                "multiplier takes 32 cycles per MULS; add 31 x muls_per_frame per frame.")
 COND = re.compile(r"b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$")
 
 
@@ -121,18 +132,33 @@ class Cfg:
         return [(self.nxt(k), cost(i.mn, i.ops), False)]
 
 
-def paths(cfg, start, stop, region=None, limit=4096):
+def paths(cfg, start, stop, region=None, limit=4096, what="path"):
     """Every path from index `start` to a member of `stop` (or a return), as
     lists of (index, cycles, taken). Paths leaving `region` end there with
-    the leaving edge as their last step."""
-    out, stack = [], [(start, [], frozenset())]
+    the leaving edge as their last step.
+
+    The enumeration is exhaustive or it fails: a path that comes back to an
+    instruction it already ran (a loop other than the one `stop` closes)
+    has no bounded cost, and past `limit` paths the set is not known to be
+    complete. Either way the range computed from it would not be a bound, so
+    the script exits non-zero instead of reporting one."""
+    out, stack = [], [(start, [], frozenset({start}))]
     while stack:
         k, path, seen = stack.pop()
         for s, c, taken in cfg.succ(k):
             step = path + [(k, c, taken)]
             if s is None or s in stop or (region is not None and not region(s)):
                 out.append((step, s))
-            elif s not in seen and len(out) < limit:
+                if len(out) > limit:
+                    raise SystemExit(
+                        f"embedded_object: {what}: more than {limit} paths from "
+                        f"{hex(cfg.insns[start].addr)}; the cycle range would not be a bound")
+            elif s in seen:
+                raise SystemExit(
+                    f"embedded_object: {what}: the path from {hex(cfg.insns[start].addr)} "
+                    f"revisits {hex(cfg.insns[s].addr)} (an inner loop); its cost is "
+                    f"unbounded, so the cycle range would not be a bound")
+            else:
                 stack.append((s, step, seen | {s}))
     return out
 
@@ -143,41 +169,53 @@ def loop_report(insns, frames, wait):
     lo = min(t for t, _ in back); hi = max(a for _, a in back)
     inside = lambda k: k is not None and lo <= cfg.insns[k].addr <= hi
     # The header: the loop block the prologue enters.
-    entry_paths = paths(cfg, 0, set(), region=lambda k: not inside(k))
+    entry_paths = paths(cfg, 0, set(), region=lambda k: not inside(k), what="prologue")
     heads = {s for p, s in entry_paths if s is not None and inside(s)}
     if len(heads) != 1:
         raise SystemExit(f"embedded_object: expected one loop entry, found {sorted(heads)}")
     head = heads.pop()
     entry = [p for p, s in entry_paths if s == head]
     around, leave = [], []
-    for p, s in paths(cfg, head, {head}, region=inside):
-        (around if s == head else leave).append(p)
+    loop_paths = paths(cfg, head, {head}, region=inside, what="frame")
+    for p, s in loop_paths:
+        (around if s == head else leave).append((p, s))
+    around = [p for p, _ in around]
     if not around or not leave:
         raise SystemExit("embedded_object: the loop has no back path or no exit")
-    # Epilogue: from the exit target to the return.
-    def epilogue(s):
-        return min(sum(c for _, c, _ in p) for p, _ in paths(cfg, s, set()))
     total = lambda p: sum(c for _, c, _ in p)
+    # Epilogue: from the exit target to the return, its cheapest and its
+    # dearest path.
+    def epilogue(s):
+        if s is None:
+            return 0, 0
+        costs = [total(p) for p, _ in paths(cfg, s, set(), what="epilogue")]
+        return min(costs), max(costs)
     frame = sorted(total(p) for p in around)
-    exits = []
-    for p, s in paths(cfg, head, {head}, region=inside):
-        if s != head:
-            exits.append(total(p) + (epilogue(s) if s is not None else 0))
+    exits_lo, exits_hi = [], []
+    for p, s in leave:
+        e_lo, e_hi = epilogue(s)
+        exits_lo.append(total(p) + e_lo)
+        exits_hi.append(total(p) + e_hi)
+    leave = [p for p, _ in leave]
     entry_c = [total(p) for p in entry]
     # The exit cost is what the last frame adds over a frame on the same data
     # path: the exit branch taken instead of not (+1) and the epilogue.
-    exit_extra = min(exits) - frame[0]
-    lo_call = min(entry_c) + (frames - 1) * frame[0] + min(exits)
-    hi_call = max(entry_c) + (frames - 1) * frame[-1] + max(exits)
+    exit_extra = min(exits_lo) - frame[0]
+    exit_extra_hi = max(exits_hi) - frame[-1]
+    lo_call = min(entry_c) + (frames - 1) * frame[0] + min(exits_lo)
+    hi_call = max(entry_c) + (frames - 1) * frame[-1] + max(exits_hi)
     body = [i for i in insns if lo <= i.addr <= hi]
     rep = {"loop_range": [hex(lo), hex(hi)], "loop_head": hex(cfg.insns[head].addr),
            "loop_instructions": len(body),
            "muls_per_frame": sum(1 for i in body if i.mn.startswith("mul")),
            "calls_in_loop": sum(1 for i in body if i.mn == "bl"),
            "frame_paths": len(around),
-           "entry_cycles": min(entry_c), "frame_cycles_lower": frame[0],
+           "entry_cycles": min(entry_c), "entry_cycles_upper": max(entry_c),
+           "frame_cycles_lower": frame[0],
            "frame_cycles_upper": frame[-1], "exit_cycles": exit_extra,
-           "frames": frames, "call_cycles_lower": lo_call, "call_cycles_upper": hi_call}
+           "exit_cycles_upper": exit_extra_hi,
+           "frames": frames, "call_cycles_lower": lo_call, "call_cycles_upper": hi_call,
+           "timing_model": TIMING_MODEL}
     if wait:
         rep["wait_states"] = wait
         rep.update(wait_estimate(cfg, entry, around, leave, epilogue, frames, wait))
@@ -303,7 +341,7 @@ def main():
             "entry": rep["entry_cycles"], "frame_lower": rep["frame_cycles_lower"],
             "frame_upper": rep["frame_cycles_upper"], "exit": rep["exit_cycles"],
             "call_lower": rep["call_cycles_lower"], "call_upper": rep["call_cycles_upper"],
-            "frames": a.frames, "wait_states": 0}
+            "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL}
         man["object"]["float_abi"] = "soft (no FP instructions; Tag_FP_arch absent)"
         with open(mpath, "w") as f:
             json.dump(man, f, indent=2)
