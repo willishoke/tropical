@@ -15,6 +15,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -60,6 +62,60 @@ inline int64_t encode_word(const Format & f, double x)
   if (t >= 9223372036854775808.0) return INT64_MAX;
   if (t <= -9223372036854775808.0) return INT64_MIN;
   return static_cast<int64_t>(t);
+}
+
+// The word's range: [-2^(w-1), 2^(w-1)).
+inline int64_t word_min(const Format & f)
+{
+  return f.elem == Elem::I32 ? INT32_MIN : INT64_MIN;
+}
+
+// "int32 Q16.16", as Lean's `PortFormat.describe` spells it.
+inline std::string describe(const Format & f)
+{
+  if (!f.is_word()) return "float";
+  const uint32_t w = word_bits(f.elem);
+  return std::string(f.elem == Elem::I32 ? "int32" : "int") + " Q"
+    + std::to_string(w - f.frac_bits) + "." + std::to_string(f.frac_bits);
+}
+
+// The real values a format holds, [-2^k, 2^k) with k = width - 1 - frac_bits
+// (k >= -1, since frac_bits <= width), as Lean's `PortFormat.rangeLabel`.
+inline std::string range_label(const Format & f)
+{
+  const int k = static_cast<int>(word_bits(f.elem)) - 1 - static_cast<int>(f.frac_bits);
+  const std::string end = k >= 0 ? std::to_string(uint64_t{1} << k) : std::string("0.5");
+  return "[-" + end + ", " + end + ")";
+}
+
+// The shortest plain decimal (no exponent) that reads back as `x`, as a
+// JSON number prints it (`100000`, `0.5`); `%.17g` past 40 decimals.
+inline std::string shortest(double x)
+{
+  char buf[400];
+  if (std::isfinite(x) && std::fabs(x) < 1e21)
+    for (int p = 0; p <= 40; ++p)
+    {
+      std::snprintf(buf, sizeof buf, "%.*f", p, x);
+      if (std::strtod(buf, nullptr) == x) return buf;
+    }
+  std::snprintf(buf, sizeof buf, "%.17g", x);
+  return buf;
+}
+
+// Why control value `x` does not fit an integer format, or "" when it does:
+// its word x * 2^frac must lie in the word's range (it is then truncated
+// toward zero, `encode_word`). Past the range the word would saturate, so a
+// write is refused instead, as Lean's `PortFormat.rangeError?` refuses it at
+// ingest and at `set_param`.
+inline std::string range_error(const Format & f, double x)
+{
+  if (!f.is_word()) return {};
+  const double scaled = std::ldexp(x, static_cast<int>(f.frac_bits));
+  const double hi = std::ldexp(1.0, static_cast<int>(word_bits(f.elem)) - 1);
+  if (scaled >= -hi && scaled < hi) return {};
+  return "value " + shortest(x) + " is outside the range of " + describe(f) + ", "
+    + range_label(f);
 }
 
 // The real value word `w` means.

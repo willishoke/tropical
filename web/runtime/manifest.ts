@@ -81,8 +81,46 @@ export function kernelParams(manifest: KernelManifest): KernelPort[] {
       throw new RangeError(`KernelManifest: param '${port.name}' is not a scalar`)
     if (port.elem !== 'f64' && (port.frac_bits ?? 0) > (port.elem === 'i32' ? 32 : 64))
       throw new RangeError(`KernelManifest: param '${port.name}' has more fraction bits than its word`)
+    if (port.elem !== 'f64' && port.default !== undefined) {
+      const d = port.default
+      // An integer port's default is its word. A JSON number reaches this
+      // host as a double, which carries every i32 word but an i64 word only
+      // up to 2^53: past that the parsed value may not be the word written
+      // (INT64_MAX parses as 2^63), so it is refused, not rounded or wrapped.
+      // The native host reads the word exactly; the two never disagree.
+      if (port.elem === 'i64' ? !Number.isSafeInteger(d)
+          : !(Number.isInteger(d) && d >= -2147483648 && d <= 2147483647))
+        throw new RangeError(port.elem === 'i64'
+          ? `KernelManifest: param '${port.name}' is i64 with default word ${d}, past ±(2^53 − 1): a JSON number does not carry it exactly in this host`
+          : `KernelManifest: param '${port.name}' default ${d} is not an i32 word`)
+    }
   }
   return params
+}
+
+/** The integer format's name and real range, as the compiler spells them:
+ *  `int32 Q16.16` and `[-32768, 32768)`. */
+function describeWord(port: KernelPort): string {
+  const w = port.elem === 'i32' ? 32 : 64, n = port.frac_bits ?? 0
+  return `${port.elem === 'i32' ? 'int32' : 'int'} Q${w - n}.${n}`
+}
+function wordRangeLabel(port: KernelPort): string {
+  const k = (port.elem === 'i32' ? 32 : 64) - 1 - (port.frac_bits ?? 0)
+  const end = k >= 0 ? (1n << BigInt(k)).toString() : '0.5'
+  return `[-${end}, ${end})`
+}
+
+/** Why value `x` does not fit an integer port, or `null` when it does: its
+ *  word `x · 2^frac_bits` must lie in the word's range (it is then truncated
+ *  toward zero). Past the range the word would saturate, so a write is
+ *  refused instead, as the compiler's `set_param` and the native host refuse
+ *  it. */
+export function wordRangeError(port: KernelPort, x: number): string | null {
+  if (!isWordPort(port)) return null
+  const scaled = x * 2 ** (port.frac_bits ?? 0)
+  const hi = 2 ** ((port.elem === 'i32' ? 32 : 64) - 1)
+  if (scaled >= -hi && scaled < hi) return null
+  return `value ${x} is outside the range of ${describeWord(port)}, ${wordRangeLabel(port)}`
 }
 
 /** Is this port an integer word? */

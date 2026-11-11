@@ -1102,13 +1102,27 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
 
   // An integer param is written raw: every other discipline re-anchors in
   // float arithmetic on f64 companions, and the compiler refuses to attach
-  // one to a typed port (`FlatPlan.portError?`). Refuse here too.
+  // one to a typed port, as its base or as a companion
+  // (`FlatPlan.portError?`; the web `ParamWriter` likewise). Refuse here too,
+  // over every slot the discipline would touch: the base, the companions the
+  // manifest lists, and the ones each discipline implies by name.
   if (discipline != "raw")
   {
-    const uint32_t bi = slot_of("param:" + name);
-    if (bi != UINT32_MAX && state.slot_word_format(bi))
-      return fail("set_param: '" + name + "' is an integer param; discipline '"
-        + discipline + "' is not defined on it");
+    std::vector<std::string> touched{name};
+    if (pd)
+      touched.insert(touched.end(), pd->companions.begin(), pd->companions.end());
+    if (discipline == "glide")
+      for (const char * suffix : {"#v0", "#v1", "#t0"}) touched.push_back(name + suffix);
+    else if (discipline == "anchor")
+      touched.push_back(name + "#phase");
+    for (const auto & slot_name : touched)
+    {
+      const uint32_t si = slot_of("param:" + slot_name);
+      if (si != UINT32_MAX && state.slot_word_format(si))
+        return fail("set_param: '" + name + "': discipline '" + discipline
+          + "' is not defined on the integer slot 'param:" + slot_name
+          + "' (an integer param is written raw)");
+    }
   }
 
   if (discipline == "glide")
@@ -1185,6 +1199,14 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   const uint32_t bi = slot_of("param:" + name);
   if (bi == UINT32_MAX)
     return unknown();
+  // A typed param's value must fit its format; past the range the word would
+  // saturate, so the write is refused (the Lean `set_param` refuses it first).
+  if (const tropical_port::Format * f = state.slot_word_format(bi))
+  {
+    const std::string range = tropical_port::range_error(*f, value);
+    if (!range.empty())
+      return fail("set_param: param '" + name + "': " + range);
+  }
   write(bi, state.control_cell(bi, value));
   return commit();
 }

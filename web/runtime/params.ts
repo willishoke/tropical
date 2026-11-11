@@ -15,13 +15,14 @@
  * Anything else is refused by name. An integer param (an `i32`/`i64` word with
  * `frac_bits`) is written raw only: `anchor` re-anchors in float arithmetic,
  * and the compiler never attaches it to an integer port; a manifest that did
- * is refused here rather than written wrong. A glide's discipline is declared on a base
+ * is refused here rather than written wrong, and so is a value outside an
+ * integer param's format (its word would saturate). A glide's discipline is declared on a base
  * name that has no port of its own (its ports are the `#v0/#v1/#t0` companions),
  * so a host reading only the kernel type cannot see it; the player does not
  * guess one.
  */
-import type { KernelManifest } from './manifest.js'
-import { isWordPort, kernelParams } from './manifest.js'
+import type { KernelManifest, KernelPort } from './manifest.js'
+import { isWordPort, kernelParams, wordRangeError } from './manifest.js'
 import type { WasmKernel } from './kernel.js'
 
 type PortDiscipline = { discipline: string; companions?: string[] }
@@ -38,9 +39,11 @@ export class ParamWriter {
   private readonly index = new Map<string, number>()
   private readonly disciplines = new Map<string, PortDiscipline>()
   private readonly words = new Set<string>()
+  private readonly ports: KernelPort[]
 
   constructor(private readonly manifest: KernelManifest) {
-    kernelParams(manifest).forEach((port, j) => {
+    this.ports = kernelParams(manifest)
+    this.ports.forEach((port, j) => {
       this.index.set(port.name, j)
       if (isWordPort(port)) this.words.add(port.name)
       const d = (port as { discipline?: PortDiscipline }).discipline
@@ -71,6 +74,8 @@ export class ParamWriter {
     const problem = this.check(name)
     if (problem) throw new RangeError(problem)
     const j = this.index.get(name)!
+    const range = wordRangeError(this.ports[j]!, value)
+    if (range) throw new RangeError(`param '${name}': ${range}`)
     const d = this.disciplines.get(name)
     if (d?.discipline === 'anchor') {
       const companion = d.companions?.[0]

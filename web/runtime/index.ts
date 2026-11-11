@@ -7,7 +7,7 @@
 export type { KernelManifest, KernelPort, KernelElem, KernelRole } from './manifest.js'
 export {
   kernelFrames, kernelParams, kernelOutputChannelCount, kernelOutputWordScale,
-  encodeWord, wordValue, isWordPort,
+  encodeWord, wordValue, isWordPort, wordRangeError,
   MAX_KERNEL_OUTPUT_CHANNELS, CLOCK_FRAC_BITS, TAU_ELEM,
 } from './manifest.js'
 export type { KernelLayout } from './layout.js'

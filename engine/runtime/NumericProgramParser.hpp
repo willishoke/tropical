@@ -572,6 +572,19 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
           throw std::runtime_error(
             "NumericProgramParser: integer param '" + result.input_names[i]
             + "' has a non-integer default word");
+        // The word must fit the port's element (`FlatPlan.portError?`): an
+        // i64 past INT64_MAX arrives as an unsigned number, an i32 past its
+        // range would be cut to its low 32 bits by the kernel's i32 load.
+        const bool fits = d.is_number_unsigned()
+          ? d.get<uint64_t>() <= static_cast<uint64_t>(
+              f.elem == tropical_port::Elem::I32 ? INT32_MAX : INT64_MAX)
+          : d.get<int64_t>() >= tropical_port::word_min(f)
+            && (f.elem != tropical_port::Elem::I32 || d.get<int64_t>() <= INT32_MAX);
+        if (!fits)
+          throw std::runtime_error(
+            "NumericProgramParser: integer param '" + result.input_names[i]
+            + "' default word " + d.dump() + " is outside its " + port.value("elem", std::string{})
+            + " word");
         result.input_default_words[i] = d.get<int64_t>();
       }
     }

@@ -713,6 +713,9 @@ public:
 
   // Write a slot value from a control thread. All control writers serialize
   // with hot-swap, then publish one coherent snapshot for the next buffer.
+  // The raw by-index writer: it has no error channel, so a typed param's
+  // word is `encode_word`'s (saturated). Hosts write params by name
+  // (`dispatch_param_sync`), which refuses a value outside the format.
   void set_slot(uint32_t idx, double value)
   {
     std::lock_guard<std::mutex> lock(build_mutex_);
@@ -765,6 +768,10 @@ public:
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
       if (state.slot_names[i] == name)
       {
+        // A typed param's value outside its format is refused, not saturated.
+        if (const tropical_port::Format * f = state.slot_word_format(i))
+          if (!tropical_port::range_error(*f, value).empty())
+            return false;
         const std::vector<double> previous = state.slots;
         state.slots[i] = state.control_cell(i, value);
 #ifdef TROPICAL_METAL

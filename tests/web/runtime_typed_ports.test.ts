@@ -8,8 +8,10 @@
  *  2. `encodeWord` is the kernel's conversion: truncate toward zero, saturate,
  *     NaN → 0, exact power-of-two scaling, a BigInt for an `i64` word.
  *  3. The reader refuses what it cannot bind (an `f32` param, a non-scalar
- *     param, a word with more fraction bits than bits), and `ParamWriter`
- *     refuses a discipline other than `raw` on an integer port.
+ *     param, a word with more fraction bits than bits, a default that is not
+ *     a word it can hold exactly — an i64 past 2^53), and `ParamWriter`
+ *     refuses a discipline other than `raw` on an integer port and a value
+ *     outside an integer port's format.
  *  4. An existing f64 manifest reads exactly as before (f64 cells and output).
  */
 import { describe, test, expect, setDefaultTimeout } from 'bun:test'
@@ -118,6 +120,24 @@ describe('typed ports in the web runtime', () => {
     expect(new ParamWriter(anchored).check('param:x')).toMatch(/integer word; discipline 'anchor' is not defined/)
     expect(() => kernelOutputChannelCount({ ...base, outputs: [{ name: 'out', elem: 'i64', shape: [16, 1] }] }))
       .toThrow(/f64 or i32/)
+    // a default word the JSON double cannot carry exactly is refused, not wrapped
+    expect(() => kernelParams(bad({ ...port('i64', 0), default: 9223372036854775807 })))
+      .toThrow(/past ±\(2\^53 − 1\)/)
+    expect(() => kernelParams(bad({ ...port('i64', 0), default: 2 ** 53 }))).toThrow(/does not carry it exactly/)
+    expect(kernelParams(bad({ ...port('i64', 0), default: 2 ** 53 - 1 }))[0]!.default).toBe(2 ** 53 - 1)
+    expect(() => kernelParams(bad({ ...port('i32', 16), default: 2147483648 }))).toThrow(/not an i32 word/)
+    expect(() => kernelParams(bad({ ...port('i32', 16), default: 0.5 }))).toThrow(/not an i32 word/)
+  })
+
+  test('the writer refuses a value outside an integer param\'s format', async () => {
+    const { k, manifest } = await load(knob(2))
+    const w = new ParamWriter(manifest)
+    expect(() => w.write(k, 'param:freq', 100000, k.frame))
+      .toThrow("param 'param:freq': value 100000 is outside the range of int32 Q16.16, [-32768, 32768)")
+    expect(() => w.write(k, 'param:freq', -32768.5, k.frame)).toThrow(/outside the range/)
+    expect(k.getParam(0)).toBe(2)                       // unchanged
+    w.write(k, 'param:freq', -32768, k.frame)
+    expect(k.getParam(0)).toBe(-32768)
   })
 
   test('an f64 manifest reads as before', async () => {
