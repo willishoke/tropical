@@ -1,5 +1,6 @@
 import Tropical.Plan
 import Tropical.PlanDecode
+import Tropical.Ir.ConstFold
 
 /-!
 # Kernel — the typed kernel at the port
@@ -17,12 +18,17 @@ What the derivation says:
   `fixed-carrier.md` ledger and `Ir/ClockFormat.lean`), shape `[frames]`, role `signal`. Shapes are
   static, so `frames` is a parameter of the type — a different buffer
   length is a different kernel.
-* Every `param:<name>` slot is a scalar `f64` input with role `param`, its
-  seed from `slot_defaults` and its write discipline from
-  `param_disciplines` (`host-param-dispatch.md` stays normative for the
-  arithmetic). Wire slots and `coef:<n>` slots are internal and absent.
-* `out` is the one output: `f64`, shape `[frames, channels]`, frame-major
-  (`stereo-output-contract.md`).
+* Every `param:<name>` slot is a scalar input with role `param`, its seed
+  from `slot_defaults` and its write discipline from `param_disciplines`
+  (`host-param-dispatch.md` stays normative for the arithmetic). It is `f64`
+  unless the plan's `slot_types` declares it an integer word: then `i32`
+  (`int32`) or `i64` (`int`) with `frac_bits`, the word's fixed-point format
+  (`Tropical.PortFormat`). Wire slots and `coef:<n>` slots are internal and
+  absent.
+* `out` is the one output, shape `[frames, channels]`, frame-major
+  (`stereo-output-contract.md`): `f64`, or `i32` with `frac_bits` when the
+  channels carry an `int32` program output (`slot_types` lists their
+  sources; `FlatPlan.portError?` keeps one element type per buffer).
 * The rate is a constant of the kernel, not an input.
 
 Element types and roles carry their wire spellings so a host reads one
@@ -42,9 +48,9 @@ def schema : String := "tropical_kernel_1"
     realization; Metal refines values to `f32` under its tolerance gate.
     `i64q16` is the signed Q48.16 clock rail: `i64` with `clockFracBits` = 16
     fraction bits (`Ir/ClockFormat.lean`; the `long-horizon` gate pins the
-    two together). `i32` is a 32-bit integer output a target without an FPU
-    stores directly (`diffcli compile-object --out-elem i32`); its scale (e.g.
-    Q1.15) is the producing program's, stated in the object manifest. -/
+    two together). `i32` and `i64` are integer words: an `int32` param or
+    output, an `int` param. Their fixed-point format is the port's
+    `frac_bits`, declared by the program. -/
 inductive Elem where
   | f64 | i64 | i64q16 | i32
 deriving BEq, Repr, Inhabited
@@ -98,6 +104,10 @@ structure Port where
       source (the slot its sink mixes first), `""` for a silent channel.
       The scope resolves a tap name to a channel through this. -/
   channels : Array String := #[]
+  /-- For an integer port: its fraction bits, so word `w` means
+      `w · 2^-fracBits` (`Tropical.PortFormat`). `none` on float ports. τ
+      carries 16, the rail's (`i64q16`). -/
+  fracBits : Option Nat := none
 deriving Inhabited
 
 /-- The realization a loader compiles; not part of the type's meaning. -/
@@ -152,11 +162,34 @@ private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :
     { discipline := d.discipline, glideDurSec := d.glideDurSec,
       companions := d.companions }
 
+/-- The element type of a port of format `f`. -/
+def Elem.ofFormat (f : Tropical.PortFormat) : Elem :=
+  match f.kind with
+  | .int32 => .i32
+  | .int => .i64
+  | _ => .f64
+
+/-- The word a host writes for value `x` at an integer port of format `f`:
+    `x · 2^fracBits`, truncated toward zero and saturated to the word, NaN →
+    0. This is the kernel's own float → integer conversion
+    (`ConstFold.truncSatToInt32`/`truncSatToInt`, `llvm.fptosi.sat`), so a
+    host and the compiler encode a knob value the same way; the scaling by a
+    power of two is exact in binary64. -/
+def encodeWord (f : Tropical.PortFormat) (x : Float) : Int :=
+  let scaled := x * (2.0 : Float) ^ f.fracBits.toFloat
+  match f.kind with
+  | .int32 => Tropical.Ir.truncSatToInt32 scaled
+  | _ => Tropical.Ir.truncSatToInt scaled
+
+/-- The output's format (`FlatPlan.outputFormat`). -/
+def outputFormat (plan : FlatPlan) : Tropical.PortFormat := plan.outputFormat
+
 /-- Derive the kernel type of a plan compiled for `frames` samples per call. -/
-def ofPlan (plan : FlatPlan) (frames : Nat) (outElem : Elem := .f64) :
-    Except String KernelType := do
+def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
+  if let some e := plan.portError? then throw s!"Kernel: {e}"
   let tau : Port :=
-    { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal }
+    { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal,
+      fracBits := some 16 }
   let mut inputs : Array Port := #[tau]
   for i in paramSlotIndices plan do
     let slotName := plan.slotNames[i]!
@@ -166,12 +199,17 @@ def ofPlan (plan : FlatPlan) (frames : Nat) (outElem : Elem := .f64) :
       | some (.num n) => pure (some n)
       | some other =>
         throw s!"Kernel: slot '{slotName}' default is not a number: {other.compress}"
+    let fmt := (plan.slotType? i).getD {}
     inputs := inputs.push {
-      name := slotName, elem := .f64, shape := #[], role := some .param,
-      default, discipline := disciplineOf plan base }
+      name := slotName, elem := Elem.ofFormat fmt, shape := #[], role := some .param,
+      default, discipline := disciplineOf plan base,
+      fracBits := if fmt.kind.isInteger then some fmt.fracBits else none }
+  let outFmt := outputFormat plan
   let out : Port :=
-    { name := outName, elem := outElem, shape := #[frames, plan.outputChannelCount],
-      channels := channelNames plan }
+    { name := outName, elem := Elem.ofFormat outFmt,
+      shape := #[frames, plan.outputChannelCount],
+      channels := channelNames plan,
+      fracBits := if outFmt.kind.isInteger then some outFmt.fracBits else none }
   return {
     rate := plan.sampleRate
     inputs
@@ -204,6 +242,9 @@ def Port.toWire (p : Port) : Json :=
     | none => fields
   let fields := if p.channels.isEmpty then fields
     else fields.push ("channels", toJson p.channels)
+  let fields := match p.fracBits with
+    | some n => fields.push ("frac_bits", toJson n)
+    | none => fields
   Json.mkObj fields.toList
 
 def Realization.toWire (r : Realization) : Json :=
@@ -274,7 +315,11 @@ def Port.ofWire (j : Json) : Except String Port := do
   let discipline ← match j.getObjVal? "discipline" with
     | .ok d => some <$> Discipline.ofWire d
     | _ => pure none
-  return { name, elem, shape, role, default, discipline, channels := strArr j "channels" }
+  let fracBits := match j.getObjVal? "frac_bits" with
+    | .ok (.num n) => if n.exponent == 0 && n.mantissa ≥ 0 then some n.mantissa.toNat else none
+    | _ => none
+  return { name, elem, shape, role, default, discipline, channels := strArr j "channels",
+           fracBits }
 
 def Realization.ofWire (j : Json) : Except String Realization := do
   let modeStr ← reqStr "Kernel.Realization" j "mode"

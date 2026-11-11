@@ -449,26 +449,51 @@ def compileKernelVerb (args : List String) : IO UInt32 :=
     keeps `AllowFPOpFusion = Standard`), so every op rounds as written. -/
 def objectNumerics : Lean.Json := Lean.Json.mkObj [
   ("float", "ieee754-binary64"),
-  ("int", "i64-twos-complement-wrapping"),
+  ("int32", "two's complement on Z/2^32: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
+  ("int", "two's complement on Z/2^64: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
+  ("integer_ops", "total: division and remainder truncate toward zero, by 0 give 0, MIN / -1 = MIN; shift amounts are taken modulo the width; float to integer truncates toward zero and saturates, NaN to 0"),
+  ("tau", "int64 Q48.16, read as one 64-bit word per frame"),
+  ("frame_counter", "int32 (frames is a static constant)"),
   ("fp_contract", "off"),
   ("fast_math", false),
   ("rounding", "nearest-even"),
   ("denormals", "ieee")]
+
+/-- One port's buffer, as a C caller lays it out: element, number format
+    (the program's, `Tropical.PortFormat`), bytes per element (= alignment),
+    and for an integer param the word its default encodes to. -/
+def objectPortLayout (p : Tropical.Kernel.Port) : Lean.Json :=
+  let bytes : Nat := match p.elem with
+    | .f64 | .i64 | .i64q16 => 8
+    | .i32 => 4
+  let width : Nat := bytes * 8
+  let format : String := match p.fracBits with
+    | some n => s!"Q{width - n}.{n}"
+    | none => "ieee754-binary64"
+  let fields : List (String × Lean.Json) := [("name", p.name), ("elem", p.elem.wire),
+    ("format", format), ("shape", Lean.toJson p.shape), ("bytes", bytes), ("align", bytes)]
+  let fields := match p.fracBits with
+    | some n => fields ++ [("frac_bits", Lean.toJson n)]
+    | none => fields
+  Lean.Json.mkObj fields
 
 /-- `diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T]
     [--cpu C] [--features F] [--frames N] [--rate R] [--graph]` → one
     relocatable object of the port kernel for the target triple (default:
     the host), and its manifest at `<out>.manifest.json`: the
     `tropical_kernel_1` manifest plus an `object` block naming the triple, the
-    symbol and the numeric contract. The same emitted LLVM as `compile-wasm`
-    and the JIT; no link. `--triple thumbv6m-none-eabi` gives a Cortex-M0+
-    object, `--triple wasm32-unknown-unknown` a wasm object (not a module). -/
+    symbol, the per-port buffer layout and the numeric contract. Every port's
+    element type and fixed-point format come from the program (an `int32`
+    output is an `i32` port with the output's declared `frac_bits`; a typed
+    param is an `i32`/`i64` port); there is no flag for them. The same emitted
+    LLVM as `compile-wasm` and the JIT; no link. `--triple thumbv6m-none-eabi`
+    gives a Cortex-M0+ object, `--triple wasm32-unknown-unknown` a wasm object
+    (not a module). -/
 def compileObjectVerb (args : List String) : IO UInt32 :=
   runVerb "compile-object"
-    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--out-elem f64|i32] [--out-format Q1.15] [--emit-ir] [--fixtures] [--graph]"
+    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--emit-ir] [--fixtures] [--graph]"
     [valued "out", valued "triple", valued "cpu", valued "features", valued "frames",
-     valued "rate", valued "out-elem", valued "out-format", switch "emit-ir",
-     switch "fixtures", switch "graph"] args
+     valued "rate", switch "emit-ir", switch "fixtures", switch "graph"] args
     (fun a => do
       let some outPath := a.value? "out" | throw "--out <path> is required"
       return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
@@ -476,13 +501,8 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
   match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
   | .ok split =>
-    let outElem ← match (a.value? "out-elem").getD "f64" with
-      | "f64" => pure Tropical.Kernel.Elem.f64
-      | "i32" => pure .i32
-      | other => IO.eprintln s!"compile-object: --out-elem {other} (f64 | i32)"; return 1
-    let outFormat := (a.value? "out-format").getD (if outElem == .i32 then "int" else "ieee754-binary64")
-    match Tropical.Ir.EmitLlvm.emitKernel split frames outElem,
-          Tropical.Kernel.ofPlan split.audio frames outElem with
+    match Tropical.Ir.EmitLlvm.emitKernel split frames,
+          Tropical.Kernel.ofPlan split.audio frames with
     | .error e, _ => IO.eprintln s!"emitKernel: {e}"; return 1
     | _, .error e => IO.eprintln s!"compile-object: {e}"; return 1
     | .ok ir, .ok ktype =>
@@ -495,20 +515,7 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
       match ktype.toWire with
       | .error e => IO.eprintln s!"compile-object: {e}"; return 1
       | .ok kj =>
-        -- The buffer layout a caller lays out, port by port, in argument
-        -- order: element, number format, bytes per element (= alignment).
-        let layout (p : Tropical.Kernel.Port) (fmt : String) : Lean.Json :=
-          let bytes : Nat := match p.elem with
-            | .f64 | .i64 | .i64q16 => 8
-            | .i32 => 4
-          Lean.Json.mkObj [("name", p.name), ("elem", p.elem.wire), ("format", fmt),
-            ("shape", Lean.toJson p.shape), ("bytes", bytes), ("align", bytes)]
-        let portFormat (p : Tropical.Kernel.Port) : String := match p.elem with
-          | .i64q16 => "Q48.16"
-          | .f64 => "ieee754-binary64"
-          | .i64 => "int64"
-          | .i32 => outFormat
-        let ports := (ktype.inputs ++ ktype.outputs).map fun p => layout p (portFormat p)
+        let ports := (ktype.inputs ++ ktype.outputs).map objectPortLayout
         let objectBlock := Lean.Json.mkObj [
           ("triple", if triple.isEmpty then "host" else triple),
           ("cpu", if cpu.isEmpty then "generic" else cpu),
@@ -516,7 +523,6 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
           ("format", "relocatable-object"),
           ("symbol", "tropical_kernel"),
           ("frames", frames),
-          ("out_format", outFormat),
           ("abi", "C calling convention of the triple (AAPCS on ARM): one pointer argument per port, in port order; buffers little-endian, frame-major"),
           ("ports", Lean.Json.arr ports),
           ("numerics", objectNumerics)]

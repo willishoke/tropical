@@ -116,6 +116,11 @@ deriving Repr, Inhabited
 structure EmitSlots where
   paramHandles : Array (Nat × String) := #[]
   paramSlots : Array (Nat × Nat) := #[]
+  /-- The kind each typed param's slot holds (a param not listed is
+      `float`): a `paramRef` reads its slot at this kind, so an `int32` param
+      reaches an `int32` input with no conversion and any other crossing is
+      refused where it binds. -/
+  paramKinds : Array (Nat × ScalarType) := #[]
   nestedOutputSlots? : Option (Array (Nat × Array (Nat × Nat))) := none
   /-- Each child's declared scalar output types, by instance then output
       position. A child output slot is read at the type its producer wrote;
@@ -292,7 +297,9 @@ private def tryTerminal (e : ENode) (expected : Option ScalarType) :
       | none => pure (some (.input i.idx portT, portT))
   | .paramRef i =>
     match lookup st.slots.paramSlots i.idx with
-    | some slot => pure (some (.slot slot .float, .float))
+    | some slot =>
+      let k := (lookup st.slots.paramKinds i.idx).getD .float
+      pure (some (.slot slot k, k))
     | none =>
       match lookup st.slots.paramHandles i.idx with
       | some ptr => pure (some (.param ptr .float, .float))

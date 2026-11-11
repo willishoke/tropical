@@ -134,6 +134,41 @@ private def resolveDacWire (st : SessionSt) (expr : JsonV)
   | _ =>
     internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
 
+/-- A `paramDecl`'s declared format: `type` (`"float"`, the default, or
+    `"int32"`/`"int"`) and, for an integer, `frac_bits` (default 0), the
+    word's fixed-point format (`Tropical.PortFormat`). The `value` is the real
+    value; it must lie in the format's range, since the word it encodes to
+    (`Kernel.encodeWord`) would otherwise saturate. -/
+private def paramFormatOf (context name : String) (d : JsonV) :
+    SessionM Tropical.PortFormat := do
+  let kind ← match d.getField? "type" with
+    | none => pure Tropical.Parse.ScalarKind.float
+    | some (.str s) =>
+      match Tropical.Parse.ScalarKind.ofWire? s with
+      | some .bool | none =>
+        internalError s!"{context}: paramDecl '{name}': type '{s}' is not a param type (float, int32 or int)"
+      | some k => pure k
+    | some _ =>
+      internalError s!"{context}: paramDecl '{name}': type must be a string (float, int32 or int)"
+  let fracBits ← match d.getField? "frac_bits" with
+    | none => pure 0
+    | some (.num n) =>
+      if n.exponent == 0 && n.mantissa ≥ 0 then pure n.mantissa.toNat
+      else internalError s!"{context}: paramDecl '{name}': frac_bits must be a non-negative integer"
+    | some _ => internalError s!"{context}: paramDecl '{name}': frac_bits must be a non-negative integer"
+  let f : Tropical.PortFormat := { kind, fracBits }
+  if let some e := f.error? then
+    internalError s!"{context}: paramDecl '{name}': {e}"
+  if kind.isInteger then
+    if let some (.num n) := d.getField? "value" then
+      let w := Tropical.PortFormat.wordBits kind
+      let scaled := n.toFloat * (2.0 : Float) ^ fracBits.toFloat
+      let lo := -((2.0 : Float) ^ (w - 1).toFloat)
+      let hi := (2.0 : Float) ^ (w - 1).toFloat
+      unless lo ≤ scaled && scaled < hi do
+        internalError s!"{context}: paramDecl '{name}': value {n} is outside the range of {f.describe}"
+  pure f
+
 /-- Walk a normalized v2 node into the session (additive; `loadPatch`
     clears first). Canonical order is body parameter declarations,
     instances (+ wires), defaults, then body graph outputs. -/
@@ -174,7 +209,14 @@ def ingestProgram (node : JsonV) (merge : Bool) : SessionM Unit := do
         "programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types."
 
   -- Params before instances (instances may reference them). Idempotent
-  -- per name.
+  -- per name. A typed param records its format beside its value.
+  for d in jvBodyEntries node "decls" do
+    if jvOp? d == some "paramDecl" then
+      if let some name := jvStr? d "name" then
+        let f ← paramFormatOf context name d
+        let st ← get
+        if !st.params.any (·.1 == name) && !f.isDefault then
+          modify fun st => { st with paramTypes := st.paramTypes.push (name, f) }
   for (name, value) in paramSpecs do
     let st ← get
     if !st.params.any (·.1 == name) then
@@ -262,7 +304,7 @@ def normalizePatch (text : String) : SessionM JsonV := do
 def loadPatch (node : JsonV) : SessionM Unit := do
   modify fun st =>
     { st with instances := #[], wires := #[], graphOutputs := #[],
-              params := #[], nameCounters := {} }
+              params := #[], paramTypes := #[], nameCounters := {} }
   ingestProgram node (merge := false)
 
 /-- `merge`: fold the document's graph into the session's. -/

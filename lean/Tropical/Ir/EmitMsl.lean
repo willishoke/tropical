@@ -1052,7 +1052,12 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 private def sinkOutputIndex (channelCount target : Nat) : String :=
   if channelCount == 1 then "s" else s!"s * {channelCount}u + {target}u"
 
-def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) : M Unit := do
+/-- `scale` is the output's `2^-fracBits` (1 for a float output): an `int32`
+    output channel's word is written as its real value, `word · 2^-n`, which
+    is exact in f32 for a word below 2²⁴ (a Q1.15 sample is), so the GPU's
+    float image equals the JIT port's word widened by the runtime. -/
+def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) (scale : Float := 1.0) :
+    M Unit := do
   -- Targets are unique by the validated-plan contract.  Fill holes so sparse
   -- target sets and sink-free plans never expose stale GPU buffer contents.
   for target in [0:channelCount] do
@@ -1064,7 +1069,7 @@ def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) : M Unit := do
       let v ← coerceF32 (← loadSlot slotIdx)
       let r ← bindVal .float s!"({acc} + {v})"
       acc := r.ref
-    line s!"output_buffer[{sinkOutputIndex channelCount sink.target}] = {acc} * {f32Lit sink.gain.toFloat};"
+    line s!"output_buffer[{sinkOutputIndex channelCount sink.target}] = {acc} * {f32Lit (sink.gain.toFloat * scale)};"
 
 -- ─────────────────────────────────────────────────────────────
 -- Module entry point
@@ -1171,6 +1176,14 @@ private def cooperativeRouteConstants (begins : Array NInstr) : String :=
 def emitKernel (plan : FlatPlan) (frames : Nat) : Except String String := do
   if frames == 0 then throw "EmitMsl: frames must be positive"
   if let some e := plan.kindError? then throw s!"EmitMsl: ill-kinded plan: {e}"
+  if let some e := plan.portError? then throw s!"EmitMsl: ill-typed port: {e}"
+  -- Metal binds params through the f32 slot vector and its f64 CPU
+  -- pre-pass, neither of which holds a 32- or 64-bit word exactly. A typed
+  -- param runs on the JIT and wasm; here it is refused, not narrowed.
+  for t in plan.slotTypes do
+    let name := plan.slotNames[t.slot]?.getD ""
+    if name.startsWith "param:" then
+      throw s!"EmitMsl: param '{name}' is an {t.format.describe} word; Metal binds params as f32 slots, which cannot hold it exactly (typed params run on the JIT and wasm)"
   if !plan.outputLayoutWellFormed then
     throw "EmitMsl: output channel count must be positive and sink targets must be unique and in range"
   if plan.outputChannelCount > 64 then
@@ -1247,6 +1260,7 @@ def emitKernel (plan : FlatPlan) (frames : Nat) : Except String String := do
       emitKernelBlock sizes inst
     if cooperative then ensureCooperativeLane0
     emitSinks plan.outputChannelCount plan.sinks
+      ((2.0 : Float) ^ (-plan.outputFormat.fracBits.toFloat))
     if cooperative then
       popIndent
       line "}"

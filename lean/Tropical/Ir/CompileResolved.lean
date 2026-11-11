@@ -25,6 +25,7 @@ open Tropical.Ir.Emit (EmitSlots ArraySlotInfo ScalarType inputDeclScalarType)
 structure Context where
   paramHandles : Array (Nat × String) := #[]
   paramSlots : Array (Nat × Nat) := #[]
+  paramKinds : Array (Nat × ScalarType) := #[]
   nestedOutputSlots? : Option (Array (Nat × Array (Nat × Nat))) := none
   nestedOutputTypes : Array (Nat × Array (Nat × ScalarType)) := #[]
   nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
@@ -86,6 +87,7 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
   let emitSlots : EmitSlots := {
     paramHandles := ctx.paramHandles
     paramSlots := ctx.paramSlots
+    paramKinds := ctx.paramKinds
     nestedOutputSlots? := ctx.nestedOutputSlots?
     nestedOutputTypes := ctx.nestedOutputTypes
     nestedInputSlots := ctx.nestedInputSlots

@@ -41,8 +41,8 @@ private def stereoEmissionLooksInterleaved : Bool :=
   match emit stereoPlan with
   | .error _ => false
   | .ok ir =>
-      hasSubstring ir "mul i64 %s, 2" &&
-      hasSubstring ir "add i64" &&
+      hasSubstring ir "mul i32 %s, 2" &&
+      hasSubstring ir "add i32" &&
       hasSubstring ir ", 0\n" &&
       hasSubstring ir ", 1\n"
 

@@ -33,6 +33,15 @@ def portTypeObj : PortType → Json
       [("kind", Json.str "array"), ("element", Json.str element.wire),
        ("shape", Json.arr (shape.map Json.num))]
 
+/-- `portTypeObj`, with an integer port's fixed-point format as `frac_bits`
+    when it has one (`InputDecl.fracBits`): the session reads port types from
+    here, so this is where a declared format reaches the patch bay. -/
+def portTypeObjF (fracBits : Nat) (t : PortType) : Json :=
+  match t, fracBits with
+  | .scalar k, n+1 => Json.mkObj [("kind", Json.str "scalar"), ("scalar", Json.str k.wire),
+      ("frac_bits", toJson (n + 1))]
+  | t, _ => portTypeObj t
+
 /-- `portTypeToString` (the display string). -/
 def portTypeStr : PortType → String
   | .scalar k => k.wire
@@ -104,7 +113,7 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
   let resolved ← Codec.encodeResolved arena idx
   let inputs ← prog.inputs.mapM fun d => do
     let (t, tObj) := match d.type? with
-      | some pt => (Json.str (portTypeStr pt), portTypeObj pt)
+      | some pt => (Json.str (portTypeStr pt), portTypeObjF d.fracBits pt)
       | none => (jsonNull, jsonNull)
     let dflt ← match d.default? with
       | some e =>
@@ -115,7 +124,7 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
       ("type_obj", tObj), ("default", dflt)]
   let outputs := prog.outputs.map fun d =>
     let (t, tObj) := match d.type? with
-      | some pt => (Json.str (portTypeStr pt), portTypeObj pt)
+      | some pt => (Json.str (portTypeStr pt), portTypeObjF d.fracBits pt)
       | none => (jsonNull, jsonNull)
     Json.mkObj [("name", Json.str d.name), ("type", t), ("type_obj", tObj)]
   -- CF-only: programs have no reg decls, so the registers list is empty.

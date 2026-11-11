@@ -190,6 +190,7 @@ def encProgram (arena : Arena) (hw : arena.exprs.wf = true)
     match d.default? with
     | some e => fields := fields ++ [("default", ← encExpr arena hw e)]
     | none => pure ()
+    if d.fracBits != 0 then fields := fields ++ [("frac_bits", Lean.toJson d.fracBits)]
     inputs := inputs.push (Json.mkObj fields)
   let mut outputs : Array Json := #[]
   for d in p.outputs do
@@ -197,6 +198,7 @@ def encProgram (arena : Arena) (hw : arena.exprs.wf = true)
     match d.type? with
     | some t => fields := fields ++ [("type", encPortType t)]
     | none => pure ()
+    if d.fracBits != 0 then fields := fields ++ [("frac_bits", Lean.toJson d.fracBits)]
     outputs := outputs.push (Json.mkObj fields)
   let decls ← p.decls.attach.mapM fun dm =>
     encBodyDecl arena hw hwp bound dm.1 fun name t hdt =>
@@ -293,6 +295,13 @@ private def reqNat (ctx : String) (j : JsonV) (k : String) : Except String Nat :
     if n.exponent == 0 && n.mantissa ≥ 0 then pure n.mantissa.toNat
     else err ctx s!"field '{k}' must be a non-negative integer"
   | _ => err ctx s!"field '{k}' must be a number"
+
+/-- A port's `frac_bits` (its fixed-point format, `Tropical.PortFormat`),
+    0 when absent. -/
+private def optFracBits (ctx : String) (j : JsonV) : Except String Nat :=
+  match j.getField? "frac_bits" with
+  | none => pure 0
+  | some _ => reqNat ctx j "frac_bits"
 
 private def optNum (ctx : String) (j : JsonV) (k : String) :
     Except String (Option Lean.JsonNumber) :=
@@ -484,7 +493,8 @@ private def decodeProgram (i : Nat) (j : JsonV)
     let default? ← match d.getField? "default" with
       | none => pure none
       | some e => pure (some (← expr s!"{dctx}.default" e))
-    inputs := inputs.push { name := ← reqStr dctx d "name", type?, default? }
+    let fracBits ← optFracBits dctx d
+    inputs := inputs.push { name := ← reqStr dctx d "name", type?, default?, fracBits }
 
   let mut outputs : Array OutputDecl := #[]
   for h : k in [0:(← reqArr ctx j "outputs").size] do
@@ -494,7 +504,8 @@ private def decodeProgram (i : Nat) (j : JsonV)
     let type? ← match d.getField? "type" with
       | none => pure none
       | some t => pure (some (← decodePortType s!"{dctx}.type" t))
-    outputs := outputs.push { name := ← reqStr dctx d "name", type? }
+    let fracBits ← optFracBits dctx d
+    outputs := outputs.push { name := ← reqStr dctx d "name", type?, fracBits }
 
   let mut decls : Array BodyDecl := #[]
   for h : k in [0:(← reqArr ctx j "decls").size] do

@@ -34,8 +34,14 @@ def handleSave (env : Env) : EngineM Json := do
   let mut decls : Array Json := #[]
   -- paramDecls first, so they're declared before referencing instances.
   for (name, value) in st.params do
-    decls := decls.push <| Json.mkObj
-      [("op", Json.str "paramDecl"), ("name", Json.str name), ("value", value)]
+    let f := st.paramFormat name
+    let typeFields : List (String × Json) :=
+      if f.isDefault then []
+      else [("type", Json.str f.kind.wire)] ++
+        (if f.fracBits == 0 then [] else [("frac_bits", Lean.toJson f.fracBits)])
+    decls := decls.push <| Json.mkObj <|
+      [("op", Json.str "paramDecl"), ("name", Json.str name)] ++ typeFields ++
+      [("value", value)]
   for (name, info) in st.instances do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do

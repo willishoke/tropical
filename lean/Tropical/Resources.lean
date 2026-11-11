@@ -101,7 +101,10 @@ Declare parameters with body `paramDecl` nodes. Send a signal to the speakers
 with a body `outputAssign` named `"dac.out"`.
 
 Decl node shapes:
-- paramDecl:    { op, name, value? }
+- paramDecl:    { op, name, value?, type?, frac_bits? }
+                type is "float" (default), "int32" or "int"; an integer param
+                is a fixed-point word with frac_bits fraction bits (value is
+                the real value, e.g. type "int32", frac_bits 16 is Q16.16)
 - instanceDecl: { op, name, program, inputs? }
 
 Assign node shapes:
