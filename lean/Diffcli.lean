@@ -47,6 +47,14 @@ default is `Plan.defaultSampleRate`.
 
 open Tropical.CliArgs
 
+/-- `--float f64|f32`: the format the artifact realizes the `float` kind in
+    (`Kernel.FloatFormat`), binary64 when absent. -/
+private def floatFormat (a : Args) : Except String Tropical.Kernel.FloatFormat :=
+  match a.value? "float" with
+  | none => .ok .f64
+  | some s => match Tropical.Kernel.FloatFormat.ofWire? s with
+    | some f => .ok f
+    | none => .error s!"--float must be f64 or f32, not '{s}'"
 /-- Run a verb: read its flags and its one input path, decode the flag values
     it needs, and hand both to `body`. Any error goes to stderr with the
     verb's usage, and the verb exits 1. -/
@@ -64,10 +72,11 @@ private def runVerb {σ : Type} (verb usage : String) (flags : List Flag)
   | .ok (a, opts, path) => body a opts path
 
 def renderBytes (args : List String) : IO UInt32 :=
-  runVerb "render-bytes" "<plan.json> [--frames N] [--buffer N] [--start S] [--all-channels]"
-    [valued "frames", valued "buffer", valued "start", switch "all-channels"] args
-    (fun a => return (← a.natD "frames" 16, ← a.natD "buffer" 256, ← a.natD "start" 0))
-    fun a (frames, buffer, start) planPath => do
+  runVerb "render-bytes" "<plan.json> [--frames N] [--buffer N] [--start S] [--float f64|f32] [--all-channels]"
+    [valued "frames", valued "buffer", valued "start", valued "float", switch "all-channels"] args
+    (fun a => return (← a.natD "frames" 16, ← a.natD "buffer" 256, ← a.natD "start" 0,
+      ← floatFormat a))
+    fun a (frames, buffer, start, float) planPath => do
   let planJson ← IO.FS.readFile planPath
   -- Lean owns codegen: parse the plan, stage-0 split + emit IR, load via
   -- load_ir_staged. There is no C++ plan compiler.
@@ -77,7 +86,9 @@ def renderBytes (args : List String) : IO UInt32 :=
       | .error e => IO.eprintln s!"render-bytes: ofWire: {e}"; return 1
       | .ok p => pure p
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  Tropical.StagedLoad.load rt plan
+  -- `--float f32`: the binary32 artifact of the same plan, its output
+  -- widened (exactly) to the f64 stream like any other.
+  Tropical.StagedLoad.load rt plan float
   if start != 0 then rt.setSampleIndex start.toUInt64
   -- `--all-channels`: every output channel, frame-major, instead of the
   -- channel-0 view (the golden hashes are channel 0).
@@ -375,14 +386,16 @@ private def compileToSplit (a : Args) (rate? : Option Nat) (path : String) :
     on stdout: the port kernel for `N` frames per call (default 512), with
     the stage-0 prologue inside. -/
 def emitIrVerb (args : List String) : IO UInt32 :=
-  runVerb "emit-ir" "<patch.json> [--frames N]" [valued "frames"] args
-    (fun a => return (← a.positive? "frames").getD Tropical.Artifact.defaultFrames)
-    fun _ frames patch => do
+  runVerb "emit-ir" "<patch.json> [--frames N] [--float f64|f32]"
+    [valued "frames", valued "float"] args
+    (fun a => return ((← a.positive? "frames").getD Tropical.Artifact.defaultFrames,
+      ← floatFormat a))
+    fun _ (frames, float) patch => do
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
     let opts ← Tropical.StagedLoad.optionsFromEnv
-    match Tropical.Ir.EmitLlvm.emitKernel (Tropical.Artifact.split opts plan) frames with
+    match Tropical.Ir.EmitLlvm.emitKernel (Tropical.Artifact.split opts plan) frames float with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 
@@ -410,16 +423,17 @@ def emitMslVerb (args : List String) : IO UInt32 :=
     or forced with `--graph`; see `compileToSplit`). -/
 def compileWasmVerb (args : List String) : IO UInt32 :=
   runVerb "compile-wasm"
-    "<patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--fixtures] [--graph]"
-    [valued "out", valued "frames", valued "rate", switch "fixtures", switch "graph"] args
+    "<patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--float f64|f32] [--fixtures] [--graph]"
+    [valued "out", valued "frames", valued "rate", valued "float", switch "fixtures",
+     switch "graph"] args
     (fun a => do
       let some outPath := a.value? "out" | throw "--out <path> is required"
-      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
-    fun a (outPath, frames, rate?) patch => do
+      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?, ← floatFormat a))
+    fun a (outPath, frames, rate?, float) patch => do
   match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
   | .ok split =>
-    match Tropical.Ir.EmitLlvm.emitKernel split frames with
+    match Tropical.Ir.EmitLlvm.emitKernel split frames float with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
       let wasm ← Tropical.Toolchain.Wasm.compileIr ir
@@ -432,14 +446,15 @@ def compileWasmVerb (args : List String) : IO UInt32 :=
     `tropical_kernel_1` manifest of the patch for `N` frames per call
     (default 128), on stdout. The browser-side manifest. -/
 def compileKernelVerb (args : List String) : IO UInt32 :=
-  runVerb "compile-kernel" "<patch-or-graph.json> [--frames N] [--rate R] [--fixtures] [--graph]"
-    [valued "frames", valued "rate", switch "fixtures", switch "graph"] args
-    (fun a => return ((← a.positive? "frames").getD 128, ← a.rate?))
-    fun a (frames, rate?) patch => do
+  runVerb "compile-kernel"
+    "<patch-or-graph.json> [--frames N] [--rate R] [--float f64|f32] [--fixtures] [--graph]"
+    [valued "frames", valued "rate", valued "float", switch "fixtures", switch "graph"] args
+    (fun a => return ((← a.positive? "frames").getD 128, ← a.rate?, ← floatFormat a))
+    fun a (frames, rate?, float) patch => do
   match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
   | .ok split =>
-    match Tropical.Kernel.manifest split.audio frames with
+    match Tropical.Kernel.manifest split.audio frames float with
     | .error e => IO.eprintln s!"compile-kernel: {e}"; return 1
     | .ok manifest => IO.println manifest; return 0
 
@@ -447,8 +462,10 @@ def compileKernelVerb (args : List String) : IO UInt32 :=
     emitted IR and the toolchain's TargetOptions guarantee (`EmitLlvm` writes
     no `fast`/`contract`/`afn` flags and no `llvm.fmuladd`; `compileObject`
     keeps `AllowFPOpFusion = Standard`), so every op rounds as written. -/
-def objectNumerics : Lean.Json := Lean.Json.mkObj [
-  ("float", "ieee754-binary64"),
+def objectNumerics (float : Tropical.Kernel.FloatFormat) : Lean.Json := Lean.Json.mkObj [
+  ("float", float.ieeeName),
+  ("float_literals", "each plan literal is the nearest value of the float format to the decimal as written (one rounding, ties to even); constant folding is binary64 at compile time"),
+  ("float_rounding_functions", "floor, ceil and round are IEEE-exact (signed zeros included); at binary32 they are inline integer sequences, not library calls"),
   ("int32", "two's complement on Z/2^32: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
   ("int", "two's complement on Z/2^64: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
   ("integer_ops", "total: division and remainder truncate toward zero, by 0 give 0, MIN / -1 = MIN; shift amounts are taken modulo the width; float to integer truncates toward zero and saturates, NaN to 0"),
@@ -457,7 +474,8 @@ def objectNumerics : Lean.Json := Lean.Json.mkObj [
   ("fp_contract", "off"),
   ("fast_math", false),
   ("rounding", "nearest-even"),
-  ("denormals", "ieee")]
+  ("denormals", "ieee"),
+  ("fpu_state", "the caller's floating-point control state must be the IEEE default: round to nearest even and subnormals kept (on ARM, FPSCR.RMode = 0b00 and FPSCR.FZ = 0, the reset values); NaN payloads are not part of the contract")]
 
 /-- One port's buffer, as a C caller lays it out: element, number format
     (the program's, `Tropical.PortFormat`; `frac_bits` for an integer port),
@@ -465,13 +483,12 @@ def objectNumerics : Lean.Json := Lean.Json.mkObj [
     here: it is that input's `default` in the manifest's `inputs` (the kernel
     type this `object` block is attached to). -/
 def objectPortLayout (p : Tropical.Kernel.Port) : Lean.Json :=
-  let bytes : Nat := match p.elem with
-    | .f64 | .i64 | .i64q16 => 8
-    | .i32 => 4
+  let bytes : Nat := p.elem.bytes
   let width : Nat := bytes * 8
-  let format : String := match p.fracBits with
-    | some n => s!"Q{width - n}.{n}"
-    | none => "ieee754-binary64"
+  let format : String := match p.fracBits, p.elem with
+    | some n, _ => s!"Q{width - n}.{n}"
+    | none, .f32 => "ieee754-binary32"
+    | none, _ => "ieee754-binary64"
   let fields : List (String × Lean.Json) := [("name", p.name), ("elem", p.elem.wire),
     ("format", format), ("shape", Lean.toJson p.shape), ("bytes", bytes), ("align", bytes)]
   let fields := match p.fracBits with
@@ -479,39 +496,106 @@ def objectPortLayout (p : Tropical.Kernel.Port) : Lean.Json :=
     | none => fields
   Lean.Json.mkObj fields
 
+/-- What an undefined symbol in a port kernel's object asks the link for: the
+    op that needed it, in the IR's own words. Every port function is pure and
+    calls nothing of its own, so each undefined symbol is a runtime routine
+    the target could not do inline. -/
+def libcallOp (sym : String) : String :=
+  let s := if sym.startsWith "_" && !sym.startsWith "__" then (sym.drop 1).toString else sym
+  let isAny (xs : List String) := xs.contains s
+  if isAny ["__aeabi_l2f", "__aeabi_ul2f", "__floatdisf", "__floatundisf"] then
+    "an `int` (64-bit) to binary32 conversion: `toFloat` of an `int`, or an `int` operand of a float op (cast through `toInt32` where the value fits 32 bits)"
+  else if isAny ["__aeabi_l2d", "__aeabi_ul2d", "__floatdidf", "__floatundidf"] then
+    "an `int` (64-bit) to binary64 conversion"
+  else if isAny ["__aeabi_f2lz", "__aeabi_f2ulz", "__fixsfdi", "__fixunssfdi"] then
+    "a binary32 to `int` (64-bit) conversion: `toInt` of a float, or a float used as an array index or a bank count"
+  else if isAny ["__aeabi_d2lz", "__aeabi_d2ulz", "__fixdfdi", "__fixunsdfdi"] then
+    "a binary64 to `int` (64-bit) conversion"
+  else if isAny ["__aeabi_ldivmod", "__aeabi_uldivmod", "__divdi3", "__moddi3", "__udivdi3",
+      "__umoddi3", "__divmoddi4"] then
+    "`div`, `mod` or `floorDiv` on `int` (64-bit)"
+  else if isAny ["__aeabi_idiv", "__aeabi_idivmod", "__aeabi_uidiv", "__aeabi_uidivmod",
+      "__divsi3", "__modsi3", "__udivsi3", "__umodsi3"] then
+    "`div`, `mod` or `floorDiv` on `int32`, on a core without a divide instruction"
+  else if isAny ["__aeabi_lmul", "__muldi3"] then "a 64-bit multiply"
+  else if isAny ["__aeabi_llsl", "__aeabi_llsr", "__aeabi_lasr", "__ashldi3", "__lshrdi3",
+      "__ashrdi3"] then "a 64-bit shift"
+  else if s.startsWith "__aeabi_f" || s.endsWith "sf3" || s.endsWith "sf2" || s.endsWith "sfsi" then
+    "binary32 arithmetic on a target with no binary32 FPU (soft float)"
+  else if s.startsWith "__aeabi_d" || s.endsWith "df3" || s.endsWith "df2" || s.endsWith "dfsi" then
+    "binary64 arithmetic on a target with no binary64 FPU (soft float; `--float f32` realizes `float` in binary32)"
+  else if isAny ["floor", "floorf", "ceil", "ceilf", "round", "roundf", "trunc", "truncf",
+      "sqrt", "sqrtf", "fabs", "fabsf"] then
+    s!"the C library's `{s}`"
+  else if isAny ["memset", "memcpy", "memmove", "__aeabi_memset", "__aeabi_memclr",
+      "__aeabi_memcpy", "__aeabi_memmove", "__aeabi_memset4", "__aeabi_memclr4",
+      "__aeabi_memcpy4", "__aeabi_memset8", "__aeabi_memclr8"] then
+    "a zeroing or copying loop the optimizer turned into a C library call"
+  else "a runtime routine this compiler does not know"
+
+/-- Symbols a wasm object leaves to the linker that are not routines: the
+    shadow stack pointer and the linear memory it lives in. -/
+private def linkerProvided (triple : String) (sym : String) : Bool :=
+  triple.startsWith "wasm" &&
+    (sym == "__stack_pointer" || sym == "__linear_memory" || sym == "__indirect_function_table")
+
 /-- `diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T]
-    [--cpu C] [--features F] [--frames N] [--rate R] [--graph]` → one
+    [--cpu C] [--features F] [--frames N] [--rate R] [--float f64|f32]
+    [--allow-libcalls] [--graph]` → one
     relocatable object of the port kernel for the target triple (default:
     the host), and its manifest at `<out>.manifest.json`: the
     `tropical_kernel_1` manifest plus an `object` block naming the triple, the
-    symbol, the per-port buffer layout and the numeric contract. Every port's
-    element type and fixed-point format come from the program (an `int32`
-    output is an `i32` port with the output's declared `frac_bits`; a typed
-    param is an `i32`/`i64` port); there is no flag for them. The same emitted
-    LLVM as `compile-wasm` and the JIT; no link. `--triple thumbv6m-none-eabi`
-    gives a Cortex-M0+ object, `--triple wasm32-unknown-unknown` a wasm object
-    (not a module). -/
+    symbol, the per-port buffer layout, the float format and ABI, the libcalls
+    and the numeric contract. Every port's element type and fixed-point
+    format come from the program (an `int32` output is an `i32` port with the
+    output's declared `frac_bits`; a typed param is an `i32`/`i64` port); a
+    float port is `f64`, or `f32` in a binary32 artifact (`--float f32`).
+    The same emitted LLVM as `compile-wasm` and the JIT; no link.
+    `--triple thumbv6m-none-eabi` gives a Cortex-M0+ object,
+    `--triple thumbv7em-none-eabihf --cpu cortex-m4` a Cortex-M4F one
+    (FPv4-SP-D16, hard-float ABI), `--triple wasm32-unknown-unknown` a wasm
+    object (not a module).
+
+    A request the target cannot realize is refused at compile time, by name:
+    `--float f32` on a target with no binary32 FPU (the M0+), and any object
+    that would need a runtime routine (a soft-float helper, a 64-bit
+    division, a 64-bit integer ↔ float conversion, a C library call), named
+    with the op that asked for it. `--allow-libcalls` emits such an object
+    anyway, and its manifest lists every routine in `object.libcalls`. -/
 def compileObjectVerb (args : List String) : IO UInt32 :=
   runVerb "compile-object"
-    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--emit-ir] [--fixtures] [--graph]"
+    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--float f64|f32] [--allow-libcalls] [--emit-ir] [--fixtures] [--graph]"
     [valued "out", valued "triple", valued "cpu", valued "features", valued "frames",
-     valued "rate", switch "emit-ir", switch "fixtures", switch "graph"] args
+     valued "rate", valued "float", switch "allow-libcalls", switch "emit-ir",
+     switch "fixtures", switch "graph"] args
     (fun a => do
       let some outPath := a.value? "out" | throw "--out <path> is required"
-      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
-    fun a (outPath, frames, rate?) patch => do
+      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?, ← floatFormat a))
+    fun a (outPath, frames, rate?, float) patch => do
+  let triple := (a.value? "triple").getD ""
+  let cpu := (a.value? "cpu").getD ""
+  let features := (a.value? "features").getD ""
+  let allowLibcalls := a.has "allow-libcalls"
+  let hw ← Tropical.Toolchain.Wasm.targetFloatHardware triple cpu features
+  let targetName := hw.triple ++ (if cpu.isEmpty then "" else s!" (cpu {cpu})")
+  if float == .f32 && !hw.binary32 && !allowLibcalls then
+    IO.eprintln s!"compile-object: {targetName} has no binary32 FPU, so --float f32 would call a soft-float routine (__aeabi_fadd, __aeabi_fmul, …) for every float op. Refused: an integer program needs no float format, and a float one needs a target with an FPU or --allow-libcalls (the manifest's object block then lists every routine)."
+    return 1
   match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
   | .ok split =>
-    match Tropical.Ir.EmitLlvm.emitKernel split frames,
-          Tropical.Kernel.ofPlan split.audio frames with
+    match Tropical.Ir.EmitLlvm.emitKernel split frames float,
+          Tropical.Kernel.ofPlan split.audio frames float with
     | .error e, _ => IO.eprintln s!"emitKernel: {e}"; return 1
     | _, .error e => IO.eprintln s!"compile-object: {e}"; return 1
     | .ok ir, .ok ktype =>
-      let triple := (a.value? "triple").getD ""
-      let cpu := (a.value? "cpu").getD ""
-      let features := (a.value? "features").getD ""
       let obj ← Tropical.Toolchain.Wasm.compileObject ir triple cpu features
+      let undef := (← Tropical.Toolchain.Wasm.objectUndefinedSymbols obj).filter
+        (!linkerProvided hw.triple ·)
+      if !undef.isEmpty && !allowLibcalls then
+        let named := undef.toList.map fun s => s!"  {s}: {libcallOp s}"
+        IO.eprintln s!"compile-object: the {targetName} object needs runtime routines the target cannot do inline:\n{String.intercalate "\n" named}\nRefused (no object written). Pass --allow-libcalls to emit it anyway; the manifest's object block then lists them."
+        return 1
       IO.FS.writeBinFile (System.FilePath.mk outPath) obj
       if a.has "emit-ir" then IO.FS.writeFile (System.FilePath.mk (outPath ++ ".ll")) ir
       match ktype.toWire with
@@ -525,9 +609,13 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
           ("format", "relocatable-object"),
           ("symbol", "tropical_kernel"),
           ("frames", frames),
-          ("abi", "C calling convention of the triple (AAPCS on ARM): one pointer argument per port, in port order; buffers little-endian, frame-major"),
+          ("abi", "C calling convention of the triple (AAPCS on ARM): one pointer argument per port, in port order; buffers little-endian, frame-major. No float crosses in a register, so the float ABI only marks the object (a hard-float link takes it)"),
+          ("float", float.wire),
+          ("float_hardware", Lean.Json.mkObj [("binary32", hw.binary32), ("binary64", hw.binary64)]),
+          ("float_abi", hw.floatAbi),
+          ("libcalls", Lean.toJson undef),
           ("ports", Lean.Json.arr ports),
-          ("numerics", objectNumerics)]
+          ("numerics", objectNumerics float)]
         let manifest := kj.setObjVal! "object" objectBlock
         IO.FS.writeFile (System.FilePath.mk (outPath ++ ".manifest.json")) manifest.pretty
         IO.eprintln s!"compile-object: wrote {obj.size} bytes → {outPath}"
@@ -546,5 +634,5 @@ def main (args : List String) : IO UInt32 := do
   | "compile-object" :: rest => compileObjectVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]\n       diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--frames N] [--rate R] [--graph]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]\n       diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--frames N] [--rate R] [--float f64|f32] [--allow-libcalls] [--graph]"
     return 1

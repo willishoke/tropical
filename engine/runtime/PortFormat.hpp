@@ -12,6 +12,11 @@
 // holds the word's bits (an int32 sign-extended to 64 bits, so a little-endian
 // i32 load of the cell reads it), and the kernel is handed a pointer to the
 // cell: no conversion runs on the audio path.
+//
+// A binary32 artifact (`--float f32`, `Kernel.FloatFormat`) declares its
+// float ports `f32`: the cell then holds the binary32's bits in its low
+// word, written as `(float)value` (IEEE round to nearest even), and an `f32`
+// output renders into its own buffer and widens exactly to f64.
 
 #include <cmath>
 #include <cstdint>
@@ -24,14 +29,17 @@
 namespace tropical_port
 {
 
-enum class Elem : uint8_t { F64, I32, I64 };
+enum class Elem : uint8_t { F64, I32, I64, F32 };
 
 struct Format
 {
   Elem elem = Elem::F64;
   uint32_t frac_bits = 0;
 
-  bool is_word() const { return elem != Elem::F64; }
+  // An integer word with a fixed-point format.
+  bool is_word() const { return elem == Elem::I32 || elem == Elem::I64; }
+  // Not an f64: the cell holds the port's own bits (a word, or a binary32).
+  bool is_encoded() const { return elem != Elem::F64; }
 };
 
 inline Elem elem_of_wire(const std::string & wire)
@@ -39,6 +47,7 @@ inline Elem elem_of_wire(const std::string & wire)
   if (wire == "f64") return Elem::F64;
   if (wire == "i32") return Elem::I32;
   if (wire == "i64") return Elem::I64;
+  if (wire == "f32") return Elem::F32;
   throw std::runtime_error("PortFormat: unsupported element '" + wire + "'");
 }
 
@@ -73,6 +82,7 @@ inline int64_t word_min(const Format & f)
 // "int32 Q16.16", as Lean's `PortFormat.describe` spells it.
 inline std::string describe(const Format & f)
 {
+  if (f.elem == Elem::F32) return "binary32";
   if (!f.is_word()) return "float";
   const uint32_t w = word_bits(f.elem);
   return std::string(f.elem == Elem::I32 ? "int32" : "int") + " Q"
@@ -110,6 +120,13 @@ inline std::string shortest(double x)
 // ingest and at `set_param`.
 inline std::string range_error(const Format & f, double x)
 {
+  // binary32 rounds every value to nearest; one past its largest finite
+  // value would round to an infinity, which is refused, not written.
+  if (f.elem == Elem::F32)
+  {
+    if (!std::isfinite(x) || std::isfinite(static_cast<float>(x))) return {};
+    return "value " + shortest(x) + " is outside the range of binary32, |x| <= 3.4028234663852886e38";
+  }
   if (!f.is_word()) return {};
   const double scaled = std::ldexp(x, static_cast<int>(f.frac_bits));
   const double hi = std::ldexp(1.0, static_cast<int>(word_bits(f.elem)) - 1);
@@ -137,6 +154,40 @@ inline int64_t word_of_cell(double cell)
   int64_t w;
   std::memcpy(&w, &cell, sizeof w);
   return w;
+}
+
+// An 8-byte slot cell holding binary32 `v`'s bits in its low word (a
+// little-endian `float` load of the cell reads it), and back.
+inline double cell_of_binary32(float v)
+{
+  uint32_t bits;
+  std::memcpy(&bits, &v, sizeof bits);
+  return cell_of_word(static_cast<int64_t>(static_cast<uint64_t>(bits)));
+}
+
+inline float binary32_of_cell(double cell)
+{
+  const uint32_t bits = static_cast<uint32_t>(static_cast<uint64_t>(word_of_cell(cell)));
+  float v;
+  std::memcpy(&v, &bits, sizeof v);
+  return v;
+}
+
+// The cell a control write of `x` stores at a port of format `f`: the value
+// itself (f64), the binary32 nearest it (f32), or the word (`encode_word`).
+inline double cell_of_value(const Format & f, double x)
+{
+  if (f.elem == Elem::F32) return cell_of_binary32(static_cast<float>(x));
+  if (f.is_word()) return cell_of_word(encode_word(f, x));
+  return x;
+}
+
+// The real value a cell of format `f` holds.
+inline double value_of_cell(const Format & f, double cell)
+{
+  if (f.elem == Elem::F32) return static_cast<double>(binary32_of_cell(cell));
+  if (f.is_word()) return word_value(f, word_of_cell(cell));
+  return cell;
 }
 
 } // namespace tropical_port

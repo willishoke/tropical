@@ -1,3 +1,5 @@
+import Lean.Data.Json
+
 /-!
 # The wasm toolchain binding
 
@@ -38,5 +40,44 @@ def compileObject (irText triple : String) (cpu features : String := "") : IO By
   if obj.size == 0 then
     throw <| IO.userError s!"compileObject failed: {← lastError}"
   pure obj
+
+@[extern "shim_wasm_target_float_info"]
+private opaque targetFloatInfoRaw (triple cpu features : @& String) : IO String
+
+/-- What a target's FPU realizes, from LLVM's own subtarget description. -/
+structure FloatHardware where
+  /-- The triple LLVM resolved (`""` resolves to the host's). -/
+  triple : String
+  /-- binary32 arithmetic in hardware. -/
+  binary32 : Bool
+  /-- binary64 arithmetic in hardware. -/
+  binary64 : Bool
+  /-- `hard` (VFP registers) or `soft` on ARM; `n/a` elsewhere. -/
+  floatAbi : String
+deriving Repr
+
+def targetFloatHardware (triple : String) (cpu features : String := "") :
+    IO FloatHardware := do
+  let text ← targetFloatInfoRaw triple cpu features
+  if text.isEmpty then
+    throw <| IO.userError s!"targetFloatHardware failed: {← lastError}"
+  match Lean.Json.parse text with
+  | .error e => throw <| IO.userError s!"targetFloatHardware: {e}"
+  | .ok j =>
+    let b (k : String) : Bool := match j.getObjValAs? Bool k with | .ok v => v | .error _ => false
+    let s (k : String) : String := match j.getObjValAs? String k with | .ok v => v | .error _ => ""
+    pure { triple := s "triple", binary32 := b "binary32", binary64 := b "binary64",
+           floatAbi := s "float_abi" }
+
+@[extern "shim_wasm_object_undefined"]
+private opaque objectUndefinedRaw (obj : @& ByteArray) : IO String
+
+/-- The undefined symbols of a relocatable object: what its link must
+    supply. For a port kernel each one is a runtime routine (a libcall). -/
+def objectUndefinedSymbols (obj : ByteArray) : IO (Array String) := do
+  let text ← objectUndefinedRaw obj
+  if text == "\x01" then
+    throw <| IO.userError s!"objectUndefinedSymbols failed: {← lastError}"
+  pure ((text.splitOn "\n").filter (!·.isEmpty)).toArray
 
 end Tropical.Toolchain.Wasm

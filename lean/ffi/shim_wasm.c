@@ -36,6 +36,30 @@ LEAN_EXPORT lean_obj_res shim_wasm_compile_ir(b_lean_obj_arg ir, lean_obj_arg wo
   return lean_io_result_mk_ok(arr);
 }
 
+/* What a target's FPU realizes, as JSON text. "" signals failure; Lean reads
+   tropical_wasm_last_error. */
+LEAN_EXPORT lean_obj_res shim_wasm_target_float_info(b_lean_obj_arg triple, b_lean_obj_arg cpu,
+                                                     b_lean_obj_arg features,
+                                                     lean_obj_arg world) {
+  (void)world;
+  char *s = tropical_wasm_target_float_info(lean_string_cstr(triple), lean_string_cstr(cpu),
+                                            lean_string_cstr(features));
+  lean_obj_res out = lean_mk_string(s ? s : "");
+  if (s) tropical_wasm_free((uint8_t *)s);
+  return lean_io_result_mk_ok(out);
+}
+
+/* The undefined symbols of an object, one per line. A NUL byte alone signals
+   failure (an empty string is "no symbols"); Lean reads
+   tropical_wasm_last_error. */
+LEAN_EXPORT lean_obj_res shim_wasm_object_undefined(b_lean_obj_arg obj, lean_obj_arg world) {
+  (void)world;
+  char *s = tropical_wasm_object_undefined(lean_sarray_cptr(obj), lean_sarray_size(obj));
+  lean_obj_res out = s ? lean_mk_string(s) : lean_mk_string("\x01");
+  if (s) tropical_wasm_free((uint8_t *)s);
+  return lean_io_result_mk_ok(out);
+}
+
 /* In-process IR→relocatable object for a triple. Empty ByteArray signals
    failure; Lean reads tropical_wasm_last_error. */
 LEAN_EXPORT lean_obj_res shim_wasm_compile_object(b_lean_obj_arg ir, b_lean_obj_arg triple,

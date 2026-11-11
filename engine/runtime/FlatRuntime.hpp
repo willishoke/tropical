@@ -143,7 +143,7 @@ struct ObservationProgramImage
   tropical_jit::KernelArgvFn kernel = nullptr;
   uint32_t frames = 0;
   uint32_t output_channel_count = 1;
-  tropical_port::Format output_format;      // f64, or an i32 word to widen
+  tropical_port::Format output_format;      // f64, or an i32 word / f32 to widen
   std::vector<uint32_t> input_slots;        // param input j → slot index
   std::vector<std::string> slot_names;
   std::vector<tropical_port::Format> slot_formats;
@@ -177,6 +177,7 @@ struct ObservationRenderWorkspace
   std::vector<double> slots;
   std::vector<double> out;
   std::vector<int32_t> out_words;
+  std::vector<float> out_binary32;
   std::vector<void *> argv;
 };
 
@@ -225,9 +226,12 @@ struct KernelState
   // The output port's element type. An `i32` output (an `int32` program
   // output, `frac_bits` from the program) is rendered into `out_words` and
   // widened into the f64 output buffer as `word * 2^-frac_bits`, the real
-  // value it means. Sized at load, so the audio path never allocates.
+  // value it means; an `f32` output (a binary32 artifact) into
+  // `out_binary32`, widened exactly. Sized at load, so the audio path never
+  // allocates.
   tropical_port::Format              output_format;
   std::vector<int32_t>               out_words;
+  std::vector<float>                 out_binary32;
 
   // The coefficient-column slots (indices into array_storage/array_ptrs), the
   // three storage generations ([gen][j] backs slot coeff_array_slots[j]), the
@@ -265,23 +269,27 @@ struct KernelState
   // current parameter values.
   std::vector<double>      slots;
   std::vector<std::string> slot_names;
-  // Per slot: f64, or the integer word format of a typed param, whose cell
-  // holds the word's bits (`PortFormat.hpp`). Writes encode the control
-  // value; the kernel reads the word straight from the cell.
+  // Per slot: f64, the integer word format of a typed param, or f32 (a
+  // param of a binary32 artifact); the cell of a non-f64 slot holds the
+  // port's own bits (`PortFormat.hpp`). Writes encode the control value;
+  // the kernel reads the cell with no conversion.
   std::vector<tropical_port::Format> slot_formats;
 
-  const tropical_port::Format * slot_word_format(uint32_t i) const
+  // The format of slot `i` when its cell is not an f64 (a word or a
+  // binary32), else null.
+  const tropical_port::Format * slot_encoded_format(uint32_t i) const
   {
-    return i < slot_formats.size() && slot_formats[i].is_word()
+    return i < slot_formats.size() && slot_formats[i].is_encoded()
       ? &slot_formats[i] : nullptr;
   }
 
   // The cell a control write of `value` stores in slot `i`: the value itself,
-  // or for a typed param the bits of its word (`encode_word`).
+  // the binary32 nearest it, or for a typed param the bits of its word
+  // (`encode_word`).
   double control_cell(uint32_t i, double value) const
   {
-    if (const tropical_port::Format * f = slot_word_format(i))
-      return tropical_port::cell_of_word(tropical_port::encode_word(*f, value));
+    if (const tropical_port::Format * f = slot_encoded_format(i))
+      return tropical_port::cell_of_value(*f, value);
     return value;
   }
 
@@ -596,13 +604,18 @@ public:
     for (std::size_t j = 0; j < state.input_slots.size(); ++j)
       state.argv[1 + j] = &state.audio_slots[state.input_slots[j]];
     const bool word_output = state.output_format.is_word();
-    state.argv.back() = word_output
-      ? static_cast<void *>(state.out_words.data()) : rendered_output;
+    const bool binary32_output = state.output_format.elem == tropical_port::Elem::F32;
+    state.argv.back() = word_output ? static_cast<void *>(state.out_words.data())
+      : binary32_output ? static_cast<void *>(state.out_binary32.data())
+      : static_cast<void *>(rendered_output);
     state.kernel(state.argv.data());
     if (word_output)
       for (std::size_t k = 0; k < state.out_words.size(); ++k)
         rendered_output[k] =
           tropical_port::word_value(state.output_format, state.out_words[k]);
+    if (binary32_output)
+      for (std::size_t k = 0; k < state.out_binary32.size(); ++k)
+        rendered_output[k] = static_cast<double>(state.out_binary32[k]);
 
     audio_sample_index_ += buffer_length_;
     audio_device_frame_ += buffer_length_;
@@ -745,8 +758,8 @@ public:
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     const KernelState & state = states_[state_idx];
     if (idx >= state.slots.size()) return 0.0;
-    if (const tropical_port::Format * f = state.slot_word_format(idx))
-      return tropical_port::word_value(*f, tropical_port::word_of_cell(state.slots[idx]));
+    if (const tropical_port::Format * f = state.slot_encoded_format(idx))
+      return tropical_port::value_of_cell(*f, state.slots[idx]);
     return state.slots[idx];
   }
 
@@ -769,7 +782,7 @@ public:
       if (state.slot_names[i] == name)
       {
         // A typed param's value outside its format is refused, not saturated.
-        if (const tropical_port::Format * f = state.slot_word_format(i))
+        if (const tropical_port::Format * f = state.slot_encoded_format(i))
           if (!tropical_port::range_error(*f, value).empty())
             return false;
         const std::vector<double> previous = state.slots;
@@ -910,6 +923,9 @@ public:
       workspace.out.assign(static_cast<std::size_t>(N) * C, 0.0);
       workspace.out_words.assign(
         program.output_format.is_word() ? static_cast<std::size_t>(N) * C : 0, 0);
+      workspace.out_binary32.assign(
+        program.output_format.elem == tropical_port::Elem::F32
+          ? static_cast<std::size_t>(N) * C : 0, 0.0f);
       workspace.argv.assign(program.input_slots.size() + 2, nullptr);
       workspace.program_version = program.program_version;
     }
@@ -920,8 +936,10 @@ public:
     for (std::size_t j = 0; j < program.input_slots.size(); ++j)
       workspace.argv[1 + j] = &workspace.slots[program.input_slots[j]];
     const bool word_output = program.output_format.is_word();
+    const bool binary32_output = program.output_format.elem == tropical_port::Elem::F32;
     workspace.argv.back() = word_output
       ? static_cast<void *>(workspace.out_words.data())
+      : binary32_output ? static_cast<void *>(workspace.out_binary32.data())
       : static_cast<void *>(workspace.out.data());
 
     // The kernel's shape is static: `count` coordinates render in chunks of
@@ -937,6 +955,9 @@ public:
         for (std::size_t k = 0; k < workspace.out_words.size(); ++k)
           workspace.out[k] =
             tropical_port::word_value(program.output_format, workspace.out_words[k]);
+      if (binary32_output)
+        for (std::size_t k = 0; k < workspace.out_binary32.size(); ++k)
+          workspace.out[k] = static_cast<double>(workspace.out_binary32[k]);
       const uint32_t produced = std::min<uint32_t>(N, count - chunk);
       for (uint32_t k = 0; k < n_channels; ++k)
         for (uint32_t i = 0; i < produced; ++i)

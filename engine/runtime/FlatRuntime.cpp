@@ -385,11 +385,14 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
     new_state.slots[i] = parsed.slot_defaults[i];
   }
 
-  // The output port: an i32 word output renders into its own buffer.
+  // The output port: an i32 word or f32 output renders into its own buffer.
   new_state.output_format = kernel.output_format;
   if (kernel.output_format.is_word())
     new_state.out_words.assign(
       static_cast<std::size_t>(kernel.frames) * kernel.output_channel_count, 0);
+  if (kernel.output_format.elem == tropical_port::Elem::F32)
+    new_state.out_binary32.assign(
+      static_cast<std::size_t>(kernel.frames) * kernel.output_channel_count, 0.0f);
 
   // The param inputs, in port order, resolved to their slots by name. The
   // manifest's inputs after tau ARE the `param:` slots in slot order, but
@@ -405,12 +408,19 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
         + "' names no slot of the nested plan");
     const uint32_t slot = static_cast<uint32_t>(it - new_state.slot_names.begin());
     new_state.input_slots.push_back(slot);
-    // A typed param: its cell holds the word (the manifest's integer default).
+    // A typed param: its cell holds the word (the manifest's integer
+    // default). A binary32 param: its cell holds the binary32 default.
     const tropical_port::Format f = kernel.input_formats[j];
     if (f.is_word())
     {
       new_state.slot_formats[slot] = f;
       new_state.slots[slot] = tropical_port::cell_of_word(kernel.input_default_words[j]);
+    }
+    else if (f.elem == tropical_port::Elem::F32)
+    {
+      new_state.slot_formats[slot] = f;
+      new_state.slots[slot] = tropical_port::cell_of_binary32(
+        static_cast<float>(kernel.input_default_values[j]));
     }
   }
   for (auto & generation : new_state.slot_generations)
@@ -1100,12 +1110,14 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   };
   const double now = static_cast<double>(sample_index);
 
-  // An integer param is written raw: every other discipline re-anchors in
-  // float arithmetic on f64 companions, and the compiler refuses to attach
-  // one to a typed port, as its base or as a companion
-  // (`FlatPlan.portError?`; the web `ParamWriter` likewise). Refuse here too,
-  // over every slot the discipline would touch: the base, the companions the
-  // manifest lists, and the ones each discipline implies by name.
+  // An integer or binary32 param is written raw: every other discipline
+  // re-anchors in float arithmetic on f64 companions (sample counts among
+  // them), and the compiler refuses to attach one to a typed port, as its
+  // base or as a companion (`FlatPlan.portError?`), or to any param of a
+  // binary32 artifact (`Kernel.ofPlan`; the web `ParamWriter` likewise).
+  // Refuse here too, over every slot the discipline would touch: the base,
+  // the companions the manifest lists, and the ones each discipline implies
+  // by name.
   if (discipline != "raw")
   {
     std::vector<std::string> touched{name};
@@ -1118,10 +1130,12 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     for (const auto & slot_name : touched)
     {
       const uint32_t si = slot_of("param:" + slot_name);
-      if (si != UINT32_MAX && state.slot_word_format(si))
+      if (si == UINT32_MAX) continue;
+      if (const tropical_port::Format * f = state.slot_encoded_format(si))
         return fail("set_param: '" + name + "': discipline '" + discipline
-          + "' is not defined on the integer slot 'param:" + slot_name
-          + "' (an integer param is written raw)");
+          + "' is not defined on the " + (f->is_word() ? "integer" : "binary32")
+          + " slot 'param:" + slot_name
+          + "' (an " + (f->is_word() ? "integer" : "f32") + " param is written raw)");
     }
   }
 
@@ -1201,7 +1215,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     return unknown();
   // A typed param's value must fit its format; past the range the word would
   // saturate, so the write is refused (the Lean `set_param` refuses it first).
-  if (const tropical_port::Format * f = state.slot_word_format(bi))
+  if (const tropical_port::Format * f = state.slot_encoded_format(bi))
   {
     const std::string range = tropical_port::range_error(*f, value);
     if (!range.empty())

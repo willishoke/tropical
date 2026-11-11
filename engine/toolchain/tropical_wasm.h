@@ -37,6 +37,17 @@ uint8_t* tropical_wasm_compile_object(const char* ir_text, size_t ir_len,
                                       const char* features, size_t* out_len);
 void     tropical_wasm_free(uint8_t* buf);
 
+/* What the FPU of `triple` ("" = host) with `cpu`/`features` realizes, as a
+   malloc'd NUL-terminated JSON object:
+   {"triple":…,"binary32":bool,"binary64":bool,"float_abi":"hard"|"soft"|"n/a"}.
+   Free with tropical_wasm_free. NULL on error. */
+char*    tropical_wasm_target_float_info(const char* triple, const char* cpu,
+                                         const char* features);
+/* The undefined symbols of a relocatable object, one per line, as a malloc'd
+   NUL-terminated string ("" when there are none). Free with
+   tropical_wasm_free. NULL on error. */
+char*    tropical_wasm_object_undefined(const uint8_t* obj, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

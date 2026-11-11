@@ -502,8 +502,12 @@ struct ParsedKernel1
   // `default` seeds (read as an integer, so an i64 word stays exact).
   std::vector<tropical_port::Format> input_formats;
   std::vector<int64_t> input_default_words;
+  // For an f32 param: the port's `default`, which a binary32 manifest writes
+  // as the binary32 value itself (exact in binary64, so `(float)` of it is
+  // that value, with no second rounding).
+  std::vector<double> input_default_values;
   std::vector<std::string> output_channels;  // one name per channel ("" = silent)
-  tropical_port::Format output_format;       // f64, or i32 with frac_bits
+  tropical_port::Format output_format;       // f64, f32, or i32 with frac_bits
   ParsedPlan7 plan;
 };
 
@@ -548,15 +552,33 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error("NumericProgramParser: kernel frames must be positive");
   result.input_formats.assign(inputs.size(), {});
   result.input_default_words.assign(inputs.size(), 0);
+  result.input_default_values.assign(inputs.size(), 0.0);
   for (std::size_t i = 1; i < inputs.size(); ++i)
   {
     const auto & port = inputs.at(i);
     const std::string elem = port.value("elem", std::string{});
-    if ((elem != "f64" && elem != "i32" && elem != "i64") || !port.contains("shape")
+    if ((elem != "f64" && elem != "f32" && elem != "i32" && elem != "i64")
+        || !port.contains("shape")
         || !port.at("shape").empty() || port.value("role", std::string{}) != "param")
       throw std::runtime_error(
         "NumericProgramParser: kernel input '" + result.input_names[i]
-        + "' is not a scalar f64, i32 or i64 param (this host binds params only)");
+        + "' is not a scalar f64, f32, i32 or i64 param (this host binds params only)");
+    if (elem == "f32" && port.contains("default"))
+    {
+      const auto & d = port.at("default");
+      if (!d.is_number())
+        throw std::runtime_error(
+          "NumericProgramParser: f32 param '" + result.input_names[i]
+          + "' has a non-numeric default");
+      const double v = d.get<double>();
+      // The default is the binary32 value the artifact was compiled with;
+      // one that is not a binary32 would be rounded here, so it is refused.
+      if (static_cast<double>(static_cast<float>(v)) != v)
+        throw std::runtime_error(
+          "NumericProgramParser: f32 param '" + result.input_names[i]
+          + "' default " + d.dump() + " is not a binary32 value");
+      result.input_default_values[i] = v;
+    }
     tropical_port::Format f{tropical_port::elem_of_wire(elem),
                             port.value("frac_bits", 0u)};
     if (f.is_word())
@@ -596,11 +618,11 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error("NumericProgramParser: kernel manifest must declare one output");
   const auto & out = outputs.at(0);
   const std::string out_elem = out.value("elem", std::string{});
-  if ((out_elem != "f64" && out_elem != "i32") || !out.contains("shape")
+  if ((out_elem != "f64" && out_elem != "f32" && out_elem != "i32") || !out.contains("shape")
       || out.at("shape").size() != 2
       || out.at("shape").at(0).get<uint32_t>() != result.frames)
     throw std::runtime_error(
-      "NumericProgramParser: kernel output must be f64 or i32 [frames, channels]");
+      "NumericProgramParser: kernel output must be f64, f32 or i32 [frames, channels]");
   result.output_format = {tropical_port::elem_of_wire(out_elem), out.value("frac_bits", 0u)};
   if (result.output_format.frac_bits > tropical_port::word_bits(result.output_format.elem))
     throw std::runtime_error(

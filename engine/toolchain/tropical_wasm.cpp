@@ -80,3 +80,53 @@ extern "C" uint8_t* tropical_wasm_compile_object(const char* ir_text, size_t ir_
 }
 
 extern "C" void tropical_wasm_free(uint8_t* buf) { std::free(buf); }
+
+[[maybe_unused]] static char * malloc_cstr(const std::string & s)
+{
+  char * out = static_cast<char *>(std::malloc(s.size() + 1));
+  if (!out) { set_error("out of memory"); return nullptr; }
+  std::memcpy(out, s.c_str(), s.size() + 1);
+  return out;
+}
+
+extern "C" char* tropical_wasm_target_float_info(const char* triple, const char* cpu,
+                                                 const char* features)
+{
+#ifdef TROPICAL_WASM_EMIT
+  if (!triple || !cpu || !features) { set_error("target_float_info: null argument"); return nullptr; }
+  try
+  {
+    std::string err;
+    const std::string info = tropical_toolchain::target_float_info(triple, cpu, features, err);
+    if (info.empty()) { set_error(err.empty() ? "target_float_info: no answer" : err); return nullptr; }
+    return malloc_cstr(info);
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+#else
+  (void)triple; (void)cpu; (void)features;
+  set_error("libtropical_wasm was built without TROPICAL_WASM_EMIT");
+  return nullptr;
+#endif
+}
+
+extern "C" char* tropical_wasm_object_undefined(const uint8_t* obj, size_t len)
+{
+#ifdef TROPICAL_WASM_EMIT
+  if (!obj) { set_error("object_undefined: null argument"); return nullptr; }
+  try
+  {
+    std::string err;
+    const std::vector<std::string> names =
+      tropical_toolchain::object_undefined_symbols(obj, len, err);
+    if (!err.empty()) { set_error(err); return nullptr; }
+    std::string joined;
+    for (const auto & n : names) { joined += n; joined += '\n'; }
+    return malloc_cstr(joined);
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+#else
+  (void)obj; (void)len;
+  set_error("libtropical_wasm was built without TROPICAL_WASM_EMIT");
+  return nullptr;
+#endif
+}
