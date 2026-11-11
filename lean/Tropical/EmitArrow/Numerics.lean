@@ -92,6 +92,62 @@ def phaseQ32 (inc offset clk : Sig) : BuildM Sig := do
   let pLo ← bitAnd (← rshift (← mul incLo frac) shift16) mask16
   add (← add (← add pWhole pHi) pLo) (← toInt32E offset)
 
+/-- The DDS phase on ℤ/2³² from an `int32` increment, all in `int32`:
+    `⌊inc · τ / 2¹⁶⌋ + offset` mod 2³², with `inc` the signed Q0.32
+    increment in cycles per sample (so it spans exactly
+    `[-rate/2, rate/2)`). As in `phaseQ32`, τ splits into the whole-sample
+    count and the fraction (`τ = whole·2¹⁶ + frac`) and the increment at bit
+    16, `inc = hi·2¹⁶ + lo` with `hi = inc >> 16` (arithmetic, so the sign
+    rides in `hi`) and `0 ≤ lo < 2¹⁶`; `inc·whole` and `hi·frac` are wanted
+    mod 2³², and `⌊lo·frac / 2¹⁶⌋ < 2¹⁶` is bits 16..31 of a product below
+    2³², recovered by the shift and the 16-bit mask. The floor of a sum whose
+    other terms are integers, so the split is exact. Three 32×32→32
+    multiplies; `inc` and `offset` are loop-invariant. -/
+def phaseQ32Of32 (inc offset clk : Sig) : BuildM Sig := do
+  let shift16 ← lit 16
+  let mask16 ← lit 65535
+  let whole ← toInt32E (← rshift clk (← clockFracLit))
+  let frac ← toInt32E (← bitAnd clk (← clockFracMaskLit))
+  let incHi ← rshift inc shift16
+  let incLo ← bitAnd inc mask16
+  let pWhole ← mul inc whole
+  let pHi ← mul incHi frac
+  let pLo ← bitAnd (← rshift (← mul incLo frac) shift16) mask16
+  add (← add (← add pWhole pHi) pLo) offset
+
+/-- A frequency in Hz, as an `int32` Q16.16 word `F`, to the Q0.32 phase
+    increment per sample `F · 2¹⁶ / rate`, in `int32` with no division and no
+    64-bit multiply. `M = round(2⁴⁸ / rate)` is a constant of the artifact
+    (the rate is; the float arithmetic on it folds at compile time), split as
+    `M = q·2³² + Mh·2¹⁶ + Ml`. Then, with `F = Fh·2¹⁶ + Fl`
+    (`Fh = F >> 16` signed, `0 ≤ Fl < 2¹⁶`),
+
+      `inc = q·F + Fh·Mh + ⌊Fh·Ml / 2¹⁶⌋ + ⌊Fl·Mh / 2¹⁶⌋`   (mod 2³²)
+
+    the high word of `F·M / 2³²` less the dropped `Fl·Ml / 2³²` and two
+    floors: at most 3 increment LSBs low, plus `|F|/2³³ ≤ 0.25` LSB from
+    rounding `M`. At 48 kHz one LSB is 1.1e-5 Hz, so the increment is within
+    3.6e-5 Hz of exact (the Q16.16 knob's own step is 1.5e-5 Hz). Every
+    product fits a signed word except `Fl·Mh`, whose bits 16..31 the mask
+    recovers. The value is per call (stage 0), never per frame: three
+    `MULS` (four when `q ≠ 1`). A frequency at or past `rate/2` wraps into
+    `[-rate/2, rate/2)`, the range the signed increment spans. -/
+def hzQ16ToIncQ32 (freqQ16 : Sig) : BuildM Sig := do
+  let shift16 ← lit 16
+  let mask16 ← lit 65535
+  let m ← toIntE (← roundE (← div (← lit 281474976710656) (← sampleRate)))
+  let q ← toInt32E (← rshift m (← lit 32))
+  let mLow ← bitAnd m (← lit 4294967295)
+  let mh ← toInt32E (← rshift mLow shift16)
+  let ml ← toInt32E (← bitAnd mLow mask16)
+  let fh ← rshift freqQ16 shift16
+  let fl ← bitAnd freqQ16 mask16
+  let whole ← mul q freqQ16
+  let hh ← mul fh mh
+  let hl ← rshift (← mul fh ml) shift16
+  let lh ← bitAnd (← rshift (← mul fl mh) shift16) mask16
+  add (← add (← add whole hh) hl) lh
+
 /-- `sin(2π · phase / 2³²)` in Q1.15 (`1.0 = 32768`) from an `int32` Q0.32
     phase, entirely in `int32`. The phase is rounded to 16 bits, folded to a
     signed quarter turn `r ∈ [-2¹⁴, 2¹⁴]` with the half-turn's sign, and an

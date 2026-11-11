@@ -1,0 +1,1 @@
+{"schema":"tropical_program_2","name":"embedded_lfo_knob","body":{"op":"block","decls":[{"op":"paramDecl","name":"freq","type":"int32","frac_bits":16,"value":2},{"op":"instanceDecl","name":"lfo","program":"SinOscQ15","inputs":{"freq":{"op":"param","name":"freq"}}}],"assigns":[{"op":"outputAssign","name":"dac.out","expr":{"op":"ref","instance":"lfo","output":"out"}}]}}
