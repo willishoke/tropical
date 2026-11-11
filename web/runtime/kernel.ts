@@ -9,7 +9,7 @@
  * `KernelManifest`; no compiler internals.
  */
 import {
-  CLOCK_FRAC_BITS, encodeWord, isWordPort, kernelFrames, kernelOutputChannelCount,
+  CLOCK_FRAC_BITS, encodeWord, isWordPort, kernelFloatFormat, kernelFrames, kernelOutputChannelCount,
   kernelOutputWordScale, kernelParams, wordValue, type KernelManifest, type KernelPort,
   type KernelElem,
 } from './manifest.js'
@@ -137,6 +137,14 @@ export class WasmKernel {
       env: { memory, round: roundTiesAway },
     })
     const kernel = instance.exports.tropical_kernel as KernelFn
+    // The module states the float format it was compiled at; a manifest from
+    // a compile at another `--float` would bind cells of the wrong width.
+    const declared = instance.exports.tropical_kernel_float_bits as (() => number) | undefined
+    const want = kernelFloatFormat(manifest) === 'f32' ? 32 : 64
+    if (typeof declared !== 'function')
+      throw new RangeError('WasmKernel: the module declares no float format (tropical_kernel_float_bits); rebuild it with diffcli compile-wasm')
+    if (declared() !== want)
+      throw new RangeError(`WasmKernel: the module is compiled at f${declared()} but the manifest's float format is f${want}; compile both at the same --float`)
     const heapBase = (instance.exports.__heap_base as WebAssembly.Global).value as number
 
     const layout = computeLayout(manifest, heapBase)

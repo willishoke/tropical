@@ -188,20 +188,41 @@ private def expectErr {α : Type} (label : String) (r : Except String α) (needl
 
 def runRefusals : IO Bool := do
   let mut bad : Array String := #[]
-  -- a discipline at binary32: the playground master clock's velocity
-  match ← (try some <$> IO.FS.readFile "web/patches/tz-saw.json" catch _ => pure none) with
-  | none => bad := bad.push "tz-saw: web/patches/tz-saw.json is unreadable"
-  | some text =>
+  -- a discipline at binary32: the playground master clock's velocity, and a
+  -- glide alone (a glided knob has no port of its own: its ports are the
+  -- `#v0`/`#v1`/`#t0` companions, so only the discipline table names it)
+  let graphPlanOf (label text : String) : Except String FlatPlan :=
     match Lean.Json.parse text with
-    | .error e => bad := bad.push s!"tz-saw parse: {e}"
-    | .ok j =>
-      match Playground.compilePlan j Plan.defaultSampleRate with
-      | .error e => bad := bad.push s!"tz-saw compile: {e}"
-      | .ok compiled =>
-        let plan := compiled.plan
-        if let some m := expectErr "velocity at f32" (Kernel.ofPlan plan 16 .f32)
-            "a binary32 artifact's params are written raw" then bad := bad.push m
-        if let .error e := Kernel.ofPlan plan 16 .f64 then bad := bad.push s!"tz-saw at f64: {e}"
+    | .error e => .error s!"{label}: {e}"
+    | .ok j => (Playground.compilePlan j Plan.defaultSampleRate).map (·.plan)
+        |>.mapError (s!"{label}: {·}")
+  let graphPlan (path : String) : IO (Except String FlatPlan) := do
+    match ← (try some <$> IO.FS.readFile path catch _ => pure none) with
+    | none => pure (.error s!"{path} is unreadable")
+    | some text => pure (graphPlanOf path text)
+  match ← graphPlan "web/patches/tz-saw.json" with
+  | .error e => bad := bad.push s!"tz-saw: {e}"
+  | .ok plan =>
+    if let some m := expectErr "velocity at f32" (Kernel.ofPlan plan 16 .f32)
+        "has the 'velocity' discipline" then bad := bad.push m
+    if let .error e := Kernel.ofPlan plan 16 .f64 then bad := bad.push s!"tz-saw at f64: {e}"
+  -- a harmonic's unwired `tilt`/`even` knobs glide; with the master clock's
+  -- velocity and the `freq` anchor dropped from the table, glide is the only
+  -- non-raw discipline left, and it names no port of its own
+  match graphPlanOf "harmonic graph"
+      "{\"nodes\":[{\"id\":\"saw\",\"kind\":\"harmonic\",\"params\":{\"freq\":110}}],\"out\":\"saw\"}" with
+  | .error e => bad := bad.push e
+  | .ok plan =>
+    if !(plan.paramDisciplines.any (·.discipline == "glide")) then
+      bad := bad.push "harmonic graph: no glided knob to test"
+    else
+      let glideOnly := { plan with
+        paramDisciplines := plan.paramDisciplines.filter
+          (fun d => d.discipline == "glide" || d.discipline == "raw") }
+      if let some m := expectErr "glide alone at f32" (Kernel.ofPlan glideOnly 16 .f32)
+          "has the 'glide' discipline" then bad := bad.push m
+      if let .error e := Kernel.ofPlan glideOnly 16 .f64 then
+        bad := bad.push s!"glide alone at f64: {e}"
   -- a literal past binary32
   match compile (patch "{\"op\":\"instanceDecl\",\"name\":\"v\",\"program\":\"VCA\",\"inputs\":{\"audio\":1,\"cv\":4e38}}"
       "{\"op\":\"ref\",\"instance\":\"v\",\"output\":\"out\"}") with
@@ -238,9 +259,18 @@ def runRefusals : IO Bool := do
           | _ => j
         if let some m ← hostRefuses "native host, an f64 output in an f32 artifact" f64Out
             "whose float format is f32" then bad := bad.push m
+        -- f32 paired with a non-raw discipline: refused once, at load
+        let glided :=
+          let planJ := (j.getObjValD "plan").setObjVal! "param_disciplines" (Lean.Json.arr #[
+            Lean.Json.mkObj [("name", "drive"), ("discipline", "glide"),
+              ("glide_dur_sec", Lean.Json.num ⟨5, 3⟩),
+              ("companions", Lean.Json.arr #["drive#v0", "drive#v1", "drive#t0"])]])
+          j.setObjVal! "plan" planJ
+        if let some m ← hostRefuses "native host, f32 with a glide" glided
+            "has the 'glide' discipline in a binary32 artifact" then bad := bad.push m
     | .error e, _ | _, .error e => bad := bad.push s!"drive at f32: {e}"
   if bad.isEmpty then
-    passGate "f32-refusals" "a velocity discipline at binary32, a literal past binary32, an unknown float format (Kernel decode and the native host), an f64 port in an f32 artifact (the native host) — each refused by name"
+    passGate "f32-refusals" "a velocity discipline and a glide alone (no port of its own) at binary32, a literal past binary32, an unknown float format (Kernel decode and the native host), an f64 port in an f32 artifact and f32 paired with a glide (the native host, at load) — each refused by name"
   else failGate "f32-refusals" (String.intercalate "; " bad.toList)
 
 end Tropical.Tropicaltest.Float32

@@ -251,11 +251,28 @@ private def binary32Default (slotName : String) (n : JsonNumber) : Except String
   | some bits => .ok (binary32Decimal bits)
   | none => .error s!"Kernel: param '{slotName}' default {n} is outside the binary32 range"
 
+/-- Why a plan cannot be realized at binary32 for its write disciplines, or
+    `none`. A binary32 artifact's params are written raw: glide, anchor and
+    velocity re-anchor on companions that hold sample counts and phases
+    (`#t0`, `tau_base`, `#phase`), which binary32 does not hold exactly past
+    2^24. The plan's discipline table is walked directly, as
+    `FlatPlan.portError?` walks it: a glided knob has no port of its own (its
+    ports are the `#v0`/`#v1`/`#t0` companions), so a walk over the param
+    ports alone would miss it. -/
+def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
+  for d in plan.paramDisciplines do
+    if d.discipline != "raw" then
+      let slots := String.intercalate ", " ((#[d.name] ++ d.companions).toList.map (s!"param:{·}"))
+      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are sample counts and phases, which binary32 does not hold exactly)"
+  return none
+
 /-- Derive the kernel type of a plan compiled for `frames` samples per call,
     its `float` values realized at `float`. -/
 def ofPlan (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
     Except String KernelType := do
   if let some e := plan.portError? then throw s!"Kernel: {e}"
+  if float == .f32 then
+    if let some e := binary32DisciplineError? plan then throw s!"Kernel: {e}"
   let tau : Port :=
     { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal,
       fracBits := some 16 }
@@ -270,14 +287,6 @@ def ofPlan (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
         throw s!"Kernel: slot '{slotName}' default is not a number: {other.compress}"
     let fmt := (plan.slotType? i).getD {}
     let discipline := disciplineOf plan base
-    -- A binary32 artifact's params are written raw: glide, anchor and
-    -- velocity re-anchor on companions that hold sample counts and phases
-    -- (`#t0`, `tau_base`, `#phase`), which binary32 does not hold exactly
-    -- past 2^24. Refused here rather than rounded at every write.
-    if float == .f32 then
-      if let some d := discipline then
-        if d.discipline != "raw" then
-          throw s!"Kernel: param '{slotName}' has the '{d.discipline}' discipline; a binary32 artifact's params are written raw (its companions are sample counts and phases, which binary32 does not hold exactly)"
     let default ← match float, fmt.kind.isInteger, default with
       | .f32, false, some n => some <$> binary32Default slotName n
       | _, _, d => pure d

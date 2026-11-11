@@ -18,6 +18,8 @@
 #include "runtime/PortFormat.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -573,7 +575,10 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
       const double v = d.get<double>();
       // The default is the binary32 value the artifact was compiled with;
       // one that is not a binary32 would be rounded here, so it is refused.
-      if (static_cast<double>(static_cast<float>(v)) != v)
+      // NaN and anything past the largest finite binary32 are refused
+      // before the cast, which is then always in range.
+      if (std::isnan(v) || std::fabs(v) > static_cast<double>(std::numeric_limits<float>::max())
+          || static_cast<double>(static_cast<float>(v)) != v)
         throw std::runtime_error(
           "NumericProgramParser: f32 param '" + result.input_names[i]
           + "' default " + d.dump() + " is not a binary32 value");
@@ -664,6 +669,17 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
   for (std::size_t i = 1; i < inputs.size(); ++i)
     check_float_port(result.input_names[i], inputs.at(i).value("elem", std::string{}));
   check_float_port(out.value("name", std::string{"out"}), out_elem);
+  // A binary32 artifact's params are written raw (`Kernel.ofPlan` refuses
+  // anything else at compile time): glide, anchor and velocity re-anchor on
+  // companions that hold sample counts and phases, which binary32 does not
+  // hold exactly. A manifest that pairs the two is refused here, once, at
+  // load; the per-write check in the dispatcher stays.
+  if (float_format == "f32")
+    for (const auto & d : result.plan.param_disciplines)
+      if (d.discipline != "raw")
+        throw std::runtime_error(
+          "NumericProgramParser: param '" + d.name + "' has the '" + d.discipline
+          + "' discipline in a binary32 artifact; a binary32 artifact's params are written raw");
   return result;
 }
 

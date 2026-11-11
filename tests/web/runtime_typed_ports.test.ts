@@ -214,8 +214,35 @@ describe('typed ports in the web runtime', () => {
       .toThrow("port 'param:x' is f32 in an artifact whose float format is f64")
     expect(() => kernelParams({ ...f32, inputs: [f32.inputs[0]!, { ...f32.inputs[1]!, default: 0.1 }] }))
       .toThrow(/default 0.1 is not a binary32 value/)
-    const glide = { ...f32, inputs: [f32.inputs[0]!,
+    // f32 with a non-raw discipline is refused once, at load: on a port, and
+    // in the plan's table (a glided knob has no port of its own)
+    const anchored = { ...f32, inputs: [f32.inputs[0]!,
       { ...f32.inputs[1]!, discipline: { discipline: 'anchor', companions: ['x#phase'] } }] }
-    expect(new ParamWriter(glide).check('param:x')).toMatch(/is f32; discipline 'anchor' is not defined on it/)
+    expect(() => kernelParams(anchored)).toThrow("param 'param:x' has the 'anchor' discipline in a binary32 artifact")
+    expect(() => new ParamWriter(anchored)).toThrow(/binary32 artifact's params are written raw/)
+    const glided = { ...f32, plan: { param_disciplines: [
+      { name: 'k', discipline: 'glide', companions: ['k#v0', 'k#v1', 'k#t0'] }] } }
+    expect(() => kernelParams(glided)).toThrow("param 'k' has the 'glide' discipline in a binary32 artifact")
+    expect(kernelParams({ ...glided, realization: { mode: 'fused', float: 'f64' },
+      inputs: [f32.inputs[0]!, { ...f32.inputs[1]!, elem: 'f64' }],
+      outputs: [{ name: 'out', elem: 'f64', shape: [16, 1] }] })).toHaveLength(1)
+  })
+
+  test('a module and a manifest compiled at different --float are refused', async () => {
+    const patch = {
+      schema: 'tropical_program_2', name: 'mismatch',
+      body: { op: 'block', decls: [
+        { op: 'instanceDecl', name: 'o', program: 'FixedSinOsc', inputs: { freq: 220 } },
+      ], assigns: [{ op: 'outputAssign', name: 'dac.out', expr: { op: 'ref', instance: 'o', output: 'sine' } }] },
+    }
+    const path = join(dir, 'mismatch.json')
+    writeFileSync(path, JSON.stringify(patch))
+    for (const [wasmFloat, manifestFloat] of [['f64', 'f32'], ['f32', 'f64']] as const) {
+      const wasmPath = join(dir, `mismatch-${wasmFloat}.wasm`)
+      run(['compile-wasm', path, `--out=${wasmPath}`, '--float', wasmFloat])
+      const manifest = JSON.parse(run(['compile-kernel', path, '--float', manifestFloat]).toString()) as KernelManifest
+      await expect(WasmKernel.instantiate(new Uint8Array(readFileSync(wasmPath)), manifest))
+        .rejects.toThrow(`the module is compiled at ${wasmFloat} but the manifest's float format is ${manifestFloat}`)
+    }
   })
 })

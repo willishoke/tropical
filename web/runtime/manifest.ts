@@ -57,6 +57,10 @@ export type KernelManifest = {
    *  `f64` (a binary32 artifact); this host reads `f64` and `f32` and
    *  refuses any other. */
   realization?: { mode?: string; register_count?: number; float?: string }
+  /** The compiler's plan, nested for its gates. The one field this host
+   *  reads is `param_disciplines`, to refuse at load a binary32 artifact
+   *  that pairs `f32` with a non-raw write discipline. */
+  plan?: { param_disciplines?: Array<{ name: string; discipline: string; companions?: string[] }> }
 }
 
 export const MAX_KERNEL_OUTPUT_CHANNELS = 64
@@ -73,6 +77,19 @@ export function kernelFloatFormat(manifest: KernelManifest): FloatFormat {
   for (const port of [...manifest.inputs.slice(1), ...manifest.outputs])
     if ((port.elem === 'f64' || port.elem === 'f32') && port.elem !== fmt)
       throw new RangeError(`KernelManifest: port '${port.name}' is ${port.elem} in an artifact whose float format is ${fmt}`)
+  if (fmt === 'f32') {
+    // A binary32 artifact's params are written raw (the compiler refuses
+    // anything else): glide, anchor and velocity re-anchor on sample counts
+    // and phases binary32 does not hold exactly. Refused once, here; a
+    // glided knob has no port of its own, so the plan's table is read too.
+    const named = [
+      ...(manifest.plan?.param_disciplines ?? []),
+      ...manifest.inputs.slice(1).flatMap((p) => p.discipline ? [{ name: p.name, discipline: p.discipline.discipline }] : []),
+    ]
+    for (const d of named)
+      if (d.discipline !== 'raw')
+        throw new RangeError(`KernelManifest: param '${d.name}' has the '${d.discipline}' discipline in a binary32 artifact; a binary32 artifact's params are written raw`)
+  }
   return fmt
 }
 

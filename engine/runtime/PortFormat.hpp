@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -30,6 +31,11 @@ namespace tropical_port
 {
 
 enum class Elem : uint8_t { F64, I32, I64, F32 };
+
+// The binary32 overflow threshold, 2^128 - 2^103: halfway between the
+// largest finite binary32, (2 - 2^-23) * 2^127, and 2^128. A double whose
+// magnitude reaches it rounds (to nearest even) to an infinity.
+inline constexpr double kBinary32OverflowThreshold = 0x1.ffffffp+127;
 
 struct Format
 {
@@ -120,11 +126,13 @@ inline std::string shortest(double x)
 // ingest and at `set_param`.
 inline std::string range_error(const Format & f, double x)
 {
-  // binary32 rounds every value to nearest; one past its largest finite
-  // value would round to an infinity, which is refused, not written.
+  // binary32 rounds every value to nearest; one at or past the overflow
+  // threshold would round to an infinity, which is refused, not written.
+  // Compared, not cast: the cast of an out-of-range double is not
+  // something to lean on.
   if (f.elem == Elem::F32)
   {
-    if (!std::isfinite(x) || std::isfinite(static_cast<float>(x))) return {};
+    if (!std::isfinite(x) || std::fabs(x) < kBinary32OverflowThreshold) return {};
     return "value " + shortest(x) + " is outside the range of binary32, |x| <= 3.4028234663852886e38";
   }
   if (!f.is_word()) return {};
@@ -156,6 +164,17 @@ inline int64_t word_of_cell(double cell)
   return w;
 }
 
+// The binary32 nearest a double: round to nearest even, with a value at or
+// past the overflow threshold made the infinity it rounds to explicitly, so
+// no out-of-range double is ever cast.
+inline float binary32_nearest(double x)
+{
+  if (std::isfinite(x) && std::fabs(x) >= kBinary32OverflowThreshold)
+    return x > 0 ? std::numeric_limits<float>::infinity()
+                 : -std::numeric_limits<float>::infinity();
+  return static_cast<float>(x);
+}
+
 // An 8-byte slot cell holding binary32 `v`'s bits in its low word (a
 // little-endian `float` load of the cell reads it), and back.
 inline double cell_of_binary32(float v)
@@ -177,7 +196,7 @@ inline float binary32_of_cell(double cell)
 // itself (f64), the binary32 nearest it (f32), or the word (`encode_word`).
 inline double cell_of_value(const Format & f, double x)
 {
-  if (f.elem == Elem::F32) return cell_of_binary32(static_cast<float>(x));
+  if (f.elem == Elem::F32) return cell_of_binary32(binary32_nearest(x));
   if (f.is_word()) return cell_of_word(encode_word(f, x));
   return x;
 }

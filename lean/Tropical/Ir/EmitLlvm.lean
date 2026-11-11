@@ -1308,6 +1308,17 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
     .ok (globalsText ++ (if globalsText.isEmpty then "" else "\n\n") ++
       header ++ bodyText ++ tail ++ thunk ++ intrinsicDeclsF float)
 
+/-- A wasm module's statement of its own float format:
+    `tropical_kernel_float_bits()` returns 64 or 32. `compile-wasm` appends it
+    and the link exports it, because a `.wasm` and its `tropical_kernel_1`
+    manifest come from two separate compiles, each with its own `--float`;
+    the web player refuses a pair that disagrees instead of reading f64
+    cells as f32 ones. Not part of the port (the JIT and object paths never
+    emit it). -/
+def floatFormatMarker (fmt : FloatFormat) : String :=
+  let bits := match fmt with | .f64 => 64 | .f32 => 32
+  s!"define i32 @tropical_kernel_float_bits() nounwind \{\n  ret i32 {bits}\n}\n"
+
 /-- The binary32 rounding sequences exactly as a kernel inlines them
     (`roundingF32`), in one function a test calls over a buffer:
     `tropical_rounding_f32(in, floor, ceil, round, n)` writes

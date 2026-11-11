@@ -848,10 +848,26 @@ diffcli compile-object patch.json --out k.o --triple thumbv7em-none-eabihf \
 **Params at binary32 are written raw.** `glide`, `anchor` and `velocity`
 re-anchor on companions that hold sample counts and phases (`#t0`,
 `tau_base`, `#phase`), which binary32 does not hold exactly past 2²⁴, so
-`Kernel.ofPlan` refuses a non-raw discipline in a binary32 artifact by name.
-The C++ dispatcher and the web `ParamWriter` refuse one on an `f32` cell too.
-A host write rounds to the nearest binary32. A value past the binary32
-range is refused rather than written as an infinity, by both hosts.
+`Kernel.ofPlan` refuses a binary32 artifact whose plan has any non-raw
+entry in `param_disciplines`, by name. It walks that table directly, as
+`FlatPlan.portError?` does: a glided knob has no port of its own (its ports
+are the `#v0`, `#v1` and `#t0` companions), so a walk over the param ports
+alone would miss it. Both hosts refuse the same pairing once, at load: the
+native reader from the nested plan's `param_disciplines`, the web reader
+from that table and the ports' own `discipline`. The per-write checks in
+the C++ dispatcher and the web `ParamWriter` stay. A host write rounds to
+the nearest binary32. A value at or past the binary32 overflow threshold
+(2¹²⁸ − 2¹⁰³) is refused rather than written as an infinity, by both hosts;
+the native host compares against the threshold and never casts an
+out-of-range double.
+
+This rules out every graph compiled through the playground path (the
+playground and `--graph`) at binary32 today. Its discipline table always
+carries the master clock's `velocity` entry (`paramDisciplinesOf`), whose
+companion `master.tau_base` is a sample count, so `--float f32` on such a
+graph is refused whether or not it has a glided or anchored knob.
+Patch-bay programs (`tropical_program_2`) carry no disciplines and compile
+at binary32.
 
 **Hosts.** The manifest declares every float port `f32` and records the
 format as `realization.float`, written only when it is `f32`, so an `f64`
@@ -862,6 +878,13 @@ The web `WasmKernel` does the same with `Float32Array` views. Both readers
 refuse an unknown `realization.float` by name, a float port declared at a
 format other than the artifact's, and an `f32` default that is not a
 binary32.
+
+A `.wasm` and its manifest come from two compiles (`compile-wasm`,
+`compile-kernel`), each with its own `--float`. So `compile-wasm` appends
+`tropical_kernel_float_bits()`, which returns 64 or 32, and the link exports
+it (`EmitLlvm.floatFormatMarker`). `WasmKernel.instantiate` refuses a module
+whose format differs from the manifest's, or one that declares none. The JIT
+and object paths never emit the marker.
 
 **Targets.** `compile-object` asks LLVM's own subtarget description what the
 FPU realizes (`target_float_info`: binary32, binary64, the float ABI), so no

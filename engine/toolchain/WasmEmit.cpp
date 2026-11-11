@@ -124,7 +124,10 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   const std::vector<const char *> argv = {
     "wasm-ld", "--no-entry", "--import-memory", "--stack-first",
     "-z", stack_size.c_str(),
-    "--export=tropical_kernel", "--export=__heap_base", "--allow-undefined",
+    "--export=tropical_kernel", "--export=__heap_base",
+    // The module's float format (`EmitLlvm.floatFormatMarker`), which
+    // `compile-wasm` appends; a hand-written module may leave it out.
+    "--export-if-defined=tropical_kernel_float_bits", "--allow-undefined",
     obj_path.c_str(), "-o", wasm_path.c_str()
   };
   std::string link_err;

@@ -436,7 +436,10 @@ def compileWasmVerb (args : List String) : IO UInt32 :=
     match Tropical.Ir.EmitLlvm.emitKernel split frames float with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
-      let wasm ← Tropical.Toolchain.Wasm.compileIr ir
+      -- The module states its own float format (`floatFormatMarker`), so a
+      -- player refuses a manifest compiled at another `--float`.
+      let wasm ← Tropical.Toolchain.Wasm.compileIr
+        (ir ++ "\n" ++ Tropical.Ir.EmitLlvm.floatFormatMarker float)
       IO.FS.writeBinFile (System.FilePath.mk outPath) wasm
       IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
       return 0
