@@ -151,6 +151,18 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   return std::vector<uint8_t>(p, p + bytes.size());
 }
 
+// The triple as LLVM's tools read it: normalized, so `thumbv7em-none-eabihf`
+// is arch-vendor-environment (EABIHF, the hard-float procedure call standard)
+// rather than arch-vendor-os with an unknown OS `eabihf`. Unnormalized, the
+// ARM target falls back to the soft-float ABI and marks the object base
+// AAPCS (no Tag_ABI_VFP_args), which a hard-float firmware link refuses.
+// "" is the host.
+static llvm::Triple target_triple(const std::string & text)
+{
+  return llvm::Triple(llvm::Triple::normalize(
+    text.empty() ? llvm::sys::getDefaultTargetTriple() : text));
+}
+
 // ---------------------------------------------------------------------------
 // compile_ir_to_object — the same parse and the same TargetOptions as the
 // wasm path, retargeted to any triple this LLVM carries, and stopped at the
@@ -185,8 +197,7 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
     return {};
   }
 
-  const llvm::Triple triple(triple_text.empty() ? llvm::sys::getDefaultTargetTriple()
-                                                : triple_text);
+  const llvm::Triple triple = target_triple(triple_text);
   std::string lookup_err;
   const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
   if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }
@@ -276,8 +287,7 @@ std::string target_float_info(const std::string & triple_text, const std::string
   LLVMInitializeARMTargetMC();
   llvm::InitializeNativeTarget();
 
-  const llvm::Triple triple(triple_text.empty() ? llvm::sys::getDefaultTargetTriple()
-                                                : triple_text);
+  const llvm::Triple triple = target_triple(triple_text);
   std::string lookup_err;
   const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
   if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }

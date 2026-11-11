@@ -464,7 +464,7 @@ def compileKernelVerb (args : List String) : IO UInt32 :=
     keeps `AllowFPOpFusion = Standard`), so every op rounds as written. -/
 def objectNumerics (float : Tropical.Kernel.FloatFormat) : Lean.Json := Lean.Json.mkObj [
   ("float", float.ieeeName),
-  ("float_literals", "each plan literal is the nearest value of the float format to the decimal as written (one rounding, ties to even); constant folding is binary64 at compile time"),
+  ("float_literals", "each plan literal is the nearest value of the float format to the decimal as written (one rounding, ties to even); an op on literals is evaluated in the float format; a value a program builder computed in binary64 is a literal, rounded once"),
   ("float_rounding_functions", "floor, ceil and round are IEEE-exact (signed zeros included); at binary32 they are inline integer sequences, not library calls"),
   ("int32", "two's complement on Z/2^32: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
   ("int", "two's complement on Z/2^64: add, sub, mul, neg and left shift wrap; right shift is arithmetic"),
@@ -577,7 +577,10 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
   let features := (a.value? "features").getD ""
   let allowLibcalls := a.has "allow-libcalls"
   let hw ← Tropical.Toolchain.Wasm.targetFloatHardware triple cpu features
-  let targetName := hw.triple ++ (if cpu.isEmpty then "" else s!" (cpu {cpu})")
+  -- The triple as given (LLVM's normalized spelling, `thumbv6m-unknown-none-eabi`,
+  -- names the host's only when none is given).
+  let targetName := (if triple.isEmpty then hw.triple else triple) ++
+    (if cpu.isEmpty then "" else s!" (cpu {cpu})")
   if float == .f32 && !hw.binary32 && !allowLibcalls then
     IO.eprintln s!"compile-object: {targetName} has no binary32 FPU, so --float f32 would call a soft-float routine (__aeabi_fadd, __aeabi_fmul, …) for every float op. Refused: an integer program needs no float format, and a float one needs a target with an FPU or --allow-libcalls (the manifest's object block then lists every routine)."
     return 1

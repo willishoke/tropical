@@ -49,7 +49,7 @@ LEAN_EXPORT lean_obj_res shim_wasm_target_float_info(b_lean_obj_arg triple, b_le
   return lean_io_result_mk_ok(out);
 }
 
-/* The undefined symbols of an object, one per line. A NUL byte alone signals
+/* The undefined symbols of an object, one per line. A 0x01 byte alone signals
    failure (an empty string is "no symbols"); Lean reads
    tropical_wasm_last_error. */
 LEAN_EXPORT lean_obj_res shim_wasm_object_undefined(b_lean_obj_arg obj, lean_obj_arg world) {
