@@ -79,6 +79,16 @@ redefined source 0, so a Plan 6 document is refused).
   out of an array, and an integer constant outside its kind. Every plan the
   compiler emits passes; the check only refuses hand-edited crossings the
   compiler would refuse.
+- Typed ports (2026-11-10). `slot_types` lists the slots whose port is an
+  integer word: a typed param (`int32` or `int`, with `frac_bits`) and the
+  source of an output channel that carries an `int32` program output. It is
+  omitted when empty, so every float-only plan is byte-identical. A plan whose
+  output was an `int32` source with no entry now fails `FlatPlan.portError?`
+  at decode instead of being widened to f64 at the sink: that conversion was
+  the one implicit `int32` crossing left. In `tropical_kernel_1` a param input
+  may be `i32` or `i64` and the output `i32`, each with `frac_bits`; τ also
+  carries `frac_bits: 16`. A reader that predates them refuses those elements
+  (the old C loader's "not a scalar f64 param"), never reinterprets them.
 
 ## Required rejection behavior
 
@@ -86,7 +96,8 @@ redefined source 0, so a Plan 6 document is refused).
 `schema: "tropical_plan_7"`. The native C load tail (`tropical_runtime_load`)
 requires a `schema: "tropical_kernel_1"` manifest (`design/typed-kernel.md`)
 whose first input is `tau:i64q16[frames]` with `frames` equal to the
-runtime's buffer length, whose one output is `f64[frames, channels]`, and
+runtime's buffer length, whose params are scalar `f64`, `i32` or `i64`,
+whose one output is `f64` or `i32` `[frames, channels]`, and
 whose nested `plan` carries `schema: "tropical_plan_7"` and the `fused`
 realization. Missing, unknown, and older schemas fail with an error naming
 the unsupported boundary; Plan 6 additionally names its integer time source

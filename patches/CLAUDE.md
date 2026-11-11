@@ -37,7 +37,11 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
   boundaries, including `dac.out`. There is no next/update assignment.
 - **body.decls parameter declarations** — `paramDecl` entries declare
   named control parameters. The MCP `set_param` tool changes values after
-  load.
+  load. A param is `float` unless it says `"type": "int32"` or `"int"`; an
+  integer param is a fixed-point word with `"frac_bits"` fraction bits
+  (`"type": "int32", "frac_bits": 16` is Q16.16), `value` is its real value,
+  and it binds bare only to an input of the same kind and format
+  (`design/typed-kernel.md`, "Typed ports").
 - **ports** — *(optional)* port metadata retained for serialization.
   Top-level patches don't need it; a loaded patch cannot use this field to
   define a new program type.

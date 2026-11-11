@@ -359,7 +359,7 @@ linker script.
 
 ```
 diffcli compile-object patch.json --out k.o --triple thumbv6m-none-eabi \
-    --cpu cortex-m0plus --frames 16 --rate 48000 --out-elem i32 --out-format Q1.15
+    --cpu cortex-m0plus --frames 16 --rate 48000
 ```
 
 `compile-object` takes the IR `EmitLlvm` writes for the JIT and for
@@ -369,11 +369,15 @@ stays small) and stops at the object. The triple may be the host (default),
 `thumbv6m-none-eabi`, or `wasm32-unknown-unknown` (a wasm object, not a
 module). Beside the object it writes `k.o.manifest.json`: the
 `tropical_kernel_1` manifest plus an `object` block with the triple, the
-symbol, N, the per-port layout and format, and the numeric contract.
+symbol, N, the per-port layout and format, and the numeric contract. Every
+port's element type and fixed-point format come from the program (see
+"Typed ports" below); no flag sets them.
 
 **Numeric contract.** IEEE binary64 for float values, two's-complement
-wrapping i64 for `int` and i32 for `int32`, round-to-nearest-even, no FP contraction and no
-fast-math. `EmitLlvm` writes no `fast`/`contract`/`afn` flags and no
+wrapping i64 for `int` and i32 for `int32` with the total integer semantics
+below, round-to-nearest-even, no FP contraction and no fast-math. τ is read
+as one 64-bit word per frame; the frame counter is 32-bit (N is a static
+constant). `EmitLlvm` writes no `fast`/`contract`/`afn` flags and no
 `llvm.fmuladd`, and the toolchain keeps `AllowFPOpFusion = Standard`, so
 no FMA is ever formed. Removing unrolling and vectorization changes no
 value, because nothing in the IR may be reassociated.
@@ -383,9 +387,14 @@ ARM), one pointer per port in port order:
 
 ```
 void tropical_kernel(const int64_t *tau,   /* N × i64, Q48.16, 8-byte aligned */
-                     const double  *param, /* one f64 per param: slot (none in the LFO) */
-                     int32_t       *out);  /* N × C i32 frame-major, 4-byte aligned */
+                     const int32_t *freq,  /* one word per param, at its own type:
+                                              here int32 Q16.16 (an f64 param is a
+                                              const double *, an int one int64_t *) */
+                     int32_t       *out);  /* N × C words frame-major, Q17.15, 4-byte aligned */
 ```
+
+That is `SinOscQ15`'s port (below). The manifest's `object.ports` gives each
+buffer's element, format, bytes and alignment.
 
 Buffers are little-endian. On ELF each function has its own section
 (`.text.tropical_kernel`, `.text.tropical_kernel_argv`), and the literal
@@ -420,21 +429,76 @@ i16). Error, measured exhaustively over all 2¹⁶ rounded phases: 1.63 LSB
 against `32768 sin(2π h/2¹⁶)`. Rounding the phase to 16 bits adds at most
 π/2 LSB, so the bound against the float sine of the full 32-bit phase is
 3.2 LSB (9.8e-5). The measured worst case over 65 536 frames is 2.67 LSB.
+`FixedSinOscQ15`'s output declares no format (its port is a plain `i32`
+word, `Q32.0`), so its frozen renders stay what they were.
 
-On the M0+ table (ALU and `MULS` 1 cycle, loads and stores 2, taken branch
-2, `BL` 3) the hot loop is 75 instructions, 8 of them `MULS`, and takes
-90–93 cycles per frame (118–122 when the int rail was i64; see "The `int32`
-kind" below). At N = 16 a call costs at most 1 521 cycles, of which 33 are
-prologue and epilogue. That is about 7% of a 1 333-cycle sample budget at
-64 MHz and 48 kHz. Flash is 200 bytes for `tropical_kernel`. The `_argv`
-thunk inlines a second copy (204 bytes), which `--gc-sections` drops when
-nothing references it. Stack is 28 bytes, and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
-soft-float helpers. The host object matches the JIT sample for sample over
-65 536 frames, and also at τ = 2⁴⁰ samples. The wasm32 object, linked with
-`wasm-ld` and run in Bun, matches the host object over the same 65 536
-frames.
-`tools/embedded_object.py` builds all three objects, reports these numbers
-and gates the libcalls (`make validate` runs it with `--check-only`).
+**The live-knob LFO.** `SinOscQ15` is the same oscillator with fixed-point
+ports, so a host or a firmware drives it with no float anywhere: `freq` is
+Hz as an `int32` Q16.16 word (`[-32768, 32768)` Hz in steps of 2⁻¹⁶ Hz),
+`phase` a Q0.32 offset in cycles, `out` the Q1.15 sine in an `int32`
+(`Q17.15`). A patch wires a typed param into `freq`:
+
+```json
+{"op":"paramDecl","name":"freq","type":"int32","frac_bits":16,"value":2}
+```
+
+The port is Hz rather than the phase increment itself. Hz is what a host
+or a firmware has, and its meaning does not depend on the rate; the
+conversion costs 17 cycles per call, about one cycle per frame at N = 16.
+The rate stays a constant of the artifact. `hzQ16ToIncQ32` turns the word
+`F` into the Q0.32 increment `F · 2¹⁶ / rate` without a division or a 64-bit
+multiply. `M = round(2⁴⁸ / rate)` is folded at compile time and split as
+`q·2³² + Mh·2¹⁶ + Ml`, and the increment is
+`q·F + Fh·Mh + ⌊Fh·Ml/2¹⁶⌋ + ⌊Fl·Mh/2¹⁶⌋` with `F = Fh·2¹⁶ + Fl`. That is
+three `MULS`, at most 3.25 increment LSBs from exact (3.6e-5 Hz at 48 kHz;
+the knob's own step is 1.5e-5 Hz). It depends only on the param, so it is
+stage 0 and runs once per call, before the frame loop. In the thumbv6m
+object it is `0x06`–`0x20`: `ldr` of the word, `asrs`, two literal loads,
+three `muls`, and adds and shifts, 17 cycles. Then `0x22`–`0x2a` store the
+three loop invariants (`inc`, its high and low halves) to the stack, which
+costs 8 cycles. The phase is `phaseQ32Of32`, the `int32` form of `phaseQ32`
+with the increment signed, so a frequency is taken modulo the rate into
+`[-rate/2, rate/2)` and a negative one runs the sine backward.
+
+**Cycles.** `tools/embedded_object.py` counts on the M0+ table (ARM DDI
+0484, zero wait states: ALU and `MULS` 1, loads and stores 2, `PUSH`/`POP`
+1+N, `POP` with PC 3+N counting PC, `B` 2, `B<cond>` 2 taken and 1 not,
+`BL` 3). It enumerates every path once around the frame loop, data-dependent
+branches included, and adds the path that enters the loop and the one that
+leaves it. An ARMv6-M emulator on the same table measured two objects, and
+both measurements fall inside the computed ranges:
+
+| object (N = 16) | entry | frame | exit | call | measured |
+|---|---|---|---|---|---|
+| #252 LFO (i64 rail) | 20 | 114–118 | 10 | 1 854–1 918 | 1 854, worst block 1 902 |
+| `FixedSinOscQ15`, `int32` | 17 | 86–90 | 10 | 1 403–1 467 | 1 403, worst block 1 451 |
+| `FixedSinOscQ15`, 32-bit frame counter | 14 | 76–80 | 10 | 1 240–1 304 | |
+| `SinOscQ15`, live `freq` | 39 | 78–82 | 10 | 1 297–1 361 | |
+
+The cheapest path holds the sample inside the clamp. Holding it at -32767
+costs one cycle more and at +32767 three more; the upper bound adds the
+infeasible path through both clamp arms, which costs four. The old count
+summed every instruction in the loop's address range, the clamp's skipped
+arms and the trailing branch included. That made its lower bound four cycles
+per frame too high.
+
+`--wait-states W` estimates code in flash: each 32-bit fetch and each
+literal-pool load costs W more cycles. The low end lets a fetch hide behind
+the execution of the word before it, and the high end does not. This is an
+estimate, not a bound. For the `int32` object at W = 2 it gives 2 152–3 010
+cycles per call, and the emulator measured 2 245.
+
+`SinOscQ15`'s frame loop is 67 instructions, 9 of them `MULS`: three for the
+phase, because the increment is a variable now, and six for the sine. At
+N = 16 a call takes at most 1 361 cycles, about 6% of a 1 333-cycle sample
+budget at 64 MHz and 48 kHz. Flash is 220 bytes for `tropical_kernel`, stack
+36 bytes, and there is no static RAM. The `_argv` thunk is 16 bytes and
+calls the kernel. `llvm-nm -u` lists nothing: no `__aeabi_*`, no
+`__muldi3`, no soft-float helpers, no division. The host object matches the
+JIT sample for sample over 65 536 frames at 2, 1 234.5, -440.25, 23 999 and
+0.0001 Hz, and again from τ = 2⁴⁰. The wasm32 object, linked with `wasm-ld`
+and run in Bun, matches the host object. `make validate` and CI run
+`tools/embedded_object.py --check-only` on both LFOs.
 
 **Formats and cost.** Q15 × Q15 fits one 1-cycle `MULS` (16 × 16 → 32).
 Q31 × Q31 needs the high word of a 64-bit product. ARMv6-M has no `UMULL`,
@@ -565,29 +629,98 @@ The rewrite onto `int32` left `FixedSinOscQ15`'s output bit-identical: three
 renders frozen before it (`tests/golden/embedded/`) held, and so did renders
 at τ = 10¹² samples. The total semantics changed none of them, and the
 frozen renders still hold. The thumbv6m object is unchanged by the total
-semantics: 75
-hot-loop instructions, 90–93 cycles, no libcalls. The LFO's shifts are all
-by literals, which the emitter reduces at emit time.
+semantics: 75 hot-loop instructions, 86–90 cycles per frame (90–93 on the
+old count, see "Cycles"), no libcalls. The LFO's shifts are all by literals,
+which the emitter reduces at emit time.
+
+**Typed ports (2026-11-10).** A param, and an integer port of a program,
+carries its own number format. The vocabulary is scalar-level
+(`Tropical.PortFormat`): a kind (`float`, `int32`, `int`) and, for an
+integer, `fracBits`, so the word `w` means `w · 2^-fracBits`. Labels are Qm.n
+with the sign bit in m, so m + n is the word width: Q16.16, Q0.32, Q17.15,
+Q48.16. Inside the kernel an integer is an integer. No IR pass, op or
+semantics reads a format.
+
+- *Where it is declared.* A patch declares a param in its `paramDecl`:
+  `"type": "int32"` or `"int"`, `"frac_bits"`, and `value`, the real value
+  (`float` is the default and stays as before). A builder declares a
+  program port's format on the port (`InputDecl.fracBits`,
+  `OutputDecl.fracBits`, `AInputDecl.fracBits`). It reaches the patch bay as
+  `frac_bits` in the port's `type_obj`. Playground knobs stay `float`.
+- *Where it is checked.* A kind is the compiler's: an `int32` param binds
+  an `int32` input only, by the same crossing check as any `int32` value. A
+  format is checked where a value crosses a port without arithmetic: a wire
+  that is exactly a param, or exactly another instance's output, into an
+  input of the same integer kind must have the same `frac_bits`. A wire that
+  computes (`rshift(param(f), 8)`) yields a plain word and binds any input
+  of its kind, because arithmetic on words is how a patch converts between
+  formats. A literal wired into a formatted input is a word, not a real
+  value. Declarations are refused when a fraction has no integer kind, when
+  more fraction bits than the word has are asked for, when the type is
+  `bool`, and when a default falls outside the format's range.
+- *The plan.* `slot_types` lists each typed param slot and each output
+  channel's source that carries an `int32` program output, with the format.
+  It is omitted when empty. A typed param's `slot_defaults` entry is its
+  word, `Kernel.encodeWord(value)`: `value · 2^fracBits` truncated toward
+  zero and saturated, NaN → 0. That is the kernel's own float → integer
+  conversion, and the C++ and web hosts use the same one.
+  `FlatPlan.portError?` holds the rest. A typed param is read only at its
+  kind and never written by the kernel. One output buffer has one element
+  type. An integer channel has exactly one source at gain 1, since the f64
+  mix and gain have no integer counterpart to pick silently. An `int32`
+  value reaches an output only through a listed source. That closes the
+  last implicit `int32` crossing, the f64 sink. The session compile,
+  `PlanDecode` and both emitters refuse a plan that fails it.
+- *The kernel.* `EmitLlvm` loads a typed param as `i32` or `i64` straight
+  into its slot's integer lane, so it never passes through f64. An `i32`
+  output channel stores the word from its 32-bit lane.
+- *The manifest.* A param input is `f64`, or `i32`/`i64` with `frac_bits`,
+  and its `default` is then the word. The output is `f64`, or `i32` with
+  `frac_bits`. τ carries `frac_bits: 16`. The object block's `ports` list
+  each buffer's element, Q label, bytes and alignment.
+- *Disciplines.* Only `raw` applies to an integer param. `glide`, `anchor`
+  and `velocity` re-anchor in float arithmetic on f64 companions
+  (`host-param-dispatch.md`). Nothing attaches one to a typed port today
+  (patch-bay params carry no discipline, and playground knobs are `float`),
+  and `portError?` refuses one whose base or companion is a typed slot
+  rather than dropping it. The C++ dispatcher and the web `ParamWriter`
+  refuse it too. An integer `anchor` is the natural next form: with the
+  increment as the port, its correction `Δinc · now` is exact mod 2³². It
+  waits for a producer.
+- *Hosts.* Both hosts take the real value and write the word.
+  `FlatRuntime` keeps a typed param's word in its 8-byte slot cell (an
+  `int32` sign-extended, so an `i32` load of the cell reads it). `set_param`
+  encodes into the cell, `get_slot` decodes, and the kernel reads the cell
+  with no conversion on the audio path. An `i32` output renders into its own
+  buffer and is widened to `word · 2^-fracBits` for the f64 output, the
+  scope and the DAC. The web `WasmKernel` writes the word into the param's
+  cell (`Int32Array` or `BigInt64Array`) and widens an `i32` output the same
+  way. Both readers refuse other elements by name. Existing f64 manifests
+  read and play exactly as before.
+- *Metal.* Metal binds params through the f32 slot vector and its f64 CPU
+  pre-pass, and neither holds a 32- or 64-bit word exactly, so `EmitMsl`
+  refuses a typed param; typed params run on the JIT and wasm. An `int32`
+  output on Metal writes `word · 2^-fracBits` as f32, which is exact for a
+  word below 2²⁴, and equals the JIT port widened by the runtime.
+- *Gates.* `typed-ports-jit` and `typed-ports-refusals` in `tropicaltest`
+  (`--ports-only`), the typed-param cases in `wasm_vs_jit`, and
+  `tests/web/runtime_typed_ports.test.ts` (the web reader, `encodeWord`,
+  refusals). `FixedSinOscQ15`'s three frozen renders and the stdlib goldens
+  are unchanged.
 
 **Gaps left open (smallest honest fix for each).**
 
-1. *Params are f64 by contract.* A knob on a no-FPU target means soft-float
-   `fmul`/`fdiv`/`fptosi` calls. LICM moves them out of the frame loop, but
-   they stay in the object. The spike's LFO therefore fixes `freq` as a
-   literal: changing it is a structural edit, which recompiles. Fix: a
-   per-port element type for params (`i32` with a Q format, or `i64`) that
-   the emitter loads as an int and that never enters an f64 slot. `Elem`
-   already carries the vocabulary.
+1. *Params are f64 by contract.* Closed by typed ports: a knob on a no-FPU
+   target is an `int32` word the kernel loads as one (`SinOscQ15`, 39 + 78–82
+   + 10 cycles per call).
 2. *The int rail was i64.* Closed by the `int32` kind: the rounding shifts
-   and the clamp are now 32-bit (90–93 cycles per frame, from 118–122).
-   What stays 64-bit in the frame loop is the port's own: the frame counter
-   (`%s` is an i64; about 7 cycles of add-with-carry and compare) and the
-   read of τ, an i64 by type, whose sample count spans both words. A
-   32-bit counter when the static frame count fits would remove the first.
-3. *The output's Q format is a flag, not a type.* `--out-elem i32` needs
-   one sink input at gain 1 and stores the int output directly. `Q1.15`
-   comes from `--out-format`, not from the program. Fix: give int output
-   declarations a `fracBits` and carry it into `Kernel.Port`.
+   and the clamp are now 32-bit. The frame counter `%s` is now 32-bit too,
+   which saves 10 cycles per frame on the M0+ (86 → 76): the add-with-carry
+   pair goes, and the τ pointer becomes a post-increment `ldm`. τ itself
+   stays a 64-bit read by type.
+3. *The output's Q format is a flag, not a type.* Closed by typed ports: an
+   `int32` output's `fracBits` is the program's, carried into `Kernel.Port`
+   and the manifest. `--out-elem` and `--out-format` are gone.
 4. *f32* as a per-target float format on the LLVM path was not attempted.
 
 **Clocks across nodes.** The kernel reads τ from its caller. Exact ratios
