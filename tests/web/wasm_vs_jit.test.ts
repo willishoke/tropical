@@ -92,7 +92,8 @@ function runNative(wirePlan: string, samples: number): Float64Array {
 
 /** WASM side: lower the same source to wasm32 in-process and drive it through
  *  the runtime package (the artifacts the browser ships). */
-async function runWasm(program: ProgramFile, _plan: string, samples: number): Promise<Float64Array> {
+async function runWasm(program: ProgramFile, _plan: string, samples: number,
+    writes: Array<[string, number]> = []): Promise<Float64Array> {
   const manifest = kernelManifestViaLean(program)
   writeFileSync(PROG_TMP, JSON.stringify(program))
   const out = '/tmp/wvj-program.wasm'
@@ -101,6 +102,8 @@ async function runWasm(program: ProgramFile, _plan: string, samples: number): Pr
   // The kernel's shape is static (128 frames); `render` chunks a longer
   // window over the same closed form, so the sample count is free.
   const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(out)), manifest)
+  for (const [name, value] of writes)
+    k.setParam(manifest.inputs.slice(1).findIndex((p) => p.name === name), value)
   return k.render(samples).slice()
 }
 
@@ -189,6 +192,32 @@ function q15Program(freqHz: number, phase: number): ProgramFile {
     body: { op: 'block', decls: [
       { op: 'instanceDecl', name: 'lfo', program: 'FixedSinOscQ15', inputs: { freq: freqHz, phase } },
     ], assigns: [dacOut('lfo', 'out')] },
+  }
+}
+// Typed params: `SinOscQ15`'s `freq` is an int32 Q16.16 port, driven by an
+// int32 Q16.16 param (the kernel loads the word, never an f64); `FixedSin`'s
+// `phase` is an int port, driven by an `int` param. The wasm player stores
+// the word a write encodes (`encodeWord`), the JIT runtime the same word.
+function knobProgram(freqHz: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_knob_q15',
+    body: { op: 'block', decls: [
+      { op: 'paramDecl', name: 'freq', type: 'int32', frac_bits: 16, value: freqHz },
+      { op: 'instanceDecl', name: 'lfo', program: 'SinOscQ15',
+        inputs: { freq: { op: 'param', name: 'freq' } } },
+    ], assigns: [dacOut('lfo', 'out')] },
+  }
+}
+function intParamProgram(phase: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_int_param',
+    body: { op: 'block', decls: [
+      { op: 'paramDecl', name: 'ph', type: 'int', value: phase },
+      { op: 'instanceDecl', name: 's', program: 'FixedSin',
+        inputs: { phase: { op: 'param', name: 'ph' } } },
+    ], assigns: [dacOut('s', 'out')] },
   }
 }
 function int32ZooProgram(wired: boolean): ProgramFile {
@@ -333,6 +362,25 @@ describe('wasm vs native JIT', () => {
 
   test('FixedSinOscQ15 (int32 datapath, int32 output) — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('FixedSinOscQ15', q15Program(1234.567, 0.3), 512)
+  })
+
+  test('SinOscQ15 with an int32 Q16.16 param (i32 in, i32 Q17.15 out) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('SinOscQ15 knob', knobProgram(1234.5), 512)
+  })
+
+  test('SinOscQ15: a written int32 param ≡ the JIT compiled at that value', async () => {
+    const nat = runNative(compileViaLean(knobProgram(-440.25)), 512)
+    expectAudible('SinOscQ15 knob written', nat)
+    const wasm = await runWasm(knobProgram(2), '', 512, [['param:freq', -440.25]])
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  })
+
+  test('FixedSin with an int param (i64 word) — WASM ≡ JIT, seeded and written', async () => {
+    await expectBitIdentical('FixedSin int param', intParamProgram(1073741824), 64)
+    const nat = runNative(compileViaLean(intParamProgram(3221225472)), 64)
+    const wasm = await runWasm(intParamProgram(0), '', 64, [['param:ph', 3221225472]])
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
   test('int32 op zoo — WASM ≡ JIT bit for bit', async () => {

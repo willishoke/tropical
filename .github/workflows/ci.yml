@@ -94,7 +94,8 @@ jobs:
         run: |
           python3 tools/embedded_object.py --check-only \
             --diffcli ./lean/.lake/build/bin/diffcli --llvm-bin /usr/lib/llvm-22/bin \
-            --patch tests/fixtures/embedded_lfo.json --out-dir build/embedded
+            --patch tests/fixtures/embedded_lfo.json --patch tests/fixtures/embedded_lfo_knob.json \
+            --out-dir build/embedded
 
       - name: Precompile web demo plans (Lean-driven)
         run: bun web/build_patches.ts

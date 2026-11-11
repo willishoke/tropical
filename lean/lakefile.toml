@@ -45,6 +45,7 @@ globs = [
   "Tropical.Parse.+",
   "Tropical.Plan",
   "Tropical.PlanDecode",
+  "Tropical.PortFormat",
   "Tropical.Playground.*",
   "Tropical.Semantics.*",
   "Tropical.Session.*",

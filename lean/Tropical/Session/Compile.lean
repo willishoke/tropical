@@ -171,6 +171,27 @@ decreasing_by
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
     | (simp; omega)
 
+/-- A bare literal crossing into a fixed-point input is the REAL value, as a
+    `paramDecl.value` is: `440` into an `int32` Q16.16 input is 440, the word
+    `440 · 2^16` (`PortFormat.encodeLiteral?`). The rule is the bare-crossing
+    rule of the format check (`checkWireFormats`): it applies to a wire that is
+    exactly a literal; a literal inside arithmetic stays a word, like every
+    other value the IR computes with. A literal whose word is not an integer,
+    or lies outside the format, is refused. An input with no fraction bits
+    keeps its literal as written (the word is the value), and float inputs
+    are untouched. -/
+def bareLiteralAtPort (what : String) (decl : Tropical.Ir.InputDecl)
+    (expr : Tropical.WireExpr) : Except String Tropical.WireExpr :=
+  match expr, decl.type? with
+  | .num n, some (.scalar k) =>
+    if k.isInteger && decl.fracBits != 0 then
+      let f : Tropical.PortFormat := { kind := k, fracBits := decl.fracBits }
+      match f.encodeLiteral? n with
+      | .ok w => .ok (.num ⟨w, 0⟩)
+      | .error e => .error s!"input {what}: {e}"
+    else .ok expr
+  | _, _ => .ok expr
+
 /-- Build the resolved session root `Program` directly from the graph (instances
     already carry resolved type snapshots via `resolverTbl`), deleting the
     `sessionToParsed → reparse → elaborate` round-trip. Byte-identical to the
@@ -227,7 +248,8 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
     for w in wires do
       let some pos := tgt.inputs.findIdx? (·.name == w.portName)
         | .error s!"sessionToResolvedRoot: '{name}' ({tgt.name}) has no input '{w.portName}'"
-      let (value, exprs') ← (wireExprToResolved ctx w.expr).run exprs
+      let wexpr ← bareLiteralAtPort s!"'{name}.{w.portName}'" tgt.inputs[pos]! w.expr
+      let (value, exprs') ← (wireExprToResolved ctx wexpr).run exprs
       exprs := exprs'
       inputs := inputs.push { port := ⟨pos⟩, value }
     decls := decls.push (.inst name tgt.name inputs)
@@ -252,6 +274,42 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
   let idx : Tropical.Ir.ProgramIdx := ⟨arena.programs.size⟩
   .ok ({ arena with programs := arena.programs.push prog, exprs }, idx)
 
+/-- The declared format of a port from its catalog `type_obj` (`float` when
+    it has none, or is an array). -/
+private def portFormatOf (p? : Option PortInfo) : Tropical.PortFormat :=
+  match p?.bind (·.typeObj) with
+  | some t =>
+    if (t.getObjVal? "kind").toOption == some (Json.str "scalar") then
+      (Tropical.PortFormat.ofJson? t).toOption.getD {}
+    else {}
+  | none => {}
+
+/-- Formats are checked where a value crosses a port bare: a wire that is
+    exactly a param, or exactly another instance's output, into an input of
+    the same integer kind must agree on `frac_bits`. (A kind mismatch is the
+    compiler's crossing check, with the cast it needs.) A wire that computes
+    — `rshift(param(f), 8)` — yields a plain word, and binds to any input of
+    its kind: arithmetic on words is how a patch converts between formats, and
+    the IR never sees a format. -/
+private def checkWireFormats (st : SessionSt) : SessionM Unit := do
+  for w in st.wires do
+    let some info := st.findInstance? w.instName | continue
+    let dst := portFormatOf (info.progMeta.inputs.find? (·.name == w.portName))
+    let src? : Option (String × Tropical.PortFormat) := match w.expr with
+      | .param nm =>
+        if st.params.any (·.1 == nm) then some (s!"param '{nm}'", st.paramFormat nm) else none
+      | .ref inst out =>
+        (st.findInstance? inst).map fun srcInfo =>
+          let port := match out with
+            | .name nm => srcInfo.progMeta.outputs.find? (·.name == nm)
+            | .index n => srcInfo.progMeta.outputs[n.toFloat.toUInt64.toNat]?
+          let outName := match out with | .name nm => nm | .index n => toString n
+          (s!"output '{inst}.{outName}'", portFormatOf port)
+      | _ => none
+    if let some (what, src) := src? then
+      if src.kind == dst.kind && src.kind.isInteger && src.fracBits != dst.fracBits then
+        internalError s!"Format mismatch: input '{w.instName}.{w.portName}' is {dst.describe} but {what} is {src.describe}; a value crosses a port bare only at its own format — convert it with arithmetic in the wire (a shift by the difference in fraction bits)"
+
 /-- Build the `SessionInput` from the engine's current session mirror: allocate,
     assert acyclic, rewrite each instance's `programName` to its stored program's
     name, build the first-instance-wins name→idx resolver, construct the resolved
@@ -270,6 +328,7 @@ def buildSessionInput (ctx : String)
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
   let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
+  checkWireFormats st
 
   -- Preserved historical parity: the retired parsed-session path emitted the
   -- stored program name here.
@@ -322,6 +381,7 @@ def buildSessionInput (ctx : String)
     wiresPost
     graphOutputs := st.graphOutputs
     params := st.params
+    paramTypes := st.paramTypes
     alloc
     root := rootCore
     arena := rootArena

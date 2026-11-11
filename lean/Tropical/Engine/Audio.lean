@@ -116,6 +116,13 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
   let value ← match valueJ with
     | .num n => pure n.toFloat
     | _ => internalError s!"set_param: value must be a number, got {valueJ.compress}"
+  -- A typed param's value must fit its format, as its `paramDecl.value` must
+  -- at ingest: past the range the word would saturate, and the mirror (and
+  -- so `save`) would hold a value `load` refuses.
+  let st ← env.state.get
+  if let some e := (st.paramFormat name).rangeError? valueJ.compress value then
+    throwBare .invalidValue s!"set_param: param '{name}': {e}"
+      (param := some "value") (value := some valueJ)
   let write ← match ← (env.host.setParam name value).toBaseIO with
     | .ok (some w) => pure w
     | .ok none =>

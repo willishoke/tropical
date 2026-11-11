@@ -2,6 +2,7 @@ import Lean.Data.Json
 import Std.Data.HashSet
 import Tropical.Parse.Nodes
 import Tropical.Ir.Core
+import Tropical.PortFormat
 
 /-!
 # Plan layer — `tropical_plan_7` as a type
@@ -565,6 +566,24 @@ def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
     else fields.push ("companions", toJson d.companions)
   Json.mkObj fields.toList
 
+/-- The declared type of a port-facing slot: a `param:` slot whose value is
+    an integer word (a typed param the host writes), or the source slot of an
+    output channel that carries an `int32` program output. Float slots are not
+    listed. `format` is scalar-level vocabulary (`Tropical.PortFormat`); the IR
+    and its passes never read it. The emitters load a listed param slot at its
+    kind (never through f64), and `Kernel.ofPlan` types the param inputs and
+    the output from this table. Omitted from the wire when empty. -/
+structure SlotType where
+  slot : Nat
+  format : Tropical.PortFormat
+deriving BEq, Repr, Inhabited
+
+def SlotType.toWire (t : SlotType) : Json :=
+  let fields := #[("slot", toJson t.slot), ("scalar", Json.str t.format.kind.wire)]
+  let fields := if t.format.fracBits == 0 then fields
+    else fields.push ("frac_bits", toJson t.format.fracBits)
+  Json.mkObj fields.toList
+
 /-- The rate a plan is compiled for when its producer names none (the
     native runtime's and the web demo's 44.1 kHz). A compile that knows its
     rate (`--rate` on `tropicalc` and diffcli's compile and render verbs)
@@ -600,7 +619,21 @@ structure FlatPlan where
       kernel reads a whole, consistent generation of columns (no cross-column
       tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
   coeffArraySlots : Array Nat := #[]
+  /-- Typed port-facing slots (`SlotType`); empty when every port is f64. -/
+  slotTypes : Array SlotType := #[]
 deriving Inhabited
+
+/-- The declared format of slot `i`, if `slot_types` lists it. -/
+def FlatPlan.slotType? (p : FlatPlan) (i : Nat) : Option Tropical.PortFormat :=
+  (p.slotTypes.find? (·.slot == i)).map (·.format)
+
+/-- The output buffer's format: the format `slot_types` gives the sinks'
+    sources (`portError?` makes them agree), or `float`. -/
+def FlatPlan.outputFormat (p : FlatPlan) : Tropical.PortFormat := Id.run do
+  for sink in p.sinks do
+    for i in sink.inputs do
+      if let some f := p.slotType? i then return f
+  return {}
 
 /-- The structural output-image contract consumed by plan semantics and code
     generation: the image is nonempty and each channel has at most one sink. -/
@@ -849,6 +882,8 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
+  let fields := if p.slotTypes.isEmpty then fields
+    else fields.push ("slot_types", Json.arr (p.slotTypes.map (·.toWire)))
   let fields := match p.metalExecutionToWire with
     | some execution => fields.push ("metal_execution", execution)
     | none => fields
@@ -991,6 +1026,115 @@ def FlatPlan.kindError? (p : FlatPlan) : Option String := Id.run do
     match checkInstrKinds p.sources st instrs[i] with
     | .ok st' => st := st'
     | .error e => return some s!"instruction {i}: {e}"
+  return none
+
+/-- A JSON number that is an integer, as that integer (`5`, `5.0` and `5e0`
+    alike); `none` for anything else. -/
+def jsonIntWord? : Json → Option Int
+  | .num n =>
+    let den : Int := (10 : Int) ^ n.exponent
+    if n.mantissa % den == 0 then some (n.mantissa / den) else none
+  | _ => none
+
+/-- The kind of the last instruction (in execution order) that writes each
+    module slot. -/
+private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarType :=
+  p.linearInstrs.foldl (init := {}) fun m i =>
+    match i.dst with
+    | .moduleSlot idx => m.insert idx i.resultType
+    | _ => m
+
+/-- The plan's port-typing error, if any (`slot_types`, `SlotType`):
+
+* each listed slot exists, is listed once, and has a valid integer format
+  (`PortFormat.error?`); a listed `param:` slot is `int32` or `int`, with a
+  default (when it has one) that is an integer word within its kind's range,
+  and a listed output source is `int32`;
+* a typed param slot is read only at its own kind and never written by the
+  kernel (the host writes it);
+* the output buffer has one element type. If a channel's source is listed,
+  every channel's is, with the same format, each channel has exactly one
+  source at gain 1 (an integer channel has no mix: the f64 sum and gain have
+  no integer counterpart this compiler picks for you), and an `int32` value
+  reaches an output only through a listed source — the f64 output never
+  converts one implicitly; every channel source of an integer output is
+  `int32` (an `int` slot has no output element type);
+* only `raw` applies to an integer param: `glide`, `anchor` and `velocity`
+  re-anchor in float arithmetic on f64 companions (`host-param-dispatch.md`),
+  so a discipline other than `raw` naming a typed slot, as its base or as a
+  companion, is refused rather than dropped.
+
+`PlanDecode` and both kernel emitters refuse a plan that fails it. -/
+def FlatPlan.portError? (p : FlatPlan) : Option String := Id.run do
+  let mut seen : Std.HashSet Nat := {}
+  for t in p.slotTypes do
+    if t.slot >= p.slotCount then
+      return some s!"slot_types: slot {t.slot} is outside slot_count {p.slotCount}"
+    if seen.contains t.slot then
+      return some s!"slot_types: slot {t.slot} is listed twice"
+    seen := seen.insert t.slot
+    if let some e := t.format.error? then
+      return some s!"slot_types: slot {t.slot}: {e}"
+    let name := p.slotNames[t.slot]?.getD ""
+    if name.startsWith "param:" then
+      unless t.format.kind == .int32 || t.format.kind == .int do
+        return some s!"slot_types: param slot '{name}' is {t.format.kind.wire}; a typed param is int32 or int"
+      -- Its default is the word the host seeds the cell with: an integer
+      -- within the word, never a value to round or wrap.
+      let (lo, hi) := t.format.wordRange
+      match p.slotDefaults[t.slot]? with
+      | none => pure ()
+      | some d =>
+        match jsonIntWord? d with
+        | none =>
+          return some s!"slot_types: param slot '{name}' default {d.compress} is not an integer word"
+        | some w =>
+          unless lo ≤ w && w < hi do
+            return some s!"slot_types: param slot '{name}' default {w} is outside the {t.format.kind.wire} word [{lo}, {hi})"
+    else if t.format.kind != .int32 then
+      return some s!"slot_types: output slot '{name}' is {t.format.kind.wire}; a typed output is int32"
+  let isTypedParam (i : Nat) : Option Tropical.PortFormat :=
+    if (p.slotNames[i]?.getD "").startsWith "param:" then p.slotType? i else none
+  for instr in p.linearInstrs do
+    for a in instr.args do
+      if let .slot idx t := a then
+        if let some f := isTypedParam idx then
+          if t != f.kind then
+            return some s!"{instr.tag}: param slot '{p.slotNames[idx]!}' is {f.kind.wire} but is read as {t.wire}"
+    if let .moduleSlot idx := instr.dst then
+      if (isTypedParam idx).isSome then
+        return some s!"{instr.tag}: param slot '{p.slotNames[idx]!}' is written by the kernel; a param is the host's"
+  let typedOut := p.sinks.any fun s => s.inputs.any fun i => (p.slotType? i).isSome
+  if typedOut then
+    let mut fmt? : Option Tropical.PortFormat := none
+    for s in p.sinks do
+      unless s.inputs.size == 1 && s.gain.toFloat == 1.0 do
+        return some s!"sink {s.target}: an integer output channel takes one source at gain 1 (it has {s.inputs.size} at gain {s.gain})"
+      let some f := p.slotType? s.inputs[0]!
+        | return some s!"sink {s.target}: the output is integer, but this channel's source '{p.slotNames[s.inputs[0]!]?.getD ""}' is not; one output buffer has one element type"
+      -- A typed output is an `int32` word (the `i32` output port); an `int`
+      -- slot (a typed param read straight into a channel) has no output
+      -- element type, so it is refused here rather than at an emitter.
+      if f.kind != .int32 then
+        return some s!"sink {s.target}: source '{p.slotNames[s.inputs[0]!]?.getD ""}' is {f.describe}; a typed output is int32"
+      match fmt? with
+      | none => fmt? := some f
+      | some g =>
+        if f != g then
+          return some s!"sink {s.target}: output channels disagree on their format ({f.describe} vs {g.describe}); one output buffer has one format"
+  else
+    let kinds := p.lastSlotWriteKinds
+    for s in p.sinks do
+      for i in s.inputs do
+        if kinds.get? i == some .int32 then
+          return some s!"sink {s.target}: source '{p.slotNames[i]?.getD ""}' is int32 but slot_types does not list it; an int32 output reaches the output port as an integer, never through the f64 mix"
+  for d in p.paramDisciplines do
+    if d.discipline != "raw" then
+      for nm in #[d.name] ++ d.companions do
+        let idx? := p.slotNames.findIdx? (· == s!"param:{nm}")
+        if let some idx := idx? then
+          if let some f := isTypedParam idx then
+            return some s!"param '{d.name}': discipline '{d.discipline}' re-anchors in float arithmetic and is not defined on the {f.describe} slot '{nm}'; an integer param is written raw"
   return none
 
 end Tropical.Plan

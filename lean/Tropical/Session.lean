@@ -125,6 +125,11 @@ structure SessionSt where
   /-- Param mirror: name → last-known value (raw Json preserves lexical number
       forms). The loaded runtime owns the live module slots. -/
   params       : Array (String × Json) := #[]
+  /-- The declared format of each typed param (`paramDecl`'s `type` and
+      `frac_bits`); a param not listed is `float`. Its mirror value in
+      `params` is the real value; the compile encodes it to the word
+      (`Kernel.encodeWord`). -/
+  paramTypes   : Array (String × Tropical.PortFormat) := #[]
   nameCounters : Std.HashMap String Nat := {}
   /-- The typed store (Phase 4 stage 4a): every adopted catalog entry's
       post-strata resolved IR, appended via `decodeResolvedInto`. The
@@ -177,6 +182,10 @@ def nextName (st : SessionSt) (prefix' : String) : SessionSt × String :=
   let count := (st.nameCounters.get? prefix').getD 0 + 1
   ({ st with nameCounters := st.nameCounters.insert prefix' count },
    s!"{prefix'}{count}")
+
+/-- The declared format of param `name` (`float` when undeclared). -/
+def paramFormat (st : SessionSt) (name : String) : Tropical.PortFormat :=
+  ((st.paramTypes.find? (·.1 == name)).map (·.2)).getD {}
 
 def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
   match st.params.findIdx? (·.1 == name) with

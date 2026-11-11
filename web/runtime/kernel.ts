@@ -9,8 +9,8 @@
  * `KernelManifest`; no compiler internals.
  */
 import {
-  CLOCK_FRAC_BITS, kernelFrames, kernelOutputChannelCount, kernelParams,
-  type KernelManifest,
+  CLOCK_FRAC_BITS, encodeWord, isWordPort, kernelFrames, kernelOutputChannelCount,
+  kernelOutputWordScale, kernelParams, wordValue, type KernelManifest, type KernelPort,
 } from './manifest.js'
 import { computeLayout, type KernelLayout } from './layout.js'
 
@@ -92,12 +92,17 @@ export class WasmKernel {
    *  again only if the memory's buffer changes, so a block allocates nothing. */
   private tauWords?: Uint32Array
   private outView?: Float64Array
+  /** An `i32` output's words, widened into `outView` (then a host-owned
+   *  scratch) as `word · outScale` after each call. */
+  private outWords?: Int32Array
 
   private constructor(
     private readonly memory: WebAssembly.Memory,
     private readonly kernel: KernelFn,
     private readonly layout: KernelLayout,
     readonly outputChannelCount: number,
+    private readonly params: KernelPort[],
+    private readonly outScale: number | null,
   ) {
     this.argv = [layout.tau, ...layout.params, layout.output]
   }
@@ -133,17 +138,25 @@ export class WasmKernel {
     const needPages = Math.ceil(layout.endByte / WASM_PAGE)
     if (needPages > initialPages) memory.grow(needPages - initialPages)
 
-    const k = new WasmKernel(memory, kernel, layout, outputChannelCount)
-    k.initParams(manifest)
+    const k = new WasmKernel(memory, kernel, layout, outputChannelCount,
+      kernelParams(manifest), kernelOutputWordScale(manifest))
+    k.initParams()
     return k
   }
 
-  /** Seed every param from its default. */
-  private initParams(manifest: KernelManifest): void {
-    const f64 = new Float64Array(this.memory.buffer)
-    kernelParams(manifest).forEach((port, j) => {
-      f64[this.layout.params[j]! >> 3] = port.default ?? 0
+  /** Seed every param from its default (an integer port's default is its
+   *  word). */
+  private initParams(): void {
+    this.params.forEach((port, j) => {
+      if (isWordPort(port)) this.writeWord(j, port, port.default ?? 0)
+      else new Float64Array(this.memory.buffer)[this.layout.params[j]! >> 3] = port.default ?? 0
     })
+  }
+
+  private writeWord(index: number, port: KernelPort, w: number | bigint): void {
+    const cell = this.layout.params[index]!
+    if (port.elem === 'i64') new BigInt64Array(this.memory.buffer)[cell >> 3] = BigInt(w)
+    else new Int32Array(this.memory.buffer)[cell >> 2] = Number(w)
   }
 
   /** Fade in from silence, starting at frame `at` (default: the next block). */
@@ -171,17 +184,24 @@ export class WasmKernel {
   }
 
   /** Write a param input (port order after `tau`). This is how a host with
-   *  live control drives a knob; `ParamWriter` applies the disciplines. */
+   *  live control drives a knob; `ParamWriter` applies the disciplines. An
+   *  integer port takes the real value and stores its word (`encodeWord`). */
   setParam(index: number, value: number): void {
     const cell = this.layout.params[index]
-    if (cell === undefined) throw new RangeError(`no param input ${index}`)
-    new Float64Array(this.memory.buffer)[cell >> 3] = value
+    const port = this.params[index]
+    if (cell === undefined || port === undefined) throw new RangeError(`no param input ${index}`)
+    if (isWordPort(port)) this.writeWord(index, port, encodeWord(port, value))
+    else new Float64Array(this.memory.buffer)[cell >> 3] = value
   }
 
-  /** Read a param input's current value (port order after `tau`). */
+  /** Read a param input's current value (port order after `tau`): for an
+   *  integer port, the real value its word means. */
   getParam(index: number): number {
     const cell = this.layout.params[index]
-    if (cell === undefined) throw new RangeError(`no param input ${index}`)
+    const port = this.params[index]
+    if (cell === undefined || port === undefined) throw new RangeError(`no param input ${index}`)
+    if (port.elem === 'i64') return wordValue(port, new BigInt64Array(this.memory.buffer)[cell >> 3]!)
+    if (port.elem === 'i32') return wordValue(port, new Int32Array(this.memory.buffer)[cell >> 2]!)
     return new Float64Array(this.memory.buffer)[cell >> 3]!
   }
 
@@ -194,10 +214,16 @@ export class WasmKernel {
    *  BigInt per frame on the audio thread. */
   private renderBlock(frameIdx: number): Float64Array {
     const L = this.layout
-    if (this.outView?.buffer !== this.memory.buffer) {
+    if (this.tauWords?.buffer !== this.memory.buffer) {
       this.tauWords = new Uint32Array(this.memory.buffer, L.tau, 2 * L.frames)
-      this.outView = new Float64Array(
-        this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+      if (this.outScale === null) {
+        this.outView = new Float64Array(
+          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+      } else {
+        this.outWords = new Int32Array(
+          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+        this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
+      }
     }
     const words = this.tauWords!
     const lowSpan = 2 ** (32 - CLOCK_FRAC_BITS)
@@ -208,6 +234,11 @@ export class WasmKernel {
       words[2 * s + 1] = Math.floor(idx / lowSpan) // a u32 store wraps mod 2³²
     }
     this.kernel(...this.argv)
+    if (this.outScale !== null) {
+      // An i32 output: widen each word to the real value it means.
+      const words = this.outWords!, out = this.outView!, scale = this.outScale
+      for (let k = 0; k < words.length; k++) out[k] = words[k]! * scale
+    }
     return this.outView!
   }
 

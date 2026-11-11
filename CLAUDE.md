@@ -231,9 +231,14 @@ generate native code.
 
 **The port.** The compiler's product is one typed pure kernel
 (`design/typed-kernel.md`): `@tropical_kernel(ptr tau, ptr in_1.., ptr out)`
-— `tau` the Q48.16 clock of each frame (`design/fixed-carrier.md`), one `f64` per `param:` slot, one
-frame-major output — with static shapes (a different buffer length is a
-different artifact) and everything else inside the function. The manifest is
+— `tau` the Q48.16 clock of each frame (`design/fixed-carrier.md`), one value
+per `param:` slot, one frame-major output — with static shapes (a different
+buffer length is a different artifact) and everything else inside the
+function. A param is `f64` unless it declares an integer word (`int32` or
+`int` with `frac_bits`, e.g. Q16.16), and the output is `f64` unless the
+program's output is an `int32` (then `i32` with the output's declared
+`frac_bits`); the kernel loads and stores those words as words, never
+through f64 (`design/typed-kernel.md`, "Typed ports"). The manifest is
 its type, `tropical_kernel_1`. The scope reads output channels of a separate
 observation artifact of the same plan.
 
@@ -279,7 +284,7 @@ Two distinct JSON schemas; do not confuse them.
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
 | `tropical_plan_7`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
-| `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with defaults and disciplines) and its output (shape and channel names), rate, realization, with the `tropical_plan_7` plan nested for the gates. `tropicalc` and `diffcli compile-kernel` write it; the C++ runtime and the web player read it. |
+| `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with element type, `frac_bits` for an integer word, defaults and disciplines) and its output (element type, shape and channel names), rate, realization, with the `tropical_plan_7` plan nested for the gates. `tropicalc`, `diffcli compile-kernel` and `diffcli compile-object` write it; the C++ runtime and the web player read it. |
 
 Going from the first to the second without losing meaning is exactly
 what the session compile does (ingest → sessionToResolvedRoot →
@@ -298,14 +303,14 @@ whole stack — compiler + session + runtime FFI + MCP server, one binary.
 ```
 lean/                 Lean 4: the production compiler + MCP server (one binary)
   Main.lean           the MCP front door → the `frontend` binary
-  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / render / emit-ir / emit-msl)
+  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / compile-object / render / emit-ir / emit-msl)
   Tropicaltest.lean   golden + native realization-variant equivalence runner
   ffi/                C shim to libtropical (shim.c, built by `make lean`)
   Tropical/
     Parse/            JSON ingest: Raise (normalizeProgramFile — the patch-bay
                         front door), Nodes (ScalarKind), OrderedJson (JsonV)
                         (the surface parser AND the elaborator are retired)
-    Stdlib.lean       the stdlib as 16 arrow-combinator builders — the boot chain
+    Stdlib.lean       the stdlib as 17 arrow-combinator builders — the boot chain
     EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Spectral, Patch, Modal, Gong)
     Ir/               lower → emit (authoring assembles directly; no elaborate)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}

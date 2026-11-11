@@ -452,15 +452,22 @@ theorem ExprArena.forall_children_lt {a : ExprArena} (hw : a.wf = true)
 -- Decls + assigns + program
 -- ─────────────────────────────────────────────────────────────
 
+/-- `fracBits` on an integer port is its fixed-point format: the word `w`
+    means `w · 2^-fracBits` to whoever reads or writes the port
+    (`Tropical.PortFormat`). It is port metadata: no IR pass reads it; the
+    session checks it where a value crosses a port bare, and the plan and the
+    kernel manifest carry it to the host. 0 on float ports. -/
 structure InputDecl where
   name : String
   type? : Option PortType := none
   default? : Option ExprId := none
+  fracBits : Nat := 0
 deriving Repr, Inhabited
 
 structure OutputDecl where
   name : String
   type? : Option PortType := none
+  fracBits : Nat := 0
 deriving Repr, Inhabited
 
 structure InstanceInput where

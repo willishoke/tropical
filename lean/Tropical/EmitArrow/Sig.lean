@@ -41,6 +41,8 @@ structure AInputDecl where
   name : String
   type? : Option PortType := none
   defaultSig : Option Sig := none
+  /-- An integer input's fixed-point format (`InputDecl.fracBits`). -/
+  fracBits : Nat := 0
 deriving Inhabited, Repr
 
 /-- The complete state needed while authoring one program.  Expression IDs are
@@ -270,7 +272,8 @@ def assemble (arena : Arena) (name : String) (outputs : Array OutputDecl)
   let initial : Builder := { exprs := arena.exprs }
   let (body, builder) ← build.run initial
   let inputs : Array InputDecl := body.inputs.map fun decl =>
-    { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+    { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
+      fracBits := decl.fracBits }
   let decls : Array BodyDecl := builder.decls.map fun decl =>
     .inst decl.name decl.programName (decl.inputs.map fun input =>
       { port := input.port, value := input.value })
@@ -293,7 +296,8 @@ def assembleCompleteWithResult {α : Type} (arena : Arena) (name : String)
   let initial : Builder := { exprs := arena.exprs }
   let ((body, result), builder) ← build.run initial
   let inputs : Array InputDecl := body.inputs.map fun decl =>
-    { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+    { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
+      fracBits := decl.fracBits }
   let decls : Array BodyDecl := builder.decls.map fun decl =>
     .inst decl.name decl.programName (decl.inputs.map fun input =>
       { port := input.port, value := input.value })

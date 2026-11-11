@@ -176,6 +176,29 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     exactGate('q15 lfo far', 'tests/golden/embedded/q15_lfo_fast.json', 4096, FAR)
   })
 
+  // SinOscQ15: typed ports, an int32 Q17.15 output (`slot_types`), its
+  // Q16.16 `freq` a bare literal — the real value in Hz, encoded to the word
+  // at compile. The increment folds to a constant, so the GPU's int32 words
+  // are the JIT's, up to 20 kHz (an increment near 2^31) and 2^40 samples
+  // in. (A τ-independent increment computed at run time — from a float param
+  // through toInt32 — crosses Metal's f32 slot vector instead and is not
+  // exact: design/typed-kernel.md, gaps.)
+  for (const hz of [1234.5, 20000]) {
+    const patch = planFile(`sinoscq15-${hz}-patch`, JSON.stringify({
+      schema: 'tropical_program_2', name: 'mvj_sinoscq15',
+      body: { op: 'block', decls: [
+        { op: 'instanceDecl', name: 'lfo', program: 'SinOscQ15', inputs: { freq: hz } },
+      ], assigns: [{ op: 'outputAssign', name: 'dac.out',
+                     expr: { op: 'ref', instance: 'lfo', output: 'out' } }] },
+    }))
+    test(`SinOscQ15 at a literal ${hz} Hz — int32 Q17.15 output, bit-identical`, () => {
+      exactGate(`sinoscq15 ${hz}`, patch, 4096)
+    })
+    test(`SinOscQ15 at a literal ${hz} Hz @ τ+2^40 — bit-identical far out`, () => {
+      exactGate(`sinoscq15 ${hz} far`, patch, 4096, FAR)
+    })
+  }
+
   // Every int32 op on the GPU (`Int32Zoo`, a `--fixtures` program), its input
   // wired from FixedSinOscQ15's int32 output. The int32 word is exact; only
   // its final conversion to an f32 output value rounds, so the SNR sits at

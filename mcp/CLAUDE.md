@@ -176,7 +176,10 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
   without relowering. Glide ramps and anchor/velocity rebasing are explicit
   closed-form companion-slot writes, not hidden per-sample state. This is the
   only public parameter-write method; discipline-specific method aliases are
-  retired.
+  retired. A typed param (`"type": "int32"` or `"int"` with `frac_bits`)
+  takes its real value; a value outside its format's range is refused with
+  `invalid_value` naming the range (Q16.16: `[-32768, 32768)`), and nothing
+  is written.
 - `list_params` — registered params and their current values.
 
 ### Audio control

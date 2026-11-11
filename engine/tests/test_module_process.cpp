@@ -1542,6 +1542,77 @@ static void test_capture_serial_state_machine()
   ASSERT(dac.request_output_capture() != 0);
 }
 
+
+/**
+ * Typed params at the host (design/typed-kernel.md, "Typed ports"), on a
+ * hand-written manifest: an i32 Q16.16 param written by name is refused
+ * outside its range and left as it was; a discipline other than raw is
+ * refused when a companion it names is an integer word, not only its base;
+ * and a default word outside its element is refused at load.
+ */
+static std::string typed_manifest(unsigned int frames, const nlohmann::json & gain_default,
+                                  const char * gain_elem = "i32")
+{
+  // inputs: tau, param:freq (f64), param:freq#phase (i32 Q0.32), param:gain
+  nlohmann::json m = nlohmann::json::parse(kernel_manifest(
+    frames, {"param:freq", "param:freq#phase", "param:gain"}, {"out"},
+    plan_json(1, {"param:freq", "param:freq#phase", "param:gain"}, {440.0, 0.0, 0.0},
+      R"({"param_disciplines":[{"name":"freq","discipline":"anchor","companions":["freq#phase"]}]})")));
+  m["inputs"][2]["elem"] = "i32"; m["inputs"][2]["frac_bits"] = 32; m["inputs"][2]["default"] = 0;
+  m["inputs"][3]["elem"] = gain_elem; m["inputs"][3]["frac_bits"] = 16;
+  m["inputs"][3]["default"] = gain_default;
+  return m.dump();
+}
+
+static void test_typed_param_ports()
+{
+  constexpr unsigned int frames = 8;
+  // out[s] = the gain word as a double: the i32 cell, read at its width.
+  const std::string ir = wrap_kernel(frames, 3,
+    "  %w = load i32, ptr %in_3, align 4\n"
+    "  %v = sitofp i32 %w to double\n"
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  tropical_runtime::FlatRuntime rt(frames);
+  ASSERT(rt.load(ir, "", "", typed_manifest(frames, 131072)));
+  rt.process();
+  ASSERT_NEAR(rt.outputBuffer[0], 131072.0, 0.0);
+
+  // raw, in range: the word is written
+  ASSERT(rt.dispatch_param_sync("gain", -2.5).ok);
+  rt.process();
+  ASSERT_NEAR(rt.outputBuffer[0], -163840.0, 0.0);
+  // raw, out of range: refused with the range, the slot unchanged
+  const auto past = rt.dispatch_param_sync("gain", 100000.0);
+  ASSERT(!past.ok);
+  ASSERT(past.error.find(
+    "value 100000 is outside the range of int32 Q16.16, [-32768, 32768)") != std::string::npos);
+  ASSERT(!rt.dispatch_param_sync("gain", -32768.5).ok);
+  ASSERT(rt.dispatch_param_sync("gain", -32768.0).ok);
+  ASSERT(!rt.set_slot_by_name_sync("param:gain", 1.0e6));
+  rt.process();
+  ASSERT_NEAR(rt.outputBuffer[0], -2147483648.0, 0.0);
+
+  // anchor on a float base whose #phase companion is an integer word
+  const auto anchored = rt.dispatch_param_sync("freq", 220.0);
+  ASSERT(!anchored.ok);
+  ASSERT(anchored.error.find(
+    "discipline 'anchor' is not defined on the integer slot 'param:freq#phase'")
+    != std::string::npos);
+
+  // a default word outside its element is refused at load
+  tropical_runtime_t bad = tropical_runtime_new(frames);
+  ASSERT(bad != nullptr);
+  ASSERT(load_fails_with(bad, ir, typed_manifest(frames, 2147483648LL),
+    "default word 2147483648 is outside its i32 word"));
+  ASSERT(load_fails_with(bad, ir, typed_manifest(frames, -2147483649LL),
+    "default word -2147483649 is outside its i32 word"));
+  ASSERT(load_fails_with(bad, ir, typed_manifest(frames, 9223372036854775808ULL, "i64"),
+    "default word 9223372036854775808 is outside its i64 word"));
+  ASSERT(load_fails_with(bad, ir, typed_manifest(frames, 0.5), "non-integer default word"));
+  tropical_runtime_free(bad);
+}
+
 int main()
 {
   printf("test_module_process (the port: typed kernel load)\n");
@@ -1576,6 +1647,7 @@ int main()
   run_test("DAC multichannel mapping and narrow-device silence",
            test_dac_multichannel_mapping);
   run_test("serial output-capture state machine", test_capture_serial_state_machine);
+  run_test("typed params: range, companions, default words", test_typed_param_ports);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

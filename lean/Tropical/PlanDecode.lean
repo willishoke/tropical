@@ -169,6 +169,16 @@ private def disciplineOfWire (j : JsonV) : Except String ParamDiscipline := do
     | _ => none
   pure { name, discipline, glideDurSec, companions := strArr j "companions" }
 
+/-- One `slot_types` entry (`SlotType.toWire`'s inverse). -/
+private def slotTypeOfWire (j : JsonV) : Except String SlotType := do
+  let slot ← match j.getField? "slot" with
+    | some (.num n) =>
+      if n.exponent == 0 && n.mantissa ≥ 0 then pure n.mantissa.toNat
+      else .error "PlanDecode: slot_types slot must be a natural number"
+    | _ => .error "PlanDecode: slot_types entry has no slot"
+  let format ← (Tropical.PortFormat.ofJson? j.toJson).mapError (s!"PlanDecode: slot_types slot {slot}: {·}")
+  pure { slot, format }
+
 private def natArr (j : JsonV) (k : String) : Array Nat :=
   (optArr j k).map fun x => match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
 
@@ -206,11 +216,14 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     slotNames := strArr j "slot_names",
     slotDefaults,
     paramDisciplines := ← (optArr j "param_disciplines").mapM disciplineOfWire,
-    coeffArraySlots := natArr j "coeff_array_slots" }
+    coeffArraySlots := natArr j "coeff_array_slots",
+    slotTypes := ← (optArr j "slot_types").mapM slotTypeOfWire }
   if !plan.outputLayoutWellFormed then
     throw "PlanDecode: output channel count must be positive and sink targets must be unique and in range"
   if let some e := plan.kindError? then
     throw s!"PlanDecode: ill-kinded plan: {e}"
+  if let some e := plan.portError? then
+    throw s!"PlanDecode: ill-typed port: {e}"
   pure plan
 
 /-- Parse a tropical_plan_7 JSON object into a `FlatPlan`. -/

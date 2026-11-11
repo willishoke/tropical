@@ -1,6 +1,7 @@
 import Tropical.Lowering
 import Tropical.Ir.CompileResolved
 import Tropical.Plan
+import Tropical.Kernel
 
 /-!
 # Session compile — partition + plan assembly
@@ -398,7 +399,8 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     (inputSlotOverride : Array (Nat × Nat) := #[])
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
     (paramSlots : Array (Nat × Nat) := #[])
-    (inputStages : Array Tropical.Ir.Stage := #[]) :
+    (inputStages : Array Tropical.Ir.Stage := #[])
+    (paramKinds : Array (Nat × Tropical.Ir.Emit.ScalarType) := #[]) :
     Except String PartitionResult := do
   let mut s := s
   let mut acc := acc
@@ -488,6 +490,7 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
   -- ── 2. Compile this kernel's body. ──
   let ctx : Context := {
     paramSlots
+    paramKinds
     nestedOutputSlots? := some nestedOutputSlots
     nestedOutputTypes
     nestedInputSlots
@@ -576,6 +579,8 @@ structure SessionInput where
   graphOutputs : Array Tropical.GraphOutput
   /-- Param mirror: name → raw value Json (slot_defaults echo). -/
   params : Array (String × Json)
+  /-- Typed params' formats (`SessionSt.paramTypes`); unlisted is `float`. -/
+  paramTypes : Array (String × Tropical.PortFormat) := #[]
   /-- Allocation (params, top-level outputs). -/
   alloc : Tropical.Lowering.Alloc
   /-- The elaborated session root, downcast to Core. -/
@@ -609,23 +614,53 @@ private def rootParamName : CoreBodyDecl → Option String
   | .param name _ => some name
   | _ => none
 
-/-- Build slot metadata (`buildSlotMetadata`). -/
+/-- Build slot metadata (`buildSlotMetadata`). A typed param's default is
+    its word (`Kernel.encodeWord` of the declared value), which is what its
+    slot holds and its port carries; it is listed in `slot_types`. -/
 private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
-    (paramSlots : OrderedAssoc Nat) :
-    Nat × Array String × Array Json := Id.run do
+    (paramSlots : OrderedAssoc Nat)
+    (paramTypes : Array (String × Tropical.PortFormat) := #[]) :
+    Nat × Array String × Array Json × Array Tropical.Plan.SlotType := Id.run do
   let slotCount := s.slotCount
   let mut names := Array.replicate slotCount ""
   let mut defaults : Array Json := Array.replicate slotCount (toJson (0 : Nat))
+  let mut types : Array Tropical.Plan.SlotType := #[]
   for (name, idx) in s.outputSlotRegistry.entries do
     if idx < slotCount then names := names.set! idx name
   for (name, idx) in paramSlots.entries do
     if idx < slotCount then
       names := names.set! idx s!"param:{name}"
-      if let some v := assocGet? params name then
-        defaults := defaults.set! idx v
+      match assocGet? paramTypes name with
+      | some f =>
+        types := types.push { slot := idx, format := f }
+        let x := match assocGet? params name with
+          | some (.num n) => n.toFloat
+          | _ => 0.0
+        defaults := defaults.set! idx (toJson (Tropical.Kernel.encodeWord f x))
+      | none =>
+        if let some v := assocGet? params name then
+          defaults := defaults.set! idx v
   for (name, idx) in s.inputSlotRegistry.entries do
     if idx < slotCount then names := names.set! idx s!"input:{name}"
-  return (slotCount, names, defaults)
+  return (slotCount, names, defaults, types)
+
+/-- The `slot_types` entries of the output channels' sources: an `int32`
+    program output that reaches a channel is listed with the output's
+    declared `frac_bits` (its `type_obj`), so the kernel's output port is
+    that integer word (`Kernel.outputFormat`). -/
+private def sinkSlotTypes (alloc : Tropical.Lowering.Alloc)
+    (sinks : Array Tropical.Plan.SinkSpec) (s : SessionAlloc) :
+    Except String (Array Tropical.Plan.SlotType) := do
+  let mut types : Array Tropical.Plan.SlotType := #[]
+  for (key, idx) in s.outputSlotRegistry.entries do
+    unless sinks.any (·.inputs.contains idx) do continue
+    let some m := alloc.metaFor? key | continue
+    let some pt := (m.getObjVal? "portType").toOption | continue
+    unless (pt.getObjVal? "kind").toOption == some (Json.str "scalar") do continue
+    let f ← (Tropical.PortFormat.ofJson? pt).mapError (s!"output '{key}': {·}")
+    if f.kind == .int32 && !types.any (·.slot == idx) then
+      types := types.push { slot := idx, format := f }
+  return types
 
 /-- Group already-resolved `(channel, moduleSlot)` routes into the canonical
     Plan sink image. Channels are ascending; inputs within one channel retain
@@ -713,20 +748,24 @@ def compileSessionStaged (input : SessionInput) :
 
   -- Root param module slots, keyed by the root program's ParamIdx.
   let mut paramSlots : Array (Nat × Nat) := #[]
+  let mut paramKinds : Array (Nat × Tropical.Ir.Emit.ScalarType) := #[]
   let rootParams := input.root.params.filterMap rootParamName
   for i in [0:rootParams.size] do
     if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
+    if let some f := assocGet? input.paramTypes rootParams[i]! then
+      paramKinds := paramKinds.push (i, f.kind)
 
   let partition ← partitionKernel rootInstancePath input.root input.arena
-    input.wiresPost s acc #[] #[] paramSlots #[]
+    input.wiresPost s acc #[] #[] paramSlots #[] paramKinds
   s := partition.allocation
 
   let (outputChannelCount, sinks) ← emitSinks s input.graphOutputs
-  let (slotCount, slotNames, slotDefaults) :=
-    slotMetadata s input.params s.paramSlots
+  let (slotCount, slotNames, slotDefaults, paramSlotTypes) :=
+    slotMetadata s input.params s.paramSlots input.paramTypes
+  let outSlotTypes ← sinkSlotTypes input.alloc sinks s
 
-  return ({
+  let plan : Tropical.Plan.FlatPlan := {
     compilationMode := input.mode
     arraySlotNames := partition.accumulators.arraySlotNames
     registerCount := partition.accumulators.nextRegRaw
@@ -737,7 +776,13 @@ def compileSessionStaged (input : SessionInput) :
     outputChannelCount
     slotCount
     slotNames
-    slotDefaults }, partition.stageBlocks)
+    slotDefaults
+    slotTypes := paramSlotTypes ++ outSlotTypes }
+  -- One output buffer has one element type, an integer channel one source,
+  -- an integer param only `raw` (`FlatPlan.portError?`): refused here, where
+  -- the patch is, not first at an emitter.
+  if let some e := plan.portError? then throw s!"compileSession: {e}"
+  return (plan, partition.stageBlocks)
 
 def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=
   (compileSessionStaged input).map (·.1)

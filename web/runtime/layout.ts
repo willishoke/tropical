@@ -9,14 +9,16 @@
  * argv table.
  */
 import {
-  kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
+  kernelFrames, kernelOutputChannelCount, kernelOutputWordScale, kernelParams,
+  type KernelManifest,
 } from './manifest.js'
 
 export type KernelLayout = {
   frames: number
   tau: number             // i64[frames] — the Q48.16 clock of each frame
-  params: number[]        // one f64 cell per param input, in port order
-  output: number          // f64[frames * channels], frame-major
+  params: number[]        // one 8-byte cell per param input (an f64, or an
+                          // i32/i64 word at its low address), in port order
+  output: number          // f64 or i32 [frames * channels], frame-major
   endByte: number         // first free byte after every region
 }
 
@@ -33,6 +35,7 @@ export function computeLayout(
   for (const _ of kernelParams(manifest)) { params.push(p); p += 8 }
   p = align8(p)
   const output = p
-  p = align8(p + frames * kernelOutputChannelCount(manifest) * 8)
+  const outBytes = kernelOutputWordScale(manifest) === null ? 8 : 4
+  p = align8(p + frames * kernelOutputChannelCount(manifest) * outBytes)
   return { frames, tau, params, output, endByte: p }
 }

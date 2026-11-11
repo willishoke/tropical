@@ -13,7 +13,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
-open Tropical.Session (registerResolved WireCtx wireExprToResolved)
+open Tropical.Session (registerResolved WireCtx wireExprToResolved bareLiteralAtPort)
 
 private structure ExposedInput where
   name : String
@@ -34,8 +34,14 @@ def handleSave (env : Env) : EngineM Json := do
   let mut decls : Array Json := #[]
   -- paramDecls first, so they're declared before referencing instances.
   for (name, value) in st.params do
-    decls := decls.push <| Json.mkObj
-      [("op", Json.str "paramDecl"), ("name", Json.str name), ("value", value)]
+    let f := st.paramFormat name
+    let typeFields : List (String × Json) :=
+      if f.isDefault then []
+      else [("type", Json.str f.kind.wire)] ++
+        (if f.fracBits == 0 then [] else [("frac_bits", Lean.toJson f.fracBits)])
+    decls := decls.push <| Json.mkObj <|
+      [("op", Json.str "paramDecl"), ("name", Json.str name)] ++ typeFields ++
+      [("value", value)]
   for (name, info) in st.instances do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
@@ -132,6 +138,13 @@ private def portTypeToDecl (t : Json) : EngineM Json := do
       ("shape", Json.arr shape)]
   | _ => pure jsonNull
 
+/-- An integer port's fixed-point format, as the exported port entry's
+    `frac_bits` (absent when 0): the entry's `type` names only the kind. -/
+private def fracBitsField (t? : Option Json) : List (String × Json) :=
+  match t?.bind (getField? · "frac_bits") with
+  | some (.num n) => if n == 0 then [] else [("frac_bits", Json.num n)]
+  | _ => []
+
 private def isDefaultPortType (t? : Option Json) : Bool :=
   match t? with
   | none => true
@@ -227,6 +240,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | t?, d? => Json.mkObj <|
         [("name", Json.str input.name)]
         ++ (match t? with | some t => [("type", t)] | none => [])
+        ++ fracBitsField typeObj?
         ++ (match d? with | some d => [("default", d.toJson)] | none => [])
   let mut outputEntries : Array Json := #[]
   for (outName, ref) in outputPairs do
@@ -237,8 +251,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       outputEntries := outputEntries.push (Json.str outName)
     else
       let t ← portTypeToDecl (typeObj?.getD jsonNull)
-      outputEntries := outputEntries.push <| Json.mkObj
-        [("name", Json.str outName), ("type", t)]
+      outputEntries := outputEntries.push <| Json.mkObj <|
+        [("name", Json.str outName), ("type", t)] ++ fracBitsField typeObj?
 
   -- Topological order over the exported subgraph (Kahn, sorted ready
   -- queues; cycle members append in reachable order).
@@ -349,14 +363,34 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let type? : Option Tropical.Ir.PortType := match tgt.inputs[pos]!.type? with
       | some (.scalar .float) | none => none
       | some t => some t
+    -- The exposed input keeps the target port's fixed-point format, and its
+    -- default (the folded wire) binds at that port: a bare literal is the
+    -- real value there (`bareLiteralAtPort`), as it was in the session.
+    let fracBits := tgt.inputs[pos]!.fracBits
     let mut default? : Option Tropical.Ir.ExprId := none
     if let some expr := findWire input.instanceName input.portName then
+      let scaled ← match bareLiteralAtPort s!"'{input.instanceName}.{input.portName}'"
+          tgt.inputs[pos]! expr with
+        | .error e => internalError s!"export: {e}"
+        | .ok e => pure e
+      -- A default reaches the next session as a wire (its entry `default`),
+      -- where a bare literal would be read as a real value again. A scaled
+      -- word is spelled as the cast the stdlib's own word defaults use
+      -- (`litI32`), so it stays a word there and through save → load.
+      let expr ← match expr, scaled, tgt.inputs[pos]!.type? with
+        | .num _, .num w, some (.scalar .int32) =>
+          if fracBits == 0 then pure scaled else pure (.unary .toInt32 (.num w))
+        | .num _, .num w, some (.scalar .int) =>
+          if fracBits == 0 then pure scaled
+          else if w.mantissa.natAbs ≤ 9007199254740992 then pure (.unary .toInt (.num w))
+          else internalError s!"export: input '{input.name}': its default word {w} is past 2^53 and has no exact spelling as a default; wire it from a param instead"
+        | _, e, _ => pure e
       match (wireExprToResolved (defaultCtx k) expr).run exprs with
       | .error e => internalError e
       | .ok (eid, exprs') =>
         exprs := exprs'
         default? := some eid
-    inputDecls := inputDecls.push { name := input.name, type?, default? }
+    inputDecls := inputDecls.push { name := input.name, type?, default?, fracBits }
   let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
   let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
   for k in [0:outputPairs.size] do
@@ -373,7 +407,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let type? : Option Tropical.Ir.PortType := match tgt.outputs[o]!.type? with
       | some (.scalar .float) | none => none
       | some t => some t
-    outputDecls := outputDecls.push { name := outName, type? }
+    outputDecls := outputDecls.push
+      { name := outName, type?, fracBits := tgt.outputs[o]!.fracBits }
     let (eid, exprs') := (Tropical.Ir.eintern (.nestedOut ⟨idx⟩ ⟨o⟩)).run exprs
     exprs := exprs'
     assignsR := assignsR.push { target := .port ⟨k⟩, expr := eid }
@@ -412,6 +447,9 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | none =>
         if let some expr := findWire instName portName then
           let some pos := pos? | unknownPort
+          let expr ← match bareLiteralAtPort s!"'{instName}.{portName}'" tgt.inputs[pos]! expr with
+            | .error e => internalError s!"export: {e}"
+            | .ok e => pure e
           match (wireExprToResolved bodyCtx expr).run exprs with
           | .error e => internalError e
           | .ok (eid, exprs') =>

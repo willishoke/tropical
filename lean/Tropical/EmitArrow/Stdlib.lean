@@ -452,6 +452,41 @@ def buildFixedSinOscQ15 (arena : Arena)
       assigns := #[(.port ⟨0⟩, body)]
     }
 
+/-- `FixedSinOscQ15` with fixed-point ports, so a host or a firmware drives
+    it live with no float anywhere: `freq` is Hz as an `int32` Q16.16 word
+    (`[-32768, 32768)` Hz in steps of 2⁻¹⁶ Hz), `phase` a Q0.32 offset in
+    cycles, `out` the Q1.15 sine in an `int32` (`Q17.15`, values in
+    `[-32767, 32767]`). The frequency becomes a Q0.32 increment once per call
+    (`hzQ16ToIncQ32`, stage 0: it depends on the knob only), and the phase is
+    `phaseQ32Of32`, so the frame loop is the same 32-bit datapath as
+    `FixedSinOscQ15`'s. A frequency is taken modulo the rate into
+    `[-rate/2, rate/2)`; a negative one runs the sine backward. Its port
+    formats are declarations: `int32` Q16.16 binds only an `int32` Q16.16
+    param or output bare (`design/typed-kernel.md`, "Typed ports"). -/
+def buildSinOscQ15 (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  assemble arena "SinOscQ15"
+      #[{ name := "out", type? := some (.scalar .int32), fracBits := 15 }] #[] do
+    let freq ← inputRef ⟨0⟩
+    let clk ← inputRef ⟨1⟩
+    let offset ← inputRef ⟨2⟩
+    let inc ← hzQ16ToIncQ32 freq
+    let phaseQ ← phaseQ32Of32 inc offset clk
+    let body ← fixedSinQ15Sig phaseQ
+    let oneHz ← litI32 65536
+    let defaultClock ← clockSig
+    let zero ← litI32 0
+    pure {
+      inputs := #[
+        { name := "freq", type? := some (.scalar .int32), defaultSig := some oneHz,
+          fracBits := 16 },
+        clockInDecl "clk" defaultClock,
+        { name := "phase", type? := some (.scalar .int32), defaultSig := some zero,
+          fracBits := 32 }]
+      assigns := #[(.port ⟨0⟩, body)]
+    }
+
 def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
@@ -552,7 +587,8 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ReverseReverb", buildReverseReverb),
   ("ReversibleComb", buildReversibleComb), ("ScrubClock", buildScrubClock),
   ("ThroughZeroFlanger", buildThroughZeroFlanger),
-  ("SoftClip", buildSoftClip), ("FixedSinOscQ15", buildFixedSinOscQ15)]
+  ("SoftClip", buildSoftClip), ("FixedSinOscQ15", buildFixedSinOscQ15),
+  ("SinOscQ15", buildSinOscQ15)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}

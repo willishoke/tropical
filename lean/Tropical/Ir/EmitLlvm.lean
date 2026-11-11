@@ -24,9 +24,11 @@ define void @tropical_kernel(ptr %tau, ptr %in_1, …, ptr %in_k, ptr %out)
 
 One pointer per input of the plan's kernel type (`Tropical.Kernel.ofPlan`:
 `tau` first — `i64` Q48.16 clock values, shape `[frames]` — then one
-one-element `double` per `param:` slot in slot order) and one for the
-output (`double`, shape `[frames, C]`, frame-major: sink target `c` writes
-`s * C + c`). `frames` is static: the loop bound is a literal, and a
+one-element cell per `param:` slot in slot order: a `double`, or the `i32`/
+`i64` word of a typed param, `slot_types`) and one for the output (`double`,
+or `i32` when the channels carry an `int32` program output; shape
+`[frames, C]`, frame-major: sink target `c` writes `s * C + c`). The frame
+counter `%s` is an `i32`. `frames` is static: the loop bound is a literal, and a
 different buffer length is a different kernel. Nothing else crosses: the
 module slot vector, the array backing stores and the SSA scratch are
 `alloca`s inside the function, seeded per call from the plan's slot
@@ -874,24 +876,26 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 -- Sinks (mirrors the loop-body sink mix)
 -- ─────────────────────────────────────────────────────────────
 
-/-- The output store for one frame/channel, `out[s·C + c]`. -/
+/-- The output store for one frame/channel, `out[s·C + c]`. The frame
+    counter `%s` is an `i32`: N is a static, small constant (`emitKernel`
+    refuses one past 2³¹ / C), and on a 32-bit target a 64-bit counter is an
+    add-with-carry pair per frame. -/
 private def outIndex (outputChannelCount target : Nat) : M String := do
   if outputChannelCount == 1 && target == 0 then
     pure "%s"
   else do
     let frameBase ← fresh
-    line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
+    line s!"{frameBase} = mul i32 %s, {outputChannelCount}"
     let targetIdx ← fresh
-    line s!"{targetIdx} = add i64 {frameBase}, {target}"
+    line s!"{targetIdx} = add i32 {frameBase}, {target}"
     pure targetIdx
 
-/-- Sinks into the output. `.f64` (the port default) mixes each sink's inputs
-    and applies its gain in binary64. `.i32` is the integer output a target
-    without an FPU stores: each sink must be one input at gain 1. An `int32`
-    program output is stored as it is, from its slot's 32-bit lane; an `int`
-    one keeps its low 32 bits. Any other value is converted from its f64 copy
-    by the saturating conversion (`fptosi.sat`), which is exact for an
-    integer in the slot. -/
+/-- Sinks into the output. An `f64` output (every float program) mixes each
+    sink's inputs and applies its gain in binary64. An `i32` output is what an
+    `int32` program output declares (`slot_types`, `Kernel.outputFormat`):
+    each sink is one input at gain 1 (`FlatPlan.portError?`), stored as it is
+    from its slot's 32-bit lane, so the word crosses the port with no
+    conversion on any target. -/
 def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
     (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
   let (ty, zero, align) ← match outElem with
@@ -904,7 +908,7 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
     unless sinks.any (fun sink => sink.target == target) do
       let outputIdx ← outIndex outputChannelCount target
       let g ← fresh
-      line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+      line s!"{g} = getelementptr inbounds {ty}, ptr %out, i32 {outputIdx}"
       line s!"store {ty} {zero}, ptr {g}, align {align}"
   for sink in sinks do
     let value ← match outElem with
@@ -913,10 +917,12 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
           fail s!"EmitLlvm: an i32 output needs one sink input at gain 1 (target {sink.target})"
         let slot := sink.inputs[0]!
         match ← loadSlotLane? slot with
-        | some lv => pure (← coerce lv .int32).ref
+        | some lv =>
+          if lv.ty != .int32 then
+            fail s!"EmitLlvm: an i32 output channel's source is {lv.ty.wire} (target {sink.target})"
+          pure lv.ref
         | none =>
-          let v ← loadSlotF64 slot
-          let r ← fresh; line (fptosiSatLine r v "i32"); pure r
+          fail s!"EmitLlvm: an i32 output channel's source was not written as int32 (target {sink.target})"
       | _ => do
         let mut acc := zeroF
         for slotIdx in sink.inputs do
@@ -927,7 +933,7 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
         pure scaled
     let outputIdx ← outIndex outputChannelCount sink.target
     let g ← fresh
-    line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+    line s!"{g} = getelementptr inbounds {ty}, ptr %out, i32 {outputIdx}"
     line s!"store {ty} {value}, ptr {g}, align {align}"
 
 private def validateSinkTargets (sinks : Array SinkSpec)
@@ -984,15 +990,20 @@ private def slotDefaultFloat : Json → Float
 /-- Emit the full LLVM module text for a plan's kernel at the port: the
     port function, the argv thunk, and the intrinsic declarations. The
     stage-0 split's coefficient plan, when present, becomes the prologue. -/
-def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
-    (outElem : Tropical.Kernel.Elem := .f64) : Except String String := do
+def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
+    Except String String := do
   let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
   if let some e := plan.kindError? then throw s!"EmitLlvm: ill-kinded plan: {e}"
+  if let some e := plan.portError? then throw s!"EmitLlvm: ill-typed port: {e}"
   if let some c := split.coeff? then
     if let some e := c.kindError? then throw s!"EmitLlvm: ill-kinded stage-0 plan: {e}"
+    if let some e := c.portError? then throw s!"EmitLlvm: ill-typed stage-0 port: {e}"
   if frames == 0 then throw "EmitLlvm: frames must be positive"
+  if frames * outputChannelCount ≥ 2147483648 then
+    throw s!"EmitLlvm: {frames} frames × {outputChannelCount} channels overflows the i32 frame index"
+  let outElem := Tropical.Kernel.Elem.ofFormat (Tropical.Kernel.outputFormat plan)
   let paramSlots := Tropical.Kernel.paramSlotIndices plan
   let slotCount := max plan.slotCount 1
   let registerCount := max plan.registerCount 1
@@ -1021,9 +1032,21 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
       if !(paramSlots.contains i) then
         let v := slotDefaultFloat (plan.slotDefaults[i]?.getD (Json.num 0))
         if v != 0.0 then storeSlotF64 i (f64Lit v)
+    -- A param loads at its port's element type: an integer word (`slot_types`)
+    -- lands in its slot's integer lane and never passes through f64.
     for j in [0:paramSlots.size] do
-      let v ← fresh; line s!"{v} = load double, ptr %in_{j + 1}, align 8"
-      storeSlotF64 paramSlots[j]! v
+      let slot := paramSlots[j]!
+      let v ← fresh
+      match ((plan.slotType? slot).map (·.kind) : Option ScalarType) with
+      | some .int32 =>
+        line s!"{v} = load i32, ptr %in_{j + 1}, align 4"
+        storeSlotTyped slot ⟨v, .int32⟩
+      | some .int =>
+        line s!"{v} = load i64, ptr %in_{j + 1}, align 8"
+        storeSlotTyped slot ⟨v, .int⟩
+      | _ =>
+        line s!"{v} = load double, ptr %in_{j + 1}, align 8"
+        storeSlotF64 slot v
     -- Stage-0 prologue: the coefficient plan's instructions, once per call.
     -- No frame exists here, so τ is bound to `%tau0` (zero): unreachable
     -- from τ-independent code, defined so a stray read is well-formed.
@@ -1040,11 +1063,11 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
     let pred := (← get).curBlock
     line "br label %loop_cond"
     labelLine "loop_cond"
-    line s!"%s = phi i64 [ 0, %{pred} ], [ %s_next, %LOOP_LAST ]"
-    line s!"%loopcond = icmp ult i64 %s, {frames}"
+    line s!"%s = phi i32 [ 0, %{pred} ], [ %s_next, %LOOP_LAST ]"
+    line s!"%loopcond = icmp ult i32 %s, {frames}"
     line "br i1 %loopcond, label %loop_body, label %loop_end"
     labelLine "loop_body"
-    line "%tau_ptr = getelementptr inbounds i64, ptr %tau, i64 %s"
+    line "%tau_ptr = getelementptr inbounds i64, ptr %tau, i32 %s"
     line "%tau_s = load i64, ptr %tau_ptr, align 8"
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
@@ -1067,7 +1090,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
       s!"define void @tropical_kernel({portArgs}) nounwind \{\n" ++
       "entry:\n"
     let tail :=
-      "\n  %s_next = add i64 %s, 1\n" ++
+      "\n  %s_next = add i32 %s, 1\n" ++
       "  br label %loop_cond\n\n" ++
       "loop_end:\n" ++
       "  ret void\n" ++
