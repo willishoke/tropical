@@ -1,6 +1,8 @@
 #include "toolchain/WasmEmit.hpp"
 
 #include <llvm/IR/Instructions.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/Object/ObjectFile.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -65,6 +67,9 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   // flags, so no FMA is ever formed — the kernel computes op-for-op identically
   // to the ORC JIT. This is the load-bearing line for native≡wasm bit-exactness.
   opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+  opts.NoInfsFPMath = false;
+  opts.NoNaNsFPMath = false;
+  opts.NoSignedZerosFPMath = false;
   std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
     triple, "generic", "", opts, std::nullopt, std::nullopt,
     llvm::CodeGenOptLevel::Default));
@@ -119,7 +124,10 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   const std::vector<const char *> argv = {
     "wasm-ld", "--no-entry", "--import-memory", "--stack-first",
     "-z", stack_size.c_str(),
-    "--export=tropical_kernel", "--export=__heap_base", "--allow-undefined",
+    "--export=tropical_kernel", "--export=__heap_base",
+    // The module's float format (`EmitLlvm.floatFormatMarker`), which
+    // `compile-wasm` appends; a hand-written module may leave it out.
+    "--export-if-defined=tropical_kernel_float_bits", "--allow-undefined",
     obj_path.c_str(), "-o", wasm_path.c_str()
   };
   std::string link_err;
@@ -144,6 +152,18 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   auto bytes = (*wasm)->getBuffer();
   const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
   return std::vector<uint8_t>(p, p + bytes.size());
+}
+
+// The triple as LLVM's tools read it: normalized, so `thumbv7em-none-eabihf`
+// is arch-vendor-environment (EABIHF, the hard-float procedure call standard)
+// rather than arch-vendor-os with an unknown OS `eabihf`. Unnormalized, the
+// ARM target falls back to the soft-float ABI and marks the object base
+// AAPCS (no Tag_ABI_VFP_args), which a hard-float firmware link refuses.
+// "" is the host.
+static llvm::Triple target_triple(const std::string & text)
+{
+  return llvm::Triple(llvm::Triple::normalize(
+    text.empty() ? llvm::sys::getDefaultTargetTriple() : text));
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +200,7 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
     return {};
   }
 
-  const llvm::Triple triple(triple_text.empty() ? llvm::sys::getDefaultTargetTriple()
-                                                : triple_text);
+  const llvm::Triple triple = target_triple(triple_text);
   std::string lookup_err;
   const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
   if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }
@@ -190,7 +209,15 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   // The numeric contract the manifest states: IEEE ops as written, no FMA
   // contraction (Standard fuses only an explicit llvm.fmuladd, which the
   // emitter never writes), no fast-math (no flags in the IR, none here).
+  // Pinned field by field rather than left to defaults: with these, an
+  // fmul feeding an fadd stays two rounded ops on every target (AArch64
+  // FMADD, the M4F's VFMA and wasm's relaxed madd are never selected), so
+  // the host, wasm32 and thumbv7em objects of one binary32 kernel compute
+  // the same bits.
   opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+  opts.NoInfsFPMath = false;
+  opts.NoNaNsFPMath = false;
+  opts.NoSignedZerosFPMath = false;
   // ELF objects carry a .stack_sizes section (per-function frame bytes), so
   // the manifest's stack depth is read from the object, not guessed.
   opts.EmitStackSizeSection = triple.isOSBinFormatELF();
@@ -244,6 +271,74 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   pm.run(*module);
   const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
   return std::vector<uint8_t>(p, p + bytes.size());
+}
+
+// ---------------------------------------------------------------------------
+// target_float_info — what the FPU of `triple`/`cpu`/`features` realizes, as
+// LLVM's own subtarget sees it: binary32 and binary64 arithmetic in hardware,
+// and the float ABI. A JSON object, so the caller refuses a request the
+// target cannot realize by the target's own description, not a table.
+// ---------------------------------------------------------------------------
+std::string target_float_info(const std::string & triple_text, const std::string & cpu,
+                              const std::string & features, std::string & err)
+{
+  LLVMInitializeWebAssemblyTargetInfo();
+  LLVMInitializeWebAssemblyTarget();
+  LLVMInitializeWebAssemblyTargetMC();
+  LLVMInitializeARMTargetInfo();
+  LLVMInitializeARMTarget();
+  LLVMInitializeARMTargetMC();
+  llvm::InitializeNativeTarget();
+
+  const llvm::Triple triple = target_triple(triple_text);
+  std::string lookup_err;
+  const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
+  if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }
+  llvm::TargetOptions opts;
+  std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
+    triple, cpu.empty() ? "generic" : cpu, features, opts,
+    llvm::Reloc::Static, std::nullopt, llvm::CodeGenOptLevel::Default));
+  if (!tm) { err = "cannot create a target machine for " + triple.str(); return {}; }
+  const llvm::MCSubtargetInfo * sti = tm->getMCSubtargetInfo();
+  bool b32 = true, b64 = true;
+  std::string abi = "n/a";
+  if (triple.isARM() || triple.isThumb())
+  {
+    // VFPv2 single precision is the base of every ARM FPU LLVM models;
+    // `fp64` is the double-precision extension (absent on FPv4-SP-D16).
+    b32 = sti->checkFeatures("+vfp2sp");
+    b64 = b32 && sti->checkFeatures("+fp64");
+    abi = tm->Options.FloatABIType == llvm::FloatABI::Hard ? "hard" : "soft";
+  }
+  return std::string("{\"triple\":\"") + triple.str() + "\",\"binary32\":"
+    + (b32 ? "true" : "false") + ",\"binary64\":" + (b64 ? "true" : "false")
+    + ",\"float_abi\":\"" + abi + "\"}";
+}
+
+// ---------------------------------------------------------------------------
+// object_undefined_symbols — the symbols an object references and does not
+// define: what a link must supply. For a port kernel, every such symbol is a
+// runtime routine (a libcall) the target could not do inline.
+// ---------------------------------------------------------------------------
+std::vector<std::string> object_undefined_symbols(const uint8_t * data, size_t len,
+                                                  std::string & err)
+{
+  std::vector<std::string> out;
+  llvm::MemoryBufferRef ref(
+    llvm::StringRef(reinterpret_cast<const char *>(data), len), "tropical_object");
+  auto obj = llvm::object::ObjectFile::createObjectFile(ref);
+  if (!obj) { err = llvm::toString(obj.takeError()); return {}; }
+  for (const llvm::object::SymbolRef & sym : (*obj)->symbols())
+  {
+    auto flags = sym.getFlags();
+    if (!flags) { err = llvm::toString(flags.takeError()); return {}; }
+    if (!(*flags & llvm::object::SymbolRef::SF_Undefined)) continue;
+    auto name = sym.getName();
+    if (!name) { err = llvm::toString(name.takeError()); return {}; }
+    if (name->empty()) continue;
+    out.push_back(name->str());
+  }
+  return out;
 }
 
 } // namespace tropical_toolchain

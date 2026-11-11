@@ -67,6 +67,9 @@ validate: build lean
 	$(PYTHON) tools/embedded_object.py --check-only --diffcli ./lean/.lake/build/bin/diffcli \
 		--llvm-bin $(LLVM_DIR)/../../../bin --patch tests/fixtures/embedded_lfo.json \
 		--patch tests/fixtures/embedded_lfo_knob.json --out-dir $(BUILD_DIR)/embedded
+	$(PYTHON) tools/embedded_object.py --core m4f --check-only --diffcli ./lean/.lake/build/bin/diffcli \
+		--llvm-bin $(LLVM_DIR)/../../../bin --patch tests/fixtures/embedded_f32_softclip.json \
+		--out-dir $(BUILD_DIR)/embedded
 	bun web/build_patches.ts
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
 	ctest --test-dir $(BUILD_DIR) --output-on-failure

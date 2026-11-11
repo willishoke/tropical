@@ -97,6 +97,12 @@ jobs:
             --patch tests/fixtures/embedded_lfo.json --patch tests/fixtures/embedded_lfo_knob.json \
             --out-dir build/embedded
 
+      - name: Embedded object links no libcalls (thumbv7em, binary32)
+        run: |
+          python3 tools/embedded_object.py --core m4f --check-only \
+            --diffcli ./lean/.lake/build/bin/diffcli --llvm-bin /usr/lib/llvm-22/bin \
+            --patch tests/fixtures/embedded_f32_softclip.json --out-dir build/embedded
+
       - name: Precompile web demo plans (Lean-driven)
         run: bun web/build_patches.ts
 

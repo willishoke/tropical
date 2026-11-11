@@ -1,6 +1,7 @@
 import Tropical.Plan
 import Tropical.PlanDecode
 import Tropical.Ir.ConstFold
+import Tropical.Ir.EmitCommon
 
 /-!
 # Kernel — the typed kernel at the port
@@ -44,24 +45,57 @@ open Tropical.Plan (FlatPlan ParamDiscipline CompilationMode)
 /-- The wire schema this module reads and writes. -/
 def schema : String := "tropical_kernel_1"
 
-/-- Element types. `f64` values and `i64` rails are the JIT/wasm
-    realization; Metal refines values to `f32` under its tolerance gate.
-    `i64q16` is the signed Q48.16 clock rail: `i64` with `clockFracBits` = 16
-    fraction bits (`Ir/ClockFormat.lean`; the `long-horizon` gate pins the
-    two together). `i32` and `i64` are integer words: an `int32` param or
-    output, an `int` param. Their fixed-point format is the port's
-    `frac_bits`, declared by the program. -/
+/-- Element types. `f64` and `f32` are the `float` kind's two realizations
+    (`FloatFormat`): every target realizes `float` as `f64` unless the
+    artifact is compiled at `f32`, and Metal refines values to f32 under its
+    tolerance gate below a port that stays `f64`. `i64q16` is the signed
+    Q48.16 clock rail: `i64` with `clockFracBits` = 16 fraction bits
+    (`Ir/ClockFormat.lean`; the `long-horizon` gate pins the two together).
+    `i32` and `i64` are integer words: an `int32` param or output, an `int`
+    param. Their fixed-point format is the port's `frac_bits`, declared by
+    the program. -/
 inductive Elem where
-  | f64 | i64 | i64q16 | i32
+  | f64 | i64 | i64q16 | i32 | f32
 deriving BEq, Repr, Inhabited
 
 def Elem.wire : Elem → String
   | .f64 => "f64" | .i64 => "i64" | .i64q16 => "i64q16" | .i32 => "i32"
+  | .f32 => "f32"
 
 def Elem.ofWire? : String → Option Elem
   | "f64" => some .f64 | "i64" => some .i64 | "i64q16" => some .i64q16
-  | "i32" => some .i32
+  | "i32" => some .i32 | "f32" => some .f32
   | _ => none
+
+/-- Bytes per element (= its alignment in every buffer layout). -/
+def Elem.bytes : Elem → Nat
+  | .f64 | .i64 | .i64q16 => 8
+  | .i32 | .f32 => 4
+
+/-- The IEEE 754 format a target realizes the `float` kind in: binary64
+    (`f64`, the default) or binary32 (`f32`). It is a realization of `float`,
+    chosen when an artifact is compiled, not a kind: no IR pass, op or
+    semantics reads it, and the plan is the same either way. `EmitLlvm` emits
+    the value lane at this width, and the kernel type declares every float
+    port at it. The integer kinds and τ's rail do not change. -/
+inductive FloatFormat where
+  | f64 | f32
+deriving BEq, Repr, Inhabited
+
+def FloatFormat.wire : FloatFormat → String
+  | .f64 => "f64" | .f32 => "f32"
+
+def FloatFormat.ofWire? : String → Option FloatFormat
+  | "f64" => some .f64 | "f32" => some .f32
+  | _ => none
+
+/-- The port element of a float value at this format. -/
+def FloatFormat.elem : FloatFormat → Elem
+  | .f64 => .f64 | .f32 => .f32
+
+/-- IEEE 754's name for the format, as the object manifest states it. -/
+def FloatFormat.ieeeName : FloatFormat → String
+  | .f64 => "ieee754-binary64" | .f32 => "ieee754-binary32"
 
 theorem Elem.ofWire_wire (e : Elem) : Elem.ofWire? e.wire = some e := by
   cases e <;> rfl
@@ -110,10 +144,14 @@ structure Port where
   fracBits : Option Nat := none
 deriving Inhabited
 
-/-- The realization a loader compiles; not part of the type's meaning. -/
+/-- The realization a loader compiles; not part of the type's meaning.
+    `float` is the format the artifact's value lane was emitted at; the
+    float ports already say it (`f64`/`f32`), and it is written only when it
+    is not the default, so an `f64` manifest is what it always was. -/
 structure Realization where
   mode : CompilationMode := .fused
   registerCount : Nat := 0
+  float : FloatFormat := .f64
 deriving Repr, Inhabited
 
 /-- The kernel type plus the plan it was derived from. `plan` is nested in
@@ -162,12 +200,13 @@ private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :
     { discipline := d.discipline, glideDurSec := d.glideDurSec,
       companions := d.companions }
 
-/-- The element type of a port of format `f`. -/
-def Elem.ofFormat (f : Tropical.PortFormat) : Elem :=
+/-- The element type of a port of format `f`, with `float` realized at
+    `float`. -/
+def Elem.ofFormat (f : Tropical.PortFormat) (float : FloatFormat := .f64) : Elem :=
   match f.kind with
   | .int32 => .i32
   | .int => .i64
-  | _ => .f64
+  | _ => float.elem
 
 /-- The word a host writes for value `x` at an integer port of format `f`:
     `x · 2^fracBits`, truncated toward zero and saturated to the word, NaN →
@@ -184,9 +223,56 @@ def encodeWord (f : Tropical.PortFormat) (x : Float) : Int :=
 /-- The output's format (`FlatPlan.outputFormat`). -/
 def outputFormat (plan : FlatPlan) : Tropical.PortFormat := plan.outputFormat
 
-/-- Derive the kernel type of a plan compiled for `frames` samples per call. -/
-def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
+/-- The exact decimal value of a binary32 bit pattern (finite), as a JSON
+    number: `sig · 2^e` is `sig · 5^-e / 10^-e`, so every binary32 has a
+    finite decimal expansion, and a reader that parses it to binary64 gets
+    the binary32 value exactly (binary64 holds every binary32). -/
+def binary32Decimal (bits : UInt32) : JsonNumber := Id.run do
+  let neg := bits >>> 31 == 1
+  let e := ((bits >>> 23) &&& 0xFF).toNat
+  let m := (bits &&& 0x7FFFFF).toNat
+  let (sig, exp2) : Nat × Int := if e == 0 then (m, -149) else (m + 0x800000, (e : Int) - 150)
+  let (mant, dexp) : Nat × Nat :=
+    if exp2 ≥ 0 then (sig * 2 ^ exp2.toNat, 0)
+    else (sig * 5 ^ (-exp2).toNat, (-exp2).toNat)
+  let mut mant := mant
+  let mut dexp := dexp
+  while dexp > 0 && mant % 10 == 0 do
+    mant := mant / 10
+    dexp := dexp - 1
+  return ⟨if neg then -(mant : Int) else mant, dexp⟩
+
+/-- A float param's seed in a binary32 artifact: the binary32 nearest the
+    plan's decimal default (`binary32BitsOfDecimal?`, the same rounding the
+    kernel's literals get), written exactly, so every host seeds the same
+    bits with no second rounding. -/
+private def binary32Default (slotName : String) (n : JsonNumber) : Except String JsonNumber :=
+  match Tropical.Ir.EmitCommon.binary32BitsOfDecimal? n with
+  | some bits => .ok (binary32Decimal bits)
+  | none => .error s!"Kernel: param '{slotName}' default {n} is outside the binary32 range"
+
+/-- Why a plan cannot be realized at binary32 for its write disciplines, or
+    `none`. A binary32 artifact's params are written raw: glide, anchor and
+    velocity re-anchor on companions that hold sample counts and phases
+    (`#t0`, `tau_base`, `#phase`), which binary32 does not hold exactly past
+    2^24. The plan's discipline table is walked directly, as
+    `FlatPlan.portError?` walks it: a glided knob has no port of its own (its
+    ports are the `#v0`/`#v1`/`#t0` companions), so a walk over the param
+    ports alone would miss it. -/
+def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
+  for d in plan.paramDisciplines do
+    if d.discipline != "raw" then
+      let slots := String.intercalate ", " ((#[d.name] ++ d.companions).toList.map (s!"param:{·}"))
+      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are sample counts and phases, which binary32 does not hold exactly)"
+  return none
+
+/-- Derive the kernel type of a plan compiled for `frames` samples per call,
+    its `float` values realized at `float`. -/
+def ofPlan (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
+    Except String KernelType := do
   if let some e := plan.portError? then throw s!"Kernel: {e}"
+  if float == .f32 then
+    if let some e := binary32DisciplineError? plan then throw s!"Kernel: {e}"
   let tau : Port :=
     { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal,
       fracBits := some 16 }
@@ -200,13 +286,17 @@ def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
       | some other =>
         throw s!"Kernel: slot '{slotName}' default is not a number: {other.compress}"
     let fmt := (plan.slotType? i).getD {}
+    let discipline := disciplineOf plan base
+    let default ← match float, fmt.kind.isInteger, default with
+      | .f32, false, some n => some <$> binary32Default slotName n
+      | _, _, d => pure d
     inputs := inputs.push {
-      name := slotName, elem := Elem.ofFormat fmt, shape := #[], role := some .param,
-      default, discipline := disciplineOf plan base,
+      name := slotName, elem := Elem.ofFormat fmt float, shape := #[], role := some .param,
+      default, discipline,
       fracBits := if fmt.kind.isInteger then some fmt.fracBits else none }
   let outFmt := outputFormat plan
   let out : Port :=
-    { name := outName, elem := Elem.ofFormat outFmt,
+    { name := outName, elem := Elem.ofFormat outFmt float,
       shape := #[frames, plan.outputChannelCount],
       channels := channelNames plan,
       fracBits := if outFmt.kind.isInteger then some outFmt.fracBits else none }
@@ -214,7 +304,7 @@ def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
     rate := plan.sampleRate
     inputs
     outputs := #[out]
-    realization := { mode := plan.compilationMode, registerCount := plan.registerCount }
+    realization := { mode := plan.compilationMode, registerCount := plan.registerCount, float }
     plan }
 
 -- ── Wire form ────────────────────────────────────────────────────────────
@@ -248,8 +338,8 @@ def Port.toWire (p : Port) : Json :=
   Json.mkObj fields.toList
 
 def Realization.toWire (r : Realization) : Json :=
-  Json.mkObj [("mode", Json.str r.mode.wire),
-    ("register_count", toJson r.registerCount)]
+  let fields := [("mode", Json.str r.mode.wire), ("register_count", toJson r.registerCount)]
+  Json.mkObj (if r.float == .f64 then fields else fields ++ [("float", Json.str r.float.wire)])
 
 def KernelType.toWire (k : KernelType) : Except String Json := do
   let plan ← k.plan.toWire
@@ -325,7 +415,14 @@ def Realization.ofWire (j : Json) : Except String Realization := do
   let modeStr ← reqStr "Kernel.Realization" j "mode"
   let some mode := CompilationMode.ofWire? modeStr
     | throw s!"Kernel.Realization: unknown mode '{modeStr}'"
-  return { mode, registerCount := optNat j "register_count" 0 }
+  let float ← match j.getObjVal? "float" with
+    | .ok (.str f) =>
+      match FloatFormat.ofWire? f with
+      | some fmt => pure fmt
+      | none => throw s!"Kernel.Realization: unknown float format '{f}'"
+    | .ok _ => throw "Kernel.Realization: 'float' must be a string"
+    | .error _ => pure .f64
+  return { mode, registerCount := optNat j "register_count" 0, float }
 
 def KernelType.ofWire (j : Json) : Except String KernelType := do
   let found ← reqStr "Kernel" j "schema"
@@ -347,8 +444,9 @@ def KernelType.ofWire (j : Json) : Except String KernelType := do
   return { rate, inputs, outputs, realization, plan }
 
 /-- The `tropical_kernel_1` manifest text for a plan. -/
-def manifest (plan : FlatPlan) (frames : Nat) : Except String String := do
-  let k ← ofPlan plan frames
+def manifest (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
+    Except String String := do
+  let k ← ofPlan plan frames float
   return (← k.toWire).compress
 
 end Tropical.Kernel

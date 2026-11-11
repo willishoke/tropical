@@ -69,8 +69,9 @@ Kernel
 - `name` is the identity that survives a hot-swap. Controls project from one
   artifact to another by exact name, as slot names do today.
 - `elem` is the element type. The JIT and wasm realizations use `f64` for
-  values and `i64` for rails; Metal refines values to `f32` under the
-  documented tolerance gate. τ's element type is the clock rail: `i64` in
+  values and `i64` for rails, or `f32` for values in an artifact compiled at
+  binary32 (`--float f32`, "The float format per target" below); Metal
+  refines values to `f32` under the documented tolerance gate. τ's element type is the clock rail: `i64` in
   Q48.16, spelled `i64q16` (`fixed-carrier.md` is normative), so a
   fractional coordinate is representable and an integer-sample host writes
   `index << 16`.
@@ -373,7 +374,8 @@ symbol, N, the per-port layout and format, and the numeric contract. Every
 port's element type and fixed-point format come from the program (see
 "Typed ports" below); no flag sets them.
 
-**Numeric contract.** IEEE binary64 for float values, two's-complement
+**Numeric contract.** IEEE binary64 for float values (binary32 in an
+artifact compiled at `--float f32`, see "The float format per target"), two's-complement
 wrapping i64 for `int` and i32 for `int32` with the total integer semantics
 below, round-to-nearest-even, no FP contraction and no fast-math. τ is read
 as one 64-bit word per frame; the frame counter is 32-bit (N is a static
@@ -768,8 +770,8 @@ semantics reads a format.
 3. *The output's Q format is a flag, not a type.* Closed by typed ports: an
    `int32` output's `fracBits` is the program's, carried into `Kernel.Port`
    and the manifest. `--out-elem` and `--out-format` are gone.
-4. *f32* as a per-target float format on the LLVM path was not attempted.
-   The same question is open on Metal's slots. Metal binds params and the
+4. *f32* as a per-target float format. Closed on the LLVM path by
+   `--float f32` (below). Still open on Metal's slots. Metal binds params and the
    stage-0 coefficient slots through its f32 slot vector, so an `int32` word
    computed once per call crosses as an f32 and keeps 24 bits. With
    `SinOscQ15`'s `freq` from a float param through `toInt32(mul(f, 65536))`,
@@ -781,6 +783,157 @@ semantics reads a format.
    (`metal_vs_jit`), and `EmitMsl` refuses a typed param outright. The fix
    is an integer lane in Metal's slot vector (or an `i32` slot type per
    target), which is this item's question.
+
+## The float format per target (2026-11-11)
+
+The `float` kind is realized at one IEEE format per artifact: binary64 by
+default, binary32 when the artifact is compiled with `--float f32`
+(`Kernel.FloatFormat`). It is a choice of realization, not a kind. The plan
+is the same either way; no IR pass, op or semantics reads the format. Only
+`EmitLlvm`, the kernel type and the hosts change. The integer kinds and τ's
+Q48.16 rail are the same on every target.
+
+```
+diffcli compile-object patch.json --out k.o --triple thumbv7em-none-eabihf \
+    --cpu cortex-m4 --frames 16 --rate 48000 --float f32
+```
+
+`--float f64|f32` is taken by `compile-object`, `compile-wasm`,
+`compile-kernel`, `render-bytes` and `emit-ir`. Both hosts read either.
+
+**What binary32 means in the kernel.**
+
+- Every float value, slot, param cell and output is an LLVM `float`; a
+  scratch or array cell keeps a float's bits in its low word. The float
+  intrinsics are the `.f32` ones.
+- A plan literal is the binary32 nearest the decimal as written, ties to
+  even, rounded once from the exact decimal
+  (`EmitCommon.binary32BitsOfDecimal?`), never from its binary64 rounding.
+  The two differ for a decimal just above a binary32 tie that binary64
+  rounds onto the tie. A literal past the binary32 range is refused, not
+  made an infinity. A param's default is that same binary32, written in the
+  manifest as its exact decimal (`Kernel.binary32Decimal`), so a host seeds
+  the bits with no second rounding.
+- An op on literals is emitted as an op, and LLVM folds it at binary32. The
+  wire `mul(0.1, 9)` is `0x3F666667` (`f32(0.1) · 9`, rounded), while the
+  literal `0.9` is `0x3F666666`. The only binary64 arithmetic before emission
+  is a program builder's own Lean `Float` (`litF`, a coefficient table built
+  with `Array.map`). Its result becomes a literal and is rounded once more,
+  to binary32: `litF (0.1 * 9)` is `0x3F666666`, where the same product in
+  the kernel is `0x3F666667`.
+- `floor`, `ceil` and `round` are expanded inline (`roundingF32`), because
+  FPv4-SP (the Cortex-M4F's FPU) has no rounding instruction and the
+  intrinsics become `floorf`/`ceilf`/`roundf` calls there. For |x| < 2²³
+  the sequence truncates through `fptosi.sat` to `i32` and back (exact),
+  steps by one where `floor`/`ceil`/`round` need it, and puts back x's
+  sign bit, so `floor(-0) = -0` and `ceil(-½) = round(-0.3) = -0`. NaN, ±∞
+  and |x| ≥ 2²³ pass through. `ctest`'s `current_rounding_f32` runs the
+  emitter's own text (`tests/fixtures/rounding_f32.ll`, held to the emitter
+  by `tropicaltest`'s `f32-rounding-fixture`) through the JIT on all 2³²
+  binary32 inputs against libm: identical bits for every non-NaN result, a
+  NaN for every NaN. That covers 16 777 216 halfway inputs, 16 777 214
+  subnormals, both zeros and both infinities, and takes about 5 s on four
+  threads. The same sequence runs on every binary32 target, so wasm32, the
+  host and the M4F compute the same bits.
+- `ldexp` and `floatExponent` work in the binary32 exponent field (bias
+  127 at bit 23). Each is exact for normal results, n ∈ [-126, 127].
+- No FMA. `EmitLlvm` writes no `contract` flag and no `llvm.fmuladd`, and
+  every toolchain keeps `AllowFPOpFusion = Standard` with no-infs,
+  no-NaNs and no-signed-zeros off, so an `fmul` feeding an `fadd` stays two
+  rounded ops (AArch64 `FMADD`, the M4F's `VFMA` and wasm's relaxed madd are
+  never selected). `wasm_vs_jit` holds WASM to the JIT bit for bit at
+  binary32 on `FixedSinOsc`, a `SoftClip` chain, the op zoo, `SpectralSaw`
+  and a written float param.
+
+**Params at binary32 are written raw.** `glide`, `anchor` and `velocity`
+re-anchor on companions that hold sample counts and phases (`#t0`,
+`tau_base`, `#phase`), which binary32 does not hold exactly past 2²⁴, so
+`Kernel.ofPlan` refuses a binary32 artifact whose plan has any non-raw
+entry in `param_disciplines`, by name. It walks that table directly, as
+`FlatPlan.portError?` does: a glided knob has no port of its own (its ports
+are the `#v0`, `#v1` and `#t0` companions), so a walk over the param ports
+alone would miss it. Both hosts refuse the same pairing once, at load: the
+native reader from the nested plan's `param_disciplines`, the web reader
+from that table and the ports' own `discipline`. The per-write checks in
+the C++ dispatcher and the web `ParamWriter` stay. A host write rounds to
+the nearest binary32. A value at or past the binary32 overflow threshold
+(2¹²⁸ − 2¹⁰³) is refused rather than written as an infinity, by both hosts;
+the native host compares against the threshold and never casts an
+out-of-range double.
+
+This rules out every graph compiled through the playground path (the
+playground and `--graph`) at binary32 today. Its discipline table always
+carries the master clock's `velocity` entry (`paramDisciplinesOf`), whose
+companion `master.tau_base` is a sample count, so `--float f32` on such a
+graph is refused whether or not it has a glided or anchored knob.
+Patch-bay programs (`tropical_program_2`) carry no disciplines and compile
+at binary32.
+
+**Hosts.** The manifest declares every float port `f32` and records the
+format as `realization.float`, written only when it is `f32`, so an `f64`
+manifest is what it always was. The native `FlatRuntime` keeps an `f32`
+param's bits in the low word of its 8-byte cell, renders an `f32` output
+into its own buffer and widens it exactly to f64 for the scope and the DAC.
+The web `WasmKernel` does the same with `Float32Array` views. Both readers
+refuse an unknown `realization.float` by name, a float port declared at a
+format other than the artifact's, and an `f32` default that is not a
+binary32.
+
+A `.wasm` and its manifest come from two compiles (`compile-wasm`,
+`compile-kernel`), each with its own `--float`. So `compile-wasm` appends
+`tropical_kernel_float_bits()`, which returns 64 or 32, and the link exports
+it (`EmitLlvm.floatFormatMarker`). `WasmKernel.instantiate` refuses a module
+whose format differs from the manifest's, or one that declares none. The JIT
+and object paths never emit the marker.
+
+**Targets.** `compile-object` asks LLVM's own subtarget description what the
+FPU realizes (`target_float_info`: binary32, binary64, the float ABI), so no
+core list is kept here:
+
+- `--float f32` on a target with no binary32 FPU (the M0+) is refused
+  before any code is emitted: every float op would be a soft-float call. An
+  integer program needs no float format there.
+- After codegen the object's undefined symbols are read back. Any symbol
+  at all is a routine the target could not do inline, since a port function
+  calls nothing of its own. The compile is refused with each symbol and the
+  op that asked for it, and no object is written. `--allow-libcalls` writes
+  it anyway and lists the symbols in `object.libcalls`.
+- Triples are normalized as LLVM's tools do. `thumbv7em-none-eabihf` is the
+  hard-float procedure call standard, and the object carries
+  `Tag_ABI_VFP_args = AAPCS VFP`. Unnormalized, LLVM read `eabihf` as an
+  unknown OS and marked the object base AAPCS, which a hard-float firmware
+  link refuses. Normalizing left both M0+ objects' code byte-identical; it
+  adds `Tag_ABI_optimization_goals`.
+
+**The M4F fixture.** `tests/fixtures/embedded_f32_softclip.json` is the
+knob LFO (`SinOscQ15`, `int32` Q16.16 `freq`) widened with
+`toFloat(out) · 2⁻¹⁵` into `SoftClip` with a float `drive` param. For
+`thumbv7em-none-eabihf`/`cortex-m4` at binary32 and N = 16 it is 408 bytes
+of `tropical_kernel` (the `_argv` thunk is 14 more), 40 bytes of stack, no
+static RAM and no libcalls; the float work is `vcvt.f32.s32`, `vmul`,
+`vadd`, `vdiv` and `vcmp`. `make validate` and CI run
+`tools/embedded_object.py --core m4f --check-only` on it. The script reports
+sizes, symbols, stack and build attributes for the M4F. It counts no
+cycles, because its table is the M0+'s: for any other core the report says
+so (`cycles_refused`), and `--wait-states` exits non-zero. No ARMv7E-M
+emulator ran the object; its bits are argued, not measured: the same LLVM
+module, FMA off, as the host and wasm32 objects, which agree with the JIT.
+
+**What still needs a libcall on the M4F.** Sweeping the stdlib programs at
+binary32 (each instantiated alone, inputs at their defaults):
+
+| routine | op | programs |
+|---|---|---|
+| `__aeabi_l2f`, `__aeabi_ul2f` | `int` (64-bit) → binary32: a clock or phase computed on the `int` rail and then used as a float | `FlangeSin`, `MorphOsc`, `PluckedMorphOsc`, `ModalVoice`, `ReverseReverb`, `ReversibleComb`, `ThroughZeroFlanger`, and `FixedSinOsc` |
+| `__aeabi_f2lz` | binary32 → `int` (64-bit): `toInt` of a float (the modal and comb families' indices and counts) | `ModalVoice`, `MorphOsc`, `PluckedMorphOsc`, `ReverseReverb`, `ReversibleComb`, `ThroughZeroFlanger` |
+| `__aeabi_memclr4` (`memclr8` at f64, on the M0+ as well) | the emitter's slot-zeroing loop, which LLVM's loop-idiom pass turns into a `memset` on ARM when a zeroed slot is read (an unwired input at its default) | `FixedSin`, `Sin`, `SoftClip`, `Tanh`, `VCA` alone |
+
+`FixedSinOscQ15` and `SinOscQ15` need none. The first two rows are the
+programs' own arithmetic: an `int` crossing a float. A program that keeps
+its phase in `int32` and casts with `toFloat` (as the fixture does) avoids
+them. The third row is not about binary32 and predates it. A freestanding
+`TargetLibraryInfo` in `compile_ir_to_object` would stop the idiom pass
+from forming the call, and is left for a separate change.
 
 **Clocks across nodes.** The kernel reads τ from its caller. Exact ratios
 (phase-locked partials, the ℤ/2³² phase identity) hold only between

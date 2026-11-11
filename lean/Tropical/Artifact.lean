@@ -61,10 +61,12 @@ def splitTyped (opts : Options) (plan : FlatPlan)
     (Tropical.Ir.Stage0.hoistTyped plan stageBlocks).mapError (s!"Artifact (typed split): {·}")
   else .ok { audio := plan, coeff? := none }
 
-/-- The JIT-only artifact: the port kernel and its manifest. -/
-def emitJit (s : Split) (frames : Nat) : Except String KernelArtifact := do
-  let ir ← Tropical.Ir.EmitLlvm.emitKernel s frames
-  let manifest ← Tropical.Kernel.manifest s.audio frames
+/-- The JIT-only artifact: the port kernel and its manifest, the value lane
+    realized at `float` (`Kernel.FloatFormat`; binary64 unless asked). -/
+def emitJit (s : Split) (frames : Nat) (float : Tropical.Kernel.FloatFormat := .f64) :
+    Except String KernelArtifact := do
+  let ir ← Tropical.Ir.EmitLlvm.emitKernel s frames float
+  let manifest ← Tropical.Kernel.manifest s.audio frames float
   return { ir, manifest }
 
 /-- The dual artifact: the port kernel, the MSL realization of the same

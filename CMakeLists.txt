@@ -150,7 +150,7 @@ if(TROPICAL_WASM_EMIT)
     target_compile_definitions(tropical_wasm PRIVATE ${LLVM_DEFINITIONS} TROPICAL_WASM_EMIT)
     llvm_map_components_to_libnames(LLVM_WASM_LIBS
         Core IRReader Support WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo
-        ARMCodeGen ARMDesc ARMInfo Passes native)
+        ARMCodeGen ARMDesc ARMInfo Object Passes native)
 
     # lld ships in the `lld` keg on Homebrew and in llvm-N's libdir on apt.llvm.org,
     # so hint both the Homebrew prefix and LLVM's own include/lib dirs (Linux).
@@ -234,6 +234,17 @@ if(TROPICAL_BUILD_TESTS)
     target_link_libraries(test_module_process PRIVATE
         tropical_core nlohmann_json::nlohmann_json)
     add_test(NAME current_module_process COMMAND test_module_process)
+
+    # The binary32 floor/ceil/round sequences (tests/fixtures/rounding_f32.ll,
+    # EmitLlvm's own text) through the JIT on all 2^32 inputs, against libm.
+    add_executable(test_rounding_f32 engine/tests/test_rounding_f32.cpp)
+    target_include_directories(test_rounding_f32 PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(test_rounding_f32 PRIVATE ${LLVM_DEFINITIONS}
+        TROPICAL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(test_rounding_f32 PRIVATE cxx_std_20)
+    target_link_libraries(test_rounding_f32 PRIVATE tropical_core)
+    add_test(NAME current_rounding_f32 COMMAND test_rounding_f32)
+    set_tests_properties(current_rounding_f32 PROPERTIES TIMEOUT 300)
 
     if(TROPICAL_WASM_EMIT)
         add_executable(test_wasm_emit engine/tests/test_wasm_emit.cpp)

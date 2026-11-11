@@ -29,4 +29,15 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
                                           const std::string & cpu,
                                           const std::string & features,
                                           std::string & err);
+
+// What `triple`/`cpu`/`features`'s FPU realizes, from LLVM's subtarget:
+// `{"triple":…,"binary32":bool,"binary64":bool,"float_abi":"hard"|"soft"|"n/a"}`.
+// On failure returns empty and sets `err`.
+std::string target_float_info(const std::string & triple, const std::string & cpu,
+                              const std::string & features, std::string & err);
+
+// The undefined symbols of a relocatable object (ELF, Mach-O or wasm): what a
+// link must supply. On failure returns empty and sets `err`.
+std::vector<std::string> object_undefined_symbols(const uint8_t * data, size_t len,
+                                                  std::string & err);
 } // namespace tropical_toolchain

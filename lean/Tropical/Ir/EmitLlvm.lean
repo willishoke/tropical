@@ -51,12 +51,46 @@ kernel reads are computed in f64 on the host. Internal to that realization;
 a JIT artifact carries none.
 
 Registers/temps/arrays are `i64`-backed (float=bitcast, int=raw,
-int32=sext, bool=zext); slots are direct `double`, with typed integer lanes
+int32=sext, bool=zext); slots are direct floats, with typed integer lanes
 in the port kernel (`St.typedSlots`). Instruction operand/dst slots are
 already global (the partitioner pre-shifts).
 
+## The value lane's format
+
+`float` values are `double` unless the artifact is compiled at binary32
+(`emitKernel … (float := .f32)`, `Kernel.FloatFormat`): then every float
+value, slot, param cell and output is an LLVM `float`, a scratch or array
+cell holds a float's bits in its low word, and the float intrinsics are the
+`.f32` ones. It is a realization of the `float` kind, not a new kind: the
+plan is the same, and the integer lanes (τ's Q48.16 rail, `int`, `int32`)
+do not change. At binary32:
+
+* a plan literal is the binary32 rounding of the decimal as written
+  (`EmitCommon.binary32BitsOfDecimal?`, one rounding), and a literal past
+  the binary32 range is refused, not turned into an infinity;
+* float → integer conversions stay `llvm.fptosi.sat` (truncate, saturate,
+  NaN → 0), at `.f32`;
+* `floor`, `ceil` and `round` are expanded inline (`roundingF32`): a
+  target with a binary32 FPU but no rounding instruction (Cortex-M4F's
+  FPv4-SP) would otherwise call `floorf`. The expansion is IEEE-exact,
+  signed zeros included, so every binary32 target computes the same bits;
+* `ldexp` builds `2^n` in the binary32 exponent field (`n + 127` at bit 23)
+  and `floatExponent` reads it back, as the binary64 forms do with `1023`
+  at bit 52. Each is exact for normal results, `n ∈ [-126, 127]` at
+  binary32 (`[-1022, 1023]` at binary64).
+
+The plan does not depend on the realization, and the emitter folds nothing:
+an op whose operands are plan literals is emitted as an op, and LLVM folds
+it at the lane's own format (`mul(0.1, 9)` is `0x3F666667` at binary32,
+`f32(0.1) · 9` rounded once, while the literal `0.9` is `0x3F666666`). The
+only arithmetic done in binary64 before emission is a builder's own Lean
+`Float` (`litF`, a coefficient table built with `Array.map`), whose result
+is a literal and is then rounded once more, to binary32.
+
 f64 constants are emitted as LLVM hex-bits (`0x…`, raw IEEE-754) so the
-parser reproduces them exactly rather than risking decimal round-trip.
+parser reproduces them exactly rather than risking decimal round-trip; a
+binary32 constant is the same 16-digit form of its (exact) binary64 value,
+which is how LLVM spells a `float` literal.
 -/
 
 namespace Tropical.Ir.EmitLlvm
@@ -79,8 +113,44 @@ def hex16 (u : UInt64) : String :=
 /-- An f64 LLVM literal as raw IEEE-754 bits — exact, parser-safe. -/
 def f64Lit (x : Float) : String := hex16 x.toBits
 
-def llTy : ScalarType → String
-  | .float => "double" | .int => "i64" | .bool => "i1" | .int32 => "i32"
+/-- A binary32 LLVM literal: LLVM spells a `float` constant as the 16-digit
+    hex of its binary64 value, which is exact. -/
+def f32BitsLit (bits : UInt32) : String := hex16 (Float32.ofBits bits).toFloat.toBits
+
+abbrev FloatFormat := Tropical.Kernel.FloatFormat
+
+/-- The LLVM type of the float lane. -/
+def floatTy : FloatFormat → String
+  | .f64 => "double" | .f32 => "float"
+
+/-- The intrinsic suffix of the float lane. -/
+def floatSuffix : FloatFormat → String
+  | .f64 => "f64" | .f32 => "f32"
+
+/-- A float literal of a binary64 value the emitter computes: exact at
+    binary64, rounded to nearest-even at binary32 (`Float.toFloat32`). The
+    emitter only spells values exact in both (0, ±1, ½, 2²³). -/
+def floatLit (fmt : FloatFormat) (x : Float) : String :=
+  match fmt with
+  | .f64 => f64Lit x
+  | .f32 => f32BitsLit x.toFloat32.toBits
+
+/-- A float literal of a plan constant written as a decimal: binary64 as
+    ever, or at binary32 the binary32 rounding of the decimal itself
+    (`binary32BitsOfDecimal?`). A decimal past the binary32 range is
+    refused. -/
+def floatLitOfJson (fmt : FloatFormat) (n : Lean.JsonNumber) : Except String String :=
+  match fmt with
+  | .f64 => .ok (f64Lit n.toFloat)
+  | .f32 =>
+    match binary32BitsOfDecimal? n with
+    | some bits => .ok (f32BitsLit bits)
+    | none => .error s!"EmitLlvm: the literal {n} is outside the binary32 range (|x| < 2^128); a binary32 artifact cannot hold it"
+
+def llTyF (fmt : FloatFormat) : ScalarType → String
+  | .float => floatTy fmt | .int => "i64" | .bool => "i1" | .int32 => "i32"
+
+def llTy : ScalarType → String := llTyF .f64
 
 -- ─────────────────────────────────────────────────────────────
 -- Emitter state + monad
@@ -174,6 +244,10 @@ structure St where
       integer kind of its last write. -/
   typedSlots : Bool := false
   intSlots : Std.HashMap Nat ScalarType := {}
+  /-- The format of the float lane (see "The value lane's format"). -/
+  float : FloatFormat := .f64
+  /-- The rate as the plan writes it, for the `rate` source's literal. -/
+  sampleRateLit : Lean.JsonNumber := Tropical.Plan.defaultSampleRate
 
 abbrev M := EStateM String St
 
@@ -195,6 +269,35 @@ def line (l : String) : M Unit :=
 
 def fail {α} (msg : String) : M α := throw msg
 
+/-- The float lane's LLVM type, intrinsic suffix and literals. -/
+def fTy : M String := do pure (floatTy (← get).float)
+def fSuf : M String := do pure (floatSuffix (← get).float)
+def fLit (x : Float) : M String := do pure (floatLit (← get).float x)
+def fLitJson (n : Lean.JsonNumber) : M String := do
+  match floatLitOfJson (← get).float n with
+  | .ok s => pure s
+  | .error e => fail e
+def tyOf (t : ScalarType) : M String := do pure (llTyF (← get).float t)
+/-- The alignment of a float lane cell. -/
+def fAlign : M Nat := do pure (match (← get).float with | .f64 => 8 | .f32 => 4)
+
+/-- A float value into an `i64` scratch cell (temps, arrays) and back:
+    `double` bitcasts to the cell; `float` bitcasts to `i32` and widens, so
+    the cell's low word holds its bits. -/
+def floatToCell (v : String) : M String := do
+  match (← get).float with
+  | .f64 => let bc ← fresh; line s!"{bc} = bitcast double {v} to i64"; pure bc
+  | .f32 =>
+    let b ← fresh; line s!"{b} = bitcast float {v} to i32"
+    let z ← fresh; line s!"{z} = zext i32 {b} to i64"; pure z
+
+def cellToFloat (raw : String) : M String := do
+  match (← get).float with
+  | .f64 => let v ← fresh; line s!"{v} = bitcast i64 {raw} to double"; pure v
+  | .f32 =>
+    let t ← fresh; line s!"{t} = trunc i64 {raw} to i32"
+    let v ← fresh; line s!"{v} = bitcast i32 {t} to float"; pure v
+
 -- ─────────────────────────────────────────────────────────────
 -- Coercion (mirrors EmitCtx::coerce_val)
 -- ─────────────────────────────────────────────────────────────
@@ -204,23 +307,31 @@ def fail {α} (msg : String) : M α := throw msg
     word, NaN → 0. Plain `fptosi` is poison outside the word's range; the
     `.sat` intrinsic is defined everywhere (wasm `trunc_sat`, AArch64
     `fcvtzs`). `ity` is `i64` or `i32`. -/
-def fptosiSatLine (r v ity : String) : String :=
-  s!"{r} = call {ity} @llvm.fptosi.sat.{ity}.f64(double {v})"
+def fptosiSatLineF (fmt : FloatFormat) (r v ity : String) : String :=
+  s!"{r} = call {ity} @llvm.fptosi.sat.{ity}.{floatSuffix fmt}({floatTy fmt} {v})"
+
+def fptosiSatLine (r v ity : String) : String := fptosiSatLineF .f64 r v ity
+
+/-- `fptosiSatLine` at the lane's format. -/
+def fptosiSat (r v ity : String) : M Unit := do
+  line (fptosiSatLineF (← get).float r v ity)
 
 def coerce (v : TVal) (to : ScalarType) : M TVal := do
   if v.ty == to then pure v else
+  let ft ← fTy
+  let z ← fLit 0.0
   let r ← fresh
   match v.ty, to with
-  | .float, .int  => line (fptosiSatLine r v.ref "i64"); pure ⟨r, .int⟩
-  | .float, .int32 => line (fptosiSatLine r v.ref "i32"); pure ⟨r, .int32⟩
-  | .float, .bool => line s!"{r} = fcmp une double {v.ref}, 0x0000000000000000"; pure ⟨r, .bool⟩
-  | .int,   .float => line s!"{r} = sitofp i64 {v.ref} to double"; pure ⟨r, .float⟩
+  | .float, .int  => fptosiSat r v.ref "i64"; pure ⟨r, .int⟩
+  | .float, .int32 => fptosiSat r v.ref "i32"; pure ⟨r, .int32⟩
+  | .float, .bool => line s!"{r} = fcmp une {ft} {v.ref}, {z}"; pure ⟨r, .bool⟩
+  | .int,   .float => line s!"{r} = sitofp i64 {v.ref} to {ft}"; pure ⟨r, .float⟩
   | .int,   .int32 => line s!"{r} = trunc i64 {v.ref} to i32"; pure ⟨r, .int32⟩
   | .int,   .bool => line s!"{r} = icmp ne i64 {v.ref}, 0"; pure ⟨r, .bool⟩
-  | .int32, .float => line s!"{r} = sitofp i32 {v.ref} to double"; pure ⟨r, .float⟩
+  | .int32, .float => line s!"{r} = sitofp i32 {v.ref} to {ft}"; pure ⟨r, .float⟩
   | .int32, .int => line s!"{r} = sext i32 {v.ref} to i64"; pure ⟨r, .int⟩
   | .int32, .bool => line s!"{r} = icmp ne i32 {v.ref}, 0"; pure ⟨r, .bool⟩
-  | .bool,  .float => line s!"{r} = uitofp i1 {v.ref} to double"; pure ⟨r, .float⟩
+  | .bool,  .float => line s!"{r} = uitofp i1 {v.ref} to {ft}"; pure ⟨r, .float⟩
   | .bool,  .int  => line s!"{r} = zext i1 {v.ref} to i64"; pure ⟨r, .int⟩
   | .bool,  .int32 => line s!"{r} = zext i1 {v.ref} to i32"; pure ⟨r, .int32⟩
   | _, _ => pure v
@@ -240,7 +351,7 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   match ty with
   | .int => pure ⟨raw, .int⟩
   | .int32 => let b ← fresh; line s!"{b} = trunc i64 {raw} to i32"; pure ⟨b, .int32⟩
-  | .float => let b ← fresh; line s!"{b} = bitcast i64 {raw} to double"; pure ⟨b, .float⟩
+  | .float => pure ⟨← cellToFloat raw, .float⟩
   | .bool => let b ← fresh; line s!"{b} = trunc i64 {raw} to i1"; pure ⟨b, .bool⟩
 
 /-- Record a temp write as an SSA value for later `reg` reads. Emits no
@@ -253,18 +364,21 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
   if let some rc ← findAccCtx slot then
     let cv ← coerce v rc.accTy
-    line s!"store {llTy rc.accTy} {cv.ref}, ptr {rc.accPtr}, align 8"
+    line s!"store {← tyOf rc.accTy} {cv.ref}, ptr {rc.accPtr}, align 8"
     return
   modify fun s => { s with tempVals := s.tempVals.insert slot v }
 
-def loadSlotF64 (idx : Nat) : M String := do
-  let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
-  let v ← fresh; line s!"{v} = load double, ptr {g}, align 8"
+/-- The float copy of slot `idx` (`%slots`, the float lane). -/
+def loadSlotFloat (idx : Nat) : M String := do
+  let ft ← fTy; let al ← fAlign
+  let g ← fresh; line s!"{g} = getelementptr inbounds {ft}, ptr %slots, i64 {idx}"
+  let v ← fresh; line s!"{v} = load {ft}, ptr {g}, align {al}"
   pure v
 
-def storeSlotF64 (idx : Nat) (v : String) : M Unit := do
-  let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
-  line s!"store double {v}, ptr {g}, align 8"
+def storeSlotFloat (idx : Nat) (v : String) : M Unit := do
+  let ft ← fTy; let al ← fAlign
+  let g ← fresh; line s!"{g} = getelementptr inbounds {ft}, ptr %slots, i64 {idx}"
+  line s!"store {ft} {v}, ptr {g}, align {al}"
 
 /-- The integer lane of a kind: its alloca, element type and alignment. -/
 private def intLane : ScalarType → Option (String × String × Nat)
@@ -281,7 +395,7 @@ def storeSlotTyped (idx : Nat) (v : TVal) : M Unit := do
     modify fun st => { st with intSlots := st.intSlots.insert idx v.ty }
   | _, _ =>
     modify fun st => { st with intSlots := st.intSlots.erase idx }
-  storeSlotF64 idx (← coerceF64 v)
+  storeSlotFloat idx (← coerceF64 v)
 
 /-- The integer lane value of slot `idx`, if its last emitted write was an
     integer (see `St.typedSlots`). -/
@@ -332,7 +446,7 @@ def resolveOperand : NOperand → M TVal
     | .int  => pure ⟨toString (jsonNumberToInt v), .int⟩
     | .int32 => pure ⟨toString (wrap32 (jsonNumberToInt v)), .int32⟩
     | .bool => pure ⟨if jsonNumberToInt v != 0 then "true" else "false", .bool⟩
-    | .float => pure ⟨f64Lit v.toFloat, .float⟩
+    | .float => do pure ⟨← fLitJson v, .float⟩
   | .reg slot _ => do
     -- Inside a reduction region, an accumulator temp reads the running
     -- value from its alloca (an SSA value can't cross the back-edge).
@@ -340,7 +454,7 @@ def resolveOperand : NOperand → M TVal
     -- an OUTER accumulator must find the outer alloca.
     if let some rc ← findAccCtx slot then
       let v ← fresh
-      line s!"{v} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+      line s!"{v} = load {← tyOf rc.accTy}, ptr {rc.accPtr}, align 8"
       return ⟨v, rc.accTy⟩
     match (← get).tempVals.get? slot with
     | some v => pure v
@@ -361,23 +475,25 @@ def resolveOperand : NOperand → M TVal
     let srcs := (← get).sources
     match srcs[idx]? with
     | some .tau => pure ⟨(← get).tauName, .int⟩
-    | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
-    | none => pure ⟨f64Lit 0.0, .float⟩
+    | some .rate =>
+      if (← get).float == .f64 then pure ⟨f64Lit (← get).sampleRate, .float⟩
+      else pure ⟨← fLitJson (← get).sampleRateLit, .float⟩
+    | none => pure ⟨← fLit 0.0, .float⟩
   | .slot idx t => do
     -- An integer read of a slot an integer was last written to reads that
     -- lane (`St.typedSlots`); everything else reads the f64 copy.
     if t.isInteger then
       if let some lv ← loadSlotLane? idx then
         return (← coerce lv t)
-    let v ← loadSlotF64 idx
+    let v ← loadSlotFloat idx
     match t with
     | .float => pure ⟨v, .float⟩
-    | .int  => let r ← fresh; line (fptosiSatLine r v "i64"); pure ⟨r, .int⟩
-    | .int32 => let r ← fresh; line (fptosiSatLine r v "i32"); pure ⟨r, .int32⟩
-    | .bool => let r ← fresh; line s!"{r} = fcmp one double {v}, 0x0000000000000000"; pure ⟨r, .bool⟩
+    | .int  => let r ← fresh; fptosiSat r v "i64"; pure ⟨r, .int⟩
+    | .int32 => let r ← fresh; fptosiSat r v "i32"; pure ⟨r, .int32⟩
+    | .bool => let r ← fresh; line s!"{r} = fcmp one {← fTy} {v}, {← fLit 0.0}"; pure ⟨r, .bool⟩
   -- External inputs never reached the session path (the compile maps them
   -- to constant zero); the port has no such region, so the operand IS zero.
-  | .input _ _ => pure ⟨f64Lit 0.0, .float⟩
+  | .input _ _ => do pure ⟨← fLit 0.0, .float⟩
   | .param _ _ => fail "EmitLlvm: 'param' operand is dead on the session path (use slots)"
   | .arrayReg _ => fail "EmitLlvm: bare 'arrayReg' operand outside an array op"
   | .sessionArrayReg _ => fail "EmitLlvm: 'sessionArrayReg' must be remapped before emit"
@@ -393,23 +509,80 @@ private def argAs (args : Array TVal) (i : Nat) (target : ScalarType) : M String
   | none => fail s!"EmitLlvm: missing operand {i}"
 
 private def binF (op : String) (a b : String) : M TVal := do
-  let r ← fresh; line s!"{r} = {op} double {a}, {b}"; pure ⟨r, .float⟩
+  let ft ← fTy
+  let r ← fresh; line s!"{r} = {op} {ft} {a}, {b}"; pure ⟨r, .float⟩
 private def binI (op : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = {op} i64 {a}, {b}"; pure ⟨r, .int⟩
 private def cmpF (pred : String) (a b : String) : M TVal := do
-  let r ← fresh; line s!"{r} = fcmp {pred} double {a}, {b}"; pure ⟨r, .bool⟩
+  let ft ← fTy
+  let r ← fresh; line s!"{r} = fcmp {pred} {ft} {a}, {b}"; pure ⟨r, .bool⟩
 private def cmpI (pred : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = icmp {pred} i64 {a}, {b}"; pure ⟨r, .bool⟩
 private def binI32 (op : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = {op} i32 {a}, {b}"; pure ⟨r, .int32⟩
 private def cmpI32 (pred : String) (a b : String) : M TVal := do
   let r ← fresh; line s!"{r} = icmp {pred} i32 {a}, {b}"; pure ⟨r, .bool⟩
+/-- Call the float intrinsic `@llvm.<fn>` at the lane's format. -/
 private def callF (fn : String) (a : String) : M TVal := do
-  let r ← fresh; line s!"{r} = call double {fn}(double {a})"; pure ⟨r, .float⟩
+  let ft ← fTy; let suf ← fSuf
+  let r ← fresh; line s!"{r} = call {ft} @llvm.{fn}.{suf}({ft} {a})"; pure ⟨r, .float⟩
 
-private def zeroF : String := f64Lit 0.0
+/-- The rounding functions at binary32, inline. A target with a binary32 FPU
+    but no rounding instruction (FPv4-SP) lowers `llvm.floor.f32` to a
+    `floorf` call; this sequence needs only a compare, a saturating convert
+    and its inverse, and integer ops. For `|x| < 2²³`, `t = trunc(x)` is exact
+    (`fptosi.sat` to `i32` and back) and so are `t ± 1` and `x - t`; `floor`
+    steps down when `t > x`, `ceil` up when `t < x`, and `round` (half away
+    from zero, `llvm.round`) away from zero when `|x - t| ≥ ½`. A zero result
+    takes `x`'s sign bit, which every other result already carries, so
+    `floor(-0) = -0` and `ceil(-½) = round(-0.3) = -0` as IEEE 754 has them.
+    `|x| ≥ 2²³`, ±∞ and NaN are their own value (integral, or NaN), and pass
+    through. Every result equals the IEEE function's (gated exhaustively over
+    all 2³² binary32 inputs, `design/typed-kernel.md`). -/
+private def roundingF32 (which : String) (x : String) : M TVal := do
+  let a ← fresh; line s!"{a} = call float @llvm.fabs.f32(float {x})"
+  let small ← fresh
+  line s!"{small} = fcmp olt float {a}, {floatLit .f32 8388608.0}"
+  let i ← fresh; line s!"{i} = call i32 @llvm.fptosi.sat.i32.f32(float {x})"
+  let t ← fresh; line s!"{t} = sitofp i32 {i} to float"
+  let one := floatLit .f32 1.0
+  let r0 ← fresh
+  match which with
+  | "floor" =>
+    let c ← fresh; line s!"{c} = fcmp ogt float {t}, {x}"
+    let d ← fresh; line s!"{d} = fsub float {t}, {one}"
+    line s!"{r0} = select i1 {c}, float {d}, float {t}"
+  | "ceil" =>
+    let c ← fresh; line s!"{c} = fcmp olt float {t}, {x}"
+    let d ← fresh; line s!"{d} = fadd float {t}, {one}"
+    line s!"{r0} = select i1 {c}, float {d}, float {t}"
+  | _ =>
+    let f ← fresh; line s!"{f} = fsub float {x}, {t}"
+    let af ← fresh; line s!"{af} = call float @llvm.fabs.f32(float {f})"
+    let h ← fresh; line s!"{h} = fcmp oge float {af}, {floatLit .f32 0.5}"
+    let neg ← fresh; line s!"{neg} = fcmp olt float {x}, {floatLit .f32 0.0}"
+    let step ← fresh
+    line s!"{step} = select i1 {neg}, float {floatLit .f32 (-1.0)}, float {one}"
+    let d ← fresh; line s!"{d} = fadd float {t}, {step}"
+    line s!"{r0} = select i1 {h}, float {d}, float {t}"
+  let rb ← fresh; line s!"{rb} = bitcast float {r0} to i32"
+  let xb ← fresh; line s!"{xb} = bitcast float {x} to i32"
+  let sb ← fresh; line s!"{sb} = and i32 {xb}, -2147483648"
+  let ob ← fresh; line s!"{ob} = or i32 {rb}, {sb}"
+  let r1 ← fresh; line s!"{r1} = bitcast i32 {ob} to float"
+  let r ← fresh; line s!"{r} = select i1 {small}, float {r1}, float {x}"
+  pure ⟨r, .float⟩
+
+/-- `floor`/`ceil`/`round` at the lane's format: the intrinsic at binary64,
+    the inline sequence at binary32. -/
+private def roundingF (which : String) (x : String) : M TVal := do
+  match (← get).float with
+  | .f64 => callF which x
+  | .f32 => roundingF32 which x
 
 def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal := do
+  let zeroF ← fLit 0.0
+  let ft ← fTy
   let aF (i : Nat) := argAs args i .float
   let aI (i : Nat) := argAs args i .int
   let aI32 (i : Nat) := argAs args i .int32
@@ -478,25 +651,25 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
     else
       let b ← aF 1; let q ← binF "fdiv" (← aF 0) b
       let z ← cmpF "oeq" b zeroF; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, double {zeroF}, double {q.ref}"; pure ⟨r, .float⟩
+      line s!"{r} = select i1 {z.ref}, {ft} {zeroF}, {ft} {q.ref}"; pure ⟨r, .float⟩
   | .mod =>
     if isInt || isI32 then guardedI "srem"
     else
       let a ← aF 0; let b ← aF 1
       let z ← cmpF "oeq" b zeroF
       let q ← binF "fdiv" a b
-      let fq ← callF "@llvm.floor.f64" q.ref
+      let fq ← roundingF "floor" q.ref
       let prod ← binF "fmul" fq.ref b
       let m ← binF "fsub" a prod.ref
       let r ← fresh
-      line s!"{r} = select i1 {z.ref}, double {zeroF}, double {m.ref}"; pure ⟨r, .float⟩
+      line s!"{r} = select i1 {z.ref}, {ft} {zeroF}, {ft} {m.ref}"; pure ⟨r, .float⟩
   | .floorDiv =>
     if isInt || isI32 then guardedI "sdiv"
     else
       let b ← aF 1; let q ← binF "fdiv" (← aF 0) b
       let z ← cmpF "oeq" b zeroF; let dv ← fresh
-      line s!"{dv} = select i1 {z.ref}, double {zeroF}, double {q.ref}"
-      callF "@llvm.floor.f64" dv
+      line s!"{dv} = select i1 {z.ref}, {ft} {zeroF}, {ft} {q.ref}"
+      roundingF "floor" dv
   | .less      => if (← eitherInt) then cmpInt "slt" else cmpF "olt" (← aF 0) (← aF 1)
   | .lessEq    => if (← eitherInt) then cmpInt "sle" else cmpF "ole" (← aF 0) (← aF 1)
   | .greater   => if (← eitherInt) then cmpInt "sgt" else cmpF "ogt" (← aF 0) (← aF 1)
@@ -513,7 +686,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   | .neg =>
     if isI32 then binI32 "sub" "0" (← aI32 0)
     else if isInt then binI "sub" "0" (← aI 0) else
-    let r ← fresh; line s!"{r} = fneg double {← aF 0}"; pure ⟨r, .float⟩
+    let r ← fresh; line s!"{r} = fneg {ft} {← aF 0}"; pure ⟨r, .float⟩
   | .abs =>
     if isI32 then
       let v ← aI32 0; let neg ← binI32 "sub" "0" v
@@ -523,23 +696,29 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       let v ← aI 0; let neg ← binI "sub" "0" v
       let lt ← cmpI "slt" v "0"; let r ← fresh
       line s!"{r} = select i1 {lt.ref}, i64 {neg.ref}, i64 {v}"; pure ⟨r, .int⟩
-    else callF "@llvm.fabs.f64" (← aF 0)
-  | .sqrt  => callF "@llvm.sqrt.f64"  (← aF 0)
-  | .floor => callF "@llvm.floor.f64" (← aF 0)
-  | .ceil  => callF "@llvm.ceil.f64"  (← aF 0)
-  | .round => callF "@llvm.round.f64" (← aF 0)
+    else callF "fabs" (← aF 0)
+  | .sqrt  => callF "sqrt"  (← aF 0)
+  | .floor => roundingF "floor" (← aF 0)
+  | .ceil  => roundingF "ceil"  (← aF 0)
+  | .round => roundingF "round" (← aF 0)
   | .ldexp =>
+    -- `x · 2^n` with `2^n` built in the exponent field: `n + bias` at the
+    -- mantissa width (1023 at 52 for binary64, 127 at 23 for binary32).
     let x ← aF 0
-    let ni ← fresh; line (fptosiSatLine ni (← aF 1) "i64")
-    let add ← fresh; line s!"{add} = add i64 {ni}, 1023"
-    let bias ← fresh; line s!"{bias} = shl i64 {add}, 52"
-    let scale ← fresh; line s!"{scale} = bitcast i64 {bias} to double"
+    let (ity, bias, mbits) := match (← get).float with
+      | .f64 => ("i64", 1023, 52) | .f32 => ("i32", 127, 23)
+    let ni ← fresh; fptosiSat ni (← aF 1) ity
+    let add ← fresh; line s!"{add} = add {ity} {ni}, {bias}"
+    let biased ← fresh; line s!"{biased} = shl {ity} {add}, {mbits}"
+    let scale ← fresh; line s!"{scale} = bitcast {ity} {biased} to {ft}"
     binF "fmul" x scale
   | .floatExponent =>
-    let bits ← fresh; line s!"{bits} = bitcast double {← aF 0} to i64"
-    let sh ← fresh; line s!"{sh} = ashr i64 {bits}, 52"
-    let e ← fresh; line s!"{e} = sub i64 {sh}, 1023"
-    let r ← fresh; line s!"{r} = sitofp i64 {e} to double"; pure ⟨r, .float⟩
+    let (ity, bias, mbits) := match (← get).float with
+      | .f64 => ("i64", 1023, 52) | .f32 => ("i32", 127, 23)
+    let bits ← fresh; line s!"{bits} = bitcast {ft} {← aF 0} to {ity}"
+    let sh ← fresh; line s!"{sh} = ashr {ity} {bits}, {mbits}"
+    let e ← fresh; line s!"{e} = sub {ity} {sh}, {bias}"
+    let r ← fresh; line s!"{r} = sitofp {ity} {e} to {ft}"; pure ⟨r, .float⟩
   | .not =>
     match args[0]? with
     | none => fail "EmitLlvm: Not missing operand"
@@ -548,7 +727,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       | .bool  => let r ← fresh; line s!"{r} = xor i1 {a.ref}, true"; pure ⟨r, .bool⟩
       | .int   => let r ← fresh; line s!"{r} = icmp eq i64 {a.ref}, 0"; pure ⟨r, .bool⟩
       | .int32 => let r ← fresh; line s!"{r} = icmp eq i32 {a.ref}, 0"; pure ⟨r, .bool⟩
-      | .float => let r ← fresh; line s!"{r} = fcmp oeq double {a.ref}, {zeroF}"; pure ⟨r, .bool⟩
+      | .float => let r ← fresh; line s!"{r} = fcmp oeq {ft} {a.ref}, {zeroF}"; pure ⟨r, .bool⟩
   | .bitNot =>
     if isI32 then let r ← fresh; line s!"{r} = xor i32 {← aI32 0}, -1"; pure ⟨r, .int32⟩
     else let r ← fresh; line s!"{r} = xor i64 {← aI 0}, -1"; pure ⟨r, .int⟩
@@ -570,9 +749,9 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
     else
       let val ← aF 0; let lo ← aF 1; let hi ← aF 2
       let gt ← cmpF "ogt" val lo; let loc ← fresh
-      line s!"{loc} = select i1 {gt.ref}, double {val}, double {lo}"
+      line s!"{loc} = select i1 {gt.ref}, {ft} {val}, {ft} {lo}"
       let lt ← cmpF "olt" loc hi; let r ← fresh
-      line s!"{r} = select i1 {lt.ref}, double {loc}, double {hi}"; pure ⟨r, .float⟩
+      line s!"{r} = select i1 {lt.ref}, {ft} {loc}, {ft} {hi}"; pure ⟨r, .float⟩
   | .select =>
     let cond ← match args[0]? with
       | none => fail "Select missing cond"
@@ -581,11 +760,12 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
         | .bool  => pure a.ref
         | .int   => do let r ← fresh; line s!"{r} = icmp ne i64 {a.ref}, 0"; pure r
         | .int32 => do let r ← fresh; line s!"{r} = icmp ne i32 {a.ref}, 0"; pure r
-        | .float => do let r ← fresh; line s!"{r} = fcmp une double {a.ref}, {zeroF}"; pure r
+        | .float => do let r ← fresh; line s!"{r} = fcmp une {ft} {a.ref}, {zeroF}"; pure r
     let t ← argAs args 1 resultType
     let f ← argAs args 2 resultType
     let r ← fresh
-    line s!"{r} = select i1 {cond}, {llTy resultType} {t}, {llTy resultType} {f}"
+    let rt ← tyOf resultType
+    line s!"{r} = select i1 {cond}, {rt} {t}, {rt} {f}"
     pure ⟨r, resultType⟩
 
 -- ─────────────────────────────────────────────────────────────
@@ -601,7 +781,7 @@ private def emitPack (dst : Nat) (args : Array NOperand) : M Unit := do
   let dstPtr ← loadArrayPtr dst
   for i in [0:args.size] do
     let v ← resolveF64 args[i]!
-    let bc ← fresh; line s!"{bc} = bitcast double {v} to i64"
+    let bc ← floatToCell v
     let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {dstPtr}, i64 {i}"
     line s!"store i64 {bc}, ptr {ep}, align 8"
 
@@ -618,8 +798,9 @@ private def emitIndex (dst : Nat) (args : Array NOperand) : M Unit := do
   let inRange ← fresh; line s!"{inRange} = and i1 {notNeg}, {lt}"
   let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {arrPtr}, i64 {rawIdx}"
   let raw ← fresh; line s!"{raw} = load i64, ptr {ep}, align 8"
-  let val ← fresh; line s!"{val} = bitcast i64 {raw} to double"
-  let sel ← fresh; line s!"{sel} = select i1 {inRange}, double {val}, double {zeroF}"
+  let val ← cellToFloat raw
+  let ft ← fTy
+  let sel ← fresh; line s!"{sel} = select i1 {inRange}, {ft} {val}, {ft} {← fLit 0.0}"
   storeTempTyped dst ⟨sel, .float⟩
 
 /-- `SetElement` — bounds-checked in-place write to `arrays[arr][idx]`. -/
@@ -638,7 +819,7 @@ private def emitSetElement (args : Array NOperand) : M Unit := do
   line s!"br i1 {inRange}, label %{wbb}, label %{mbb}"
   labelLine wbb
   let v ← match args[2]? with | some o => resolveF64 o | none => fail "SetElement missing value"
-  let bc ← fresh; line s!"{bc} = bitcast double {v} to i64"
+  let bc ← floatToCell v
   let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {arrPtr}, i64 {rawIdx}"
   line s!"store i64 {bc}, ptr {ep}, align 8"
   line s!"br label %{mbb}"
@@ -677,12 +858,12 @@ private def emitElementwise (instr : NInstr) (dstSlot : Nat) : M Unit := do
     | some p =>
       let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {p}, i64 {idx}"
       let raw ← fresh; line s!"{raw} = load i64, ptr {ep}, align 8"
-      let v ← fresh; line s!"{v} = bitcast i64 {raw} to double"
+      let v ← cellToFloat raw
       iterArgs := iterArgs.push ⟨v, .float⟩
     | none => iterArgs := iterArgs.push (argScalars[i]!).get!
   let res ← emitOp instr.tag instr.resultType iterArgs
   let f64 ← coerceF64 res
-  let bc ← fresh; line s!"{bc} = bitcast double {f64} to i64"
+  let bc ← floatToCell f64
   let dep ← fresh; line s!"{dep} = getelementptr inbounds i64, ptr {dstPtr}, i64 {idx}"
   line s!"store i64 {bc}, ptr {dep}, align 8"
   let nidx ← fresh; line s!"{nidx} = add i64 {idx}, 1"
@@ -717,8 +898,8 @@ def emitInstr (instr : NInstr) : M Unit := do
         let cl ← fresh; line s!"{cl} = select i1 {over}, i64 {instr.loopCount}, i64 {lo}"
         pure cl
     let accPtr ← fresh
-    line s!"{accPtr} = alloca {llTy instr.resultType}, align 8"
-    line s!"store {llTy instr.resultType} {initV.ref}, ptr {accPtr}, align 8"
+    line s!"{accPtr} = alloca {← tyOf instr.resultType}, align 8"
+    line s!"store {← tyOf instr.resultType} {initV.ref}, ptr {accPtr}, align 8"
     let idxPtr ← fresh
     line s!"{idxPtr} = alloca i64, align 8"
     line s!"store i64 0, ptr {idxPtr}, align 8"
@@ -746,7 +927,7 @@ def emitInstr (instr : NInstr) : M Unit := do
     -- Body temps don't escape; the accumulator's final value does. Restore
     -- is LIFO: each region carries its own entry snapshot.
     let acc ← fresh
-    line s!"{acc} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+    line s!"{acc} = load {← tyOf rc.accTy}, ptr {rc.accPtr}, align 8"
     let newVals := rc.savedTempVals.insert accTemp ⟨acc, rc.accTy⟩
     modify fun s => { s with reduces := s.reduces.pop, tempVals := newVals }
   | "RoutedSumBegin", .array dst =>
@@ -817,9 +998,9 @@ def emitInstr (instr : NInstr) : M Unit := do
       let contribution ← resolveF64 instr.args[emitPos]!
       let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {rc.dstPtr}, i64 {target}"
       let raw ← fresh; line s!"{raw} = load i64, ptr {ep}, align 8"
-      let current ← fresh; line s!"{current} = bitcast i64 {raw} to double"
-      let next ← fresh; line s!"{next} = fadd double {current}, {contribution}"
-      let bits ← fresh; line s!"{bits} = bitcast double {next} to i64"
+      let current ← cellToFloat raw
+      let next ← fresh; line s!"{next} = fadd {← fTy} {current}, {contribution}"
+      let bits ← floatToCell next
       line s!"store i64 {bits}, ptr {ep}, align 8"
       line s!"br label %{contbb}"
       labelLine contbb
@@ -890,18 +1071,21 @@ private def outIndex (outputChannelCount target : Nat) : M String := do
     line s!"{targetIdx} = add i32 {frameBase}, {target}"
     pure targetIdx
 
-/-- Sinks into the output. An `f64` output (every float program) mixes each
-    sink's inputs and applies its gain in binary64. An `i32` output is what an
+/-- Sinks into the output. A float output (`f64`, or `f32` in a binary32
+    artifact) mixes each sink's inputs and applies its gain in the lane's
+    format. An `i32` output is what an
     `int32` program output declares (`slot_types`, `Kernel.outputFormat`):
     each sink is one input at gain 1 (`FlatPlan.portError?`), stored as it is
     from its slot's 32-bit lane, so the word crosses the port with no
     conversion on any target. -/
 def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
     (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
+  let fmt := (← get).float
   let (ty, zero, align) ← match outElem with
-    | .f64 => pure ("double", zeroF, 8)
     | .i32 => pure ("i32", "0", 4)
-    | e => fail s!"EmitLlvm: output element {e.wire} is not supported"
+    | e =>
+      if e == fmt.elem then pure (floatTy fmt, floatLit fmt 0.0, e.bytes)
+      else fail s!"EmitLlvm: output element {e.wire} is not supported in a {fmt.wire} artifact"
   -- A sparse target image is semantically zero in every missing channel.  Do
   -- not rely on a particular host to clear reused wasm/native output storage.
   for target in [0:outputChannelCount] do
@@ -924,12 +1108,12 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
         | none =>
           fail s!"EmitLlvm: an i32 output channel's source was not written as int32 (target {sink.target})"
       | _ => do
-        let mut acc := zeroF
+        let mut acc := zero
         for slotIdx in sink.inputs do
-          let v ← loadSlotF64 slotIdx
-          let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
+          let v ← loadSlotFloat slotIdx
+          let r ← fresh; line s!"{r} = fadd {ty} {acc}, {v}"; acc := r
         let scaled ← fresh
-        line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
+        line s!"{scaled} = fmul {ty} {acc}, {← fLitJson sink.gain}"
         pure scaled
     let outputIdx ← outIndex outputChannelCount sink.target
     let g ← fresh
@@ -952,19 +1136,30 @@ private def validateSinkTargets (sinks : Array SinkSpec)
 -- Module entry point
 -- ─────────────────────────────────────────────────────────────
 
-private def intrinsicDecls : String :=
-  "declare double @llvm.sqrt.f64(double)\n" ++
-  "declare double @llvm.floor.f64(double)\n" ++
-  "declare double @llvm.ceil.f64(double)\n" ++
-  "declare double @llvm.round.f64(double)\n" ++
-  "declare double @llvm.fabs.f64(double)\n" ++
-  "declare i64 @llvm.fptosi.sat.i64.f64(double)\n" ++
-  "declare i32 @llvm.fptosi.sat.i32.f64(double)\n"
+/-- The intrinsics a module may call. A binary32 module declares the `.f32`
+    forms and no rounding intrinsic (`roundingF32` expands them). -/
+private def intrinsicDeclsF : FloatFormat → String
+  | .f64 =>
+    "declare double @llvm.sqrt.f64(double)\n" ++
+    "declare double @llvm.floor.f64(double)\n" ++
+    "declare double @llvm.ceil.f64(double)\n" ++
+    "declare double @llvm.round.f64(double)\n" ++
+    "declare double @llvm.fabs.f64(double)\n" ++
+    "declare i64 @llvm.fptosi.sat.i64.f64(double)\n" ++
+    "declare i32 @llvm.fptosi.sat.i32.f64(double)\n"
+  | .f32 =>
+    "declare float @llvm.sqrt.f32(float)\n" ++
+    "declare float @llvm.fabs.f32(float)\n" ++
+    "declare i64 @llvm.fptosi.sat.i64.f32(float)\n" ++
+    "declare i32 @llvm.fptosi.sat.i32.f32(float)\n"
 
-/-- A counted loop storing zero into `n` i64 cells at `ptr`. Explicit IR
-    rather than `llvm.memset`, so the wasm32 lowering never needs a libc
-    import. -/
-private def zeroCells (ptr : String) (n : Nat) : M Unit := do
+private def intrinsicDecls : String := intrinsicDeclsF .f64
+
+/-- A counted loop storing zero into `n` cells of `cellTy` (`i64` scratch,
+    or the float lane's bits) at `ptr`. Explicit IR rather than
+    `llvm.memset`, so the wasm32 lowering never needs a libc import. -/
+private def zeroCells (ptr : String) (n : Nat) (cellTy : String := "i64")
+    (align : Nat := 8) : M Unit := do
   if n == 0 then return
   let k ← freshId
   let condbb := s!"zero_cond_{k}"; let bodybb := s!"zero_body_{k}"; let endbb := s!"zero_end_{k}"
@@ -977,21 +1172,20 @@ private def zeroCells (ptr : String) (n : Nat) : M Unit := do
   let c ← fresh; line s!"{c} = icmp ult i64 {i}, {n}"
   line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
   labelLine bodybb
-  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr {ptr}, i64 {i}"
-  line s!"store i64 0, ptr {g}, align 8"
+  let g ← fresh; line s!"{g} = getelementptr inbounds {cellTy}, ptr {ptr}, i64 {i}"
+  line s!"store {cellTy} 0, ptr {g}, align {align}"
   line s!"{inext} = add i64 {i}, 1"
   line s!"br label %{condbb}"
   labelLine endbb
 
-private def slotDefaultFloat : Json → Float
-  | .num n => n.toFloat
-  | _ => 0.0
-
 /-- Emit the full LLVM module text for a plan's kernel at the port: the
     port function, the argv thunk, and the intrinsic declarations. The
-    stage-0 split's coefficient plan, when present, becomes the prologue. -/
-def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
-    Except String String := do
+    stage-0 split's coefficient plan, when present, becomes the prologue.
+    `float` is the format of the value lane (see "The value lane's
+    format"); the kernel type the host reads is `Kernel.ofPlan` at the same
+    format. -/
+def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
+    (float : FloatFormat := .f64) : Except String String := do
   let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
@@ -1003,7 +1197,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
   if frames == 0 then throw "EmitLlvm: frames must be positive"
   if frames * outputChannelCount ≥ 2147483648 then
     throw s!"EmitLlvm: {frames} frames × {outputChannelCount} channels overflows the i32 frame index"
-  let outElem := Tropical.Kernel.Elem.ofFormat (Tropical.Kernel.outputFormat plan)
+  let outElem := Tropical.Kernel.Elem.ofFormat (Tropical.Kernel.outputFormat plan) float
+  let fty := floatTy float
+  let falign := (float.elem).bytes
   let paramSlots := Tropical.Kernel.paramSlotIndices plan
   let slotCount := max plan.slotCount 1
   let registerCount := max plan.registerCount 1
@@ -1011,7 +1207,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
   let body : M Unit := do
     -- Internal storage: the module slot vector, the SSA scratch and one
     -- backing store per array slot, all per call.
-    line s!"%slots = alloca double, i64 {slotCount}, align 8"
+    line s!"%slots = alloca {fty}, i64 {slotCount}, align {falign}"
     line s!"%temps = alloca i64, i64 {registerCount}, align 8"
     line s!"%islots = alloca i64, i64 {slotCount}, align 8"
     -- The int32 lane is not zeroed: it is read only after an int32 write to
@@ -1020,7 +1216,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     for i in [0:sizes.size] do
       line s!"%arr{i} = alloca i64, i64 {max (sizes[i]?.getD 0) 1}, align 8"
     zeroCells "%temps" registerCount
-    zeroCells "%slots" slotCount
+    zeroCells "%slots" slotCount (if float == .f64 then "i64" else "i32") falign
     zeroCells "%islots" slotCount
     for i in [0:sizes.size] do
       zeroCells s!"%arr{i}" (sizes[i]?.getD 0)
@@ -1030,8 +1226,8 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     -- a plan from a file could carry one — is seeded as the host used to.
     for i in [0:plan.slotCount] do
       if !(paramSlots.contains i) then
-        let v := slotDefaultFloat (plan.slotDefaults[i]?.getD (Json.num 0))
-        if v != 0.0 then storeSlotF64 i (f64Lit v)
+        if let some (.num n) := plan.slotDefaults[i]? then
+          if n.toFloat != 0.0 then storeSlotFloat i (← fLitJson n)
     -- A param loads at its port's element type: an integer word (`slot_types`)
     -- lands in its slot's integer lane and never passes through f64.
     for j in [0:paramSlots.size] do
@@ -1045,8 +1241,8 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
         line s!"{v} = load i64, ptr %in_{j + 1}, align 8"
         storeSlotTyped slot ⟨v, .int⟩
       | _ =>
-        line s!"{v} = load double, ptr %in_{j + 1}, align 8"
-        storeSlotF64 slot v
+        line s!"{v} = load {fty}, ptr %in_{j + 1}, align {falign}"
+        storeSlotFloat slot v
     -- Stage-0 prologue: the coefficient plan's instructions, once per call.
     -- No frame exists here, so τ is bound to `%tau0` (zero): unreachable
     -- from τ-independent code, defined so a stray read is well-formed.
@@ -1073,7 +1269,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       emitKernelBlock inst
     emitSinks plan.sinks outputChannelCount outElem
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     arraySizes := sizes, arraysInline := true, typedSlots := true }
+                     sampleRateLit := plan.sampleRate,
+                     arraySizes := sizes, arraysInline := true, typedSlots := true,
+                     float }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
@@ -1108,7 +1306,52 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       "  ret void\n" ++
       "}\n\n"
     .ok (globalsText ++ (if globalsText.isEmpty then "" else "\n\n") ++
-      header ++ bodyText ++ tail ++ thunk ++ intrinsicDecls)
+      header ++ bodyText ++ tail ++ thunk ++ intrinsicDeclsF float)
+
+/-- A wasm module's statement of its own float format:
+    `tropical_kernel_float_bits()` returns 64 or 32. `compile-wasm` appends it
+    and the link exports it, because a `.wasm` and its `tropical_kernel_1`
+    manifest come from two separate compiles, each with its own `--float`;
+    the web player refuses a pair that disagrees instead of reading f64
+    cells as f32 ones. Not part of the port (the JIT and object paths never
+    emit it). -/
+def floatFormatMarker (fmt : FloatFormat) : String :=
+  let bits := match fmt with | .f64 => 64 | .f32 => 32
+  s!"define i32 @tropical_kernel_float_bits() nounwind \{\n  ret i32 {bits}\n}\n"
+
+/-- The binary32 rounding sequences exactly as a kernel inlines them
+    (`roundingF32`), in one function a test calls over a buffer:
+    `tropical_rounding_f32(in, floor, ceil, round, n)` writes
+    `floor(in[i])`, `ceil(in[i])` and `round(in[i])` for `i < n` (`n ≥ 1`).
+    `tests/fixtures/rounding_f32.ll` is this text (`tropicaltest`'s
+    `f32-rounding-fixture` gate holds it there), and
+    `engine/tests/test_rounding_f32.cpp` runs it through the JIT on all 2³²
+    binary32 inputs against the C library. -/
+def roundingF32Fixture : Except String String := do
+  let body : M Unit := do
+    line "%xp = getelementptr inbounds float, ptr %in, i64 %i"
+    line "%x = load float, ptr %xp, align 4"
+    for (which, out) in [("floor", "%fl"), ("ceil", "%ce"), ("round", "%ro")] do
+      let r ← roundingF32 which "%x"
+      let p ← fresh
+      line s!"{p} = getelementptr inbounds float, ptr {out}, i64 %i"
+      line s!"store float {r.ref}, ptr {p}, align 4"
+  match body.run { float := .f32 } with
+  | .error e _ => .error e
+  | .ok _ st =>
+    .ok ("; The binary32 floor/ceil/round sequences EmitLlvm inlines in a binary32\n" ++
+      "; kernel (`roundingF32`), generated by `EmitLlvm.roundingF32Fixture`.\n" ++
+      "; Regenerate with `./lean/.lake/build/bin/tropicaltest --float32-only --write`.\n\n" ++
+      "define void @tropical_rounding_f32(ptr noalias nocapture readonly %in, " ++
+      "ptr noalias nocapture %fl, ptr noalias nocapture %ce, ptr noalias nocapture %ro, " ++
+      "i64 %n) nounwind {\n" ++
+      "entry:\n  br label %loop\n\nloop:\n" ++
+      "  %i = phi i64 [ 0, %entry ], [ %i_next, %loop ]\n" ++
+      String.intercalate "\n" st.lines.toList ++ "\n" ++
+      "  %i_next = add i64 %i, 1\n" ++
+      "  %done = icmp eq i64 %i_next, %n\n" ++
+      "  br i1 %done, label %exit, label %loop\n\n" ++
+      "exit:\n  ret void\n}\n\n" ++ intrinsicDeclsF .f32)
 
 /-- The Metal adapter's CPU pre-pass: the coefficient plan over host
     storage, one evaluation per call. -/

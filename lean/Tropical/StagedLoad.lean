@@ -45,10 +45,12 @@ private def publish (rt : Tropical.Ffi.Runtime) (parts : KernelArtifact) : IO Un
   dumpParts parts
   rt.load parts.ir parts.msl parts.stage0Ir parts.manifest
 
-/-- Split + emit + load, JIT-only, for the runtime's own frame count. -/
-def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
+/-- Split + emit + load, JIT-only, for the runtime's own frame count, the
+    value lane at `float` (binary64 unless asked). -/
+def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
+    (float : Tropical.Kernel.FloatFormat := .f64) : IO Unit := do
   let frames := (← rt.bufferLength).toNat
-  match emitJit (← split plan) frames with
+  match emitJit (← split plan) frames float with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
   | .ok parts => publish rt parts
 

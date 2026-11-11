@@ -18,6 +18,8 @@
 #include "runtime/PortFormat.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -502,8 +504,12 @@ struct ParsedKernel1
   // `default` seeds (read as an integer, so an i64 word stays exact).
   std::vector<tropical_port::Format> input_formats;
   std::vector<int64_t> input_default_words;
+  // For an f32 param: the port's `default`, which a binary32 manifest writes
+  // as the binary32 value itself (exact in binary64, so `(float)` of it is
+  // that value, with no second rounding).
+  std::vector<double> input_default_values;
   std::vector<std::string> output_channels;  // one name per channel ("" = silent)
-  tropical_port::Format output_format;       // f64, or i32 with frac_bits
+  tropical_port::Format output_format;       // f64, f32, or i32 with frac_bits
   ParsedPlan7 plan;
 };
 
@@ -548,15 +554,36 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error("NumericProgramParser: kernel frames must be positive");
   result.input_formats.assign(inputs.size(), {});
   result.input_default_words.assign(inputs.size(), 0);
+  result.input_default_values.assign(inputs.size(), 0.0);
   for (std::size_t i = 1; i < inputs.size(); ++i)
   {
     const auto & port = inputs.at(i);
     const std::string elem = port.value("elem", std::string{});
-    if ((elem != "f64" && elem != "i32" && elem != "i64") || !port.contains("shape")
+    if ((elem != "f64" && elem != "f32" && elem != "i32" && elem != "i64")
+        || !port.contains("shape")
         || !port.at("shape").empty() || port.value("role", std::string{}) != "param")
       throw std::runtime_error(
         "NumericProgramParser: kernel input '" + result.input_names[i]
-        + "' is not a scalar f64, i32 or i64 param (this host binds params only)");
+        + "' is not a scalar f64, f32, i32 or i64 param (this host binds params only)");
+    if (elem == "f32" && port.contains("default"))
+    {
+      const auto & d = port.at("default");
+      if (!d.is_number())
+        throw std::runtime_error(
+          "NumericProgramParser: f32 param '" + result.input_names[i]
+          + "' has a non-numeric default");
+      const double v = d.get<double>();
+      // The default is the binary32 value the artifact was compiled with;
+      // one that is not a binary32 would be rounded here, so it is refused.
+      // NaN and anything past the largest finite binary32 are refused
+      // before the cast, which is then always in range.
+      if (std::isnan(v) || std::fabs(v) > static_cast<double>(std::numeric_limits<float>::max())
+          || static_cast<double>(static_cast<float>(v)) != v)
+        throw std::runtime_error(
+          "NumericProgramParser: f32 param '" + result.input_names[i]
+          + "' default " + d.dump() + " is not a binary32 value");
+      result.input_default_values[i] = v;
+    }
     tropical_port::Format f{tropical_port::elem_of_wire(elem),
                             port.value("frac_bits", 0u)};
     if (f.is_word())
@@ -596,11 +623,11 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error("NumericProgramParser: kernel manifest must declare one output");
   const auto & out = outputs.at(0);
   const std::string out_elem = out.value("elem", std::string{});
-  if ((out_elem != "f64" && out_elem != "i32") || !out.contains("shape")
+  if ((out_elem != "f64" && out_elem != "f32" && out_elem != "i32") || !out.contains("shape")
       || out.at("shape").size() != 2
       || out.at("shape").at(0).get<uint32_t>() != result.frames)
     throw std::runtime_error(
-      "NumericProgramParser: kernel output must be f64 or i32 [frames, channels]");
+      "NumericProgramParser: kernel output must be f64, f32 or i32 [frames, channels]");
   result.output_format = {tropical_port::elem_of_wire(out_elem), out.value("frac_bits", 0u)};
   if (result.output_format.frac_bits > tropical_port::word_bits(result.output_format.elem))
     throw std::runtime_error(
@@ -616,6 +643,43 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     for (const auto & name : out.at("channels"))
       result.output_channels.push_back(name.get<std::string>());
   result.output_channels.resize(result.output_channel_count);
+
+  // The format the artifact realizes `float` in (`realization.float`, f64
+  // when absent): any other is refused by name, and so is a float port
+  // declared at a different format, whose cell the kernel would read at
+  // another width.
+  std::string float_format = "f64";
+  if (manifest.contains("realization") && manifest.at("realization").contains("float"))
+  {
+    const auto & f = manifest.at("realization").at("float");
+    if (!f.is_string())
+      throw std::runtime_error("NumericProgramParser: realization.float must be a string");
+    float_format = f.get<std::string>();
+    if (float_format != "f64" && float_format != "f32")
+      throw std::runtime_error(
+        "NumericProgramParser: unknown float format '" + float_format
+        + "'; this host reads f64 and f32 artifacts");
+  }
+  auto check_float_port = [&](const std::string & name, const std::string & elem) {
+    if ((elem == "f64" || elem == "f32") && elem != float_format)
+      throw std::runtime_error(
+        "NumericProgramParser: port '" + name + "' is " + elem
+        + " in an artifact whose float format is " + float_format);
+  };
+  for (std::size_t i = 1; i < inputs.size(); ++i)
+    check_float_port(result.input_names[i], inputs.at(i).value("elem", std::string{}));
+  check_float_port(out.value("name", std::string{"out"}), out_elem);
+  // A binary32 artifact's params are written raw (`Kernel.ofPlan` refuses
+  // anything else at compile time): glide, anchor and velocity re-anchor on
+  // companions that hold sample counts and phases, which binary32 does not
+  // hold exactly. A manifest that pairs the two is refused here, once, at
+  // load; the per-write check in the dispatcher stays.
+  if (float_format == "f32")
+    for (const auto & d : result.plan.param_disciplines)
+      if (d.discipline != "raw")
+        throw std::runtime_error(
+          "NumericProgramParser: param '" + d.name + "' has the '" + d.discipline
+          + "' discipline in a binary32 artifact; a binary32 artifact's params are written raw");
   return result;
 }
 

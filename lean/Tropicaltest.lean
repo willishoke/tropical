@@ -38,6 +38,7 @@ import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
+import Tropical.Tropicaltest.Float32
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -78,6 +79,12 @@ def main (args : List String) : IO UInt32 := do
     let b ← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals
     let c ← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine
     return if a && b && c then 0 else 1
+  if args.contains "--float32-only" then
+    let a ← Tropical.Tropicaltest.Float32.runLiterals
+    let b ← Tropical.Tropicaltest.Float32.runRoundingFixture writeMode
+    let c ← Tropical.Tropicaltest.Float32.runJit
+    let d ← Tropical.Tropicaltest.Float32.runRefusals
+    return if a && b && c && d then 0 else 1
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--emitarrow-only" || args.contains "--arena-native-only" then
@@ -300,6 +307,17 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine) then failed := failed + 1
+
+  -- ── (f⁗′) The binary32 value lane (`--float f32`) ────────────────────────
+  IO.println "binary32 value lane (--float f32):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Float32.runLiterals) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Float32.runRoundingFixture writeMode) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Float32.runJit) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Float32.runRefusals) then failed := failed + 1
 
   -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
   IO.println "device boundary (the safety class):"
