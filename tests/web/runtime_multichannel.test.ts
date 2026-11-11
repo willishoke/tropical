@@ -50,6 +50,8 @@ function fakeKernel(
     layout,
     argv: [layout.tau, ...layout.params, layout.output],
     outputChannelCount,
+    params: [],
+    outScale: null,
     frameIdx: 0,
     fadeAt: 0,
     fadeFrom: 1,
