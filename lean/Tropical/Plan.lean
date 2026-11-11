@@ -1028,6 +1028,14 @@ def FlatPlan.kindError? (p : FlatPlan) : Option String := Id.run do
     | .error e => return some s!"instruction {i}: {e}"
   return none
 
+/-- A JSON number that is an integer, as that integer (`5`, `5.0` and `5e0`
+    alike); `none` for anything else. -/
+def jsonIntWord? : Json → Option Int
+  | .num n =>
+    let den : Int := (10 : Int) ^ n.exponent
+    if n.mantissa % den == 0 then some (n.mantissa / den) else none
+  | _ => none
+
 /-- The kind of the last instruction (in execution order) that writes each
     module slot. -/
 private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarType :=
@@ -1039,8 +1047,9 @@ private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarT
 /-- The plan's port-typing error, if any (`slot_types`, `SlotType`):
 
 * each listed slot exists, is listed once, and has a valid integer format
-  (`PortFormat.error?`); a listed `param:` slot is `int32` or `int`, and a
-  listed output source is `int32`;
+  (`PortFormat.error?`); a listed `param:` slot is `int32` or `int`, with a
+  default (when it has one) that is an integer word within its kind's range,
+  and a listed output source is `int32`;
 * a typed param slot is read only at its own kind and never written by the
   kernel (the host writes it);
 * the output buffer has one element type. If a channel's source is listed,
@@ -1048,7 +1057,8 @@ private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarT
   source at gain 1 (an integer channel has no mix: the f64 sum and gain have
   no integer counterpart this compiler picks for you), and an `int32` value
   reaches an output only through a listed source — the f64 output never
-  converts one implicitly;
+  converts one implicitly; every channel source of an integer output is
+  `int32` (an `int` slot has no output element type);
 * only `raw` applies to an integer param: `glide`, `anchor` and `velocity`
   re-anchor in float arithmetic on f64 companions (`host-param-dispatch.md`),
   so a discipline other than `raw` naming a typed slot, as its base or as a
@@ -1069,6 +1079,18 @@ def FlatPlan.portError? (p : FlatPlan) : Option String := Id.run do
     if name.startsWith "param:" then
       unless t.format.kind == .int32 || t.format.kind == .int do
         return some s!"slot_types: param slot '{name}' is {t.format.kind.wire}; a typed param is int32 or int"
+      -- Its default is the word the host seeds the cell with: an integer
+      -- within the word, never a value to round or wrap.
+      let (lo, hi) := t.format.wordRange
+      match p.slotDefaults[t.slot]? with
+      | none => pure ()
+      | some d =>
+        match jsonIntWord? d with
+        | none =>
+          return some s!"slot_types: param slot '{name}' default {d.compress} is not an integer word"
+        | some w =>
+          unless lo ≤ w && w < hi do
+            return some s!"slot_types: param slot '{name}' default {w} is outside the {t.format.kind.wire} word [{lo}, {hi})"
     else if t.format.kind != .int32 then
       return some s!"slot_types: output slot '{name}' is {t.format.kind.wire}; a typed output is int32"
   let isTypedParam (i : Nat) : Option Tropical.PortFormat :=
@@ -1090,6 +1112,11 @@ def FlatPlan.portError? (p : FlatPlan) : Option String := Id.run do
         return some s!"sink {s.target}: an integer output channel takes one source at gain 1 (it has {s.inputs.size} at gain {s.gain})"
       let some f := p.slotType? s.inputs[0]!
         | return some s!"sink {s.target}: the output is integer, but this channel's source '{p.slotNames[s.inputs[0]!]?.getD ""}' is not; one output buffer has one element type"
+      -- A typed output is an `int32` word (the `i32` output port); an `int`
+      -- slot (a typed param read straight into a channel) has no output
+      -- element type, so it is refused here rather than at an emitter.
+      if f.kind != .int32 then
+        return some s!"sink {s.target}: source '{p.slotNames[s.inputs[0]!]?.getD ""}' is {f.describe}; a typed output is int32"
       match fmt? with
       | none => fmt? := some f
       | some g =>

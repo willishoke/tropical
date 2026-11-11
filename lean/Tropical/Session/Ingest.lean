@@ -159,14 +159,9 @@ private def paramFormatOf (context name : String) (d : JsonV) :
   let f : Tropical.PortFormat := { kind, fracBits }
   if let some e := f.error? then
     internalError s!"{context}: paramDecl '{name}': {e}"
-  if kind.isInteger then
-    if let some (.num n) := d.getField? "value" then
-      let w := Tropical.PortFormat.wordBits kind
-      let scaled := n.toFloat * (2.0 : Float) ^ fracBits.toFloat
-      let lo := -((2.0 : Float) ^ (w - 1).toFloat)
-      let hi := (2.0 : Float) ^ (w - 1).toFloat
-      unless lo ≤ scaled && scaled < hi do
-        internalError s!"{context}: paramDecl '{name}': value {n} is outside the range of {f.describe}"
+  if let some (.num n) := d.getField? "value" then
+    if let some e := f.rangeError? (toString n) n.toFloat then
+      internalError s!"{context}: paramDecl '{name}': {e}"
   pure f
 
 /-- Walk a normalized v2 node into the session (additive; `loadPatch`

@@ -460,8 +460,10 @@ def objectNumerics : Lean.Json := Lean.Json.mkObj [
   ("denormals", "ieee")]
 
 /-- One port's buffer, as a C caller lays it out: element, number format
-    (the program's, `Tropical.PortFormat`), bytes per element (= alignment),
-    and for an integer param the word its default encodes to. -/
+    (the program's, `Tropical.PortFormat`; `frac_bits` for an integer port),
+    shape, and bytes per element (= alignment). A param's default word is not
+    here: it is that input's `default` in the manifest's `inputs` (the kernel
+    type this `object` block is attached to). -/
 def objectPortLayout (p : Tropical.Kernel.Port) : Lean.Json :=
   let bytes : Nat := match p.elem with
     | .f64 | .i64 | .i64q16 => 8

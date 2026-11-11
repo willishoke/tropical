@@ -104,8 +104,15 @@ Decl node shapes:
 - paramDecl:    { op, name, value?, type?, frac_bits? }
                 type is "float" (default), "int32" or "int"; an integer param
                 is a fixed-point word with frac_bits fraction bits (value is
-                the real value, e.g. type "int32", frac_bits 16 is Q16.16)
+                the real value, e.g. type "int32", frac_bits 16 is Q16.16);
+                value and set_param values outside the format's range
+                (Q16.16: [-32768, 32768)) are refused
 - instanceDecl: { op, name, program, inputs? }
+                a bare literal in inputs, wired into a port with frac_bits,
+                is its real value, as a paramDecl value is: {"freq": 440}
+                into SinOscQ15's Q16.16 freq is 440 Hz. It must be exact in
+                the format and in range, or the compile refuses it; a
+                literal inside arithmetic stays a raw word.
 
 Assign node shapes:
 - outputAssign: { op, name, expr }

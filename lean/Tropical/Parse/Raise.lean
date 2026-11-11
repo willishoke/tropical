@@ -121,6 +121,14 @@ def port (path : String) (v : JsonV) (allowDefault : Bool) : Except String JsonV
     match v.getField? "type" with
     | none => pure ()
     | some t => fields := fields.push ("type", ← portType (sub path "type") t)
+    -- An integer port's fixed-point format (`export_program` writes it).
+    match v.getField? "frac_bits" with
+    | none => pure ()
+    | some (.num n) =>
+      if !isInt n || n.toFloat < 0 then
+        zerr (sub path "frac_bits") "Expected a non-negative integer"
+      fields := fields.push ("frac_bits", .num n)
+    | some other => zerr (sub path "frac_bits") s!"Expected number, received {received other}"
     if allowDefault then
       match v.getField? "default" with
       | none => pure ()

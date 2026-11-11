@@ -68,6 +68,59 @@ def describe (f : PortFormat) : String :=
   | .int32 | .int => s!"{f.kind.wire} {f.label}"
   | k => k.wire
 
+/-- The words of an integer format: `[-2^(w-1), 2^(w-1))`. -/
+def wordRange (f : PortFormat) : Int × Int :=
+  let w := wordBits f.kind
+  if w == 0 then (0, 0) else (-((2 : Int) ^ (w - 1)), (2 : Int) ^ (w - 1))
+
+/-- `2^k` as an exact decimal (`2^-1` is `0.5`, `2^-16` is
+    `0.0000152587890625`): the ends of a fixed-point range, printed exactly. -/
+private def pow2Decimal (k : Int) : String :=
+  if k ≥ 0 then toString ((2 : Nat) ^ k.toNat)
+  else
+    let e := (-k).toNat
+    let digits := toString ((5 : Nat) ^ e)
+    let padded := "".pushn '0' (e - digits.length) ++ digits
+    "0." ++ padded
+
+/-- The real values an integer format holds, `[-2^(w-1-n), 2^(w-1-n))`, as a
+    label: `[-32768, 32768)` for `Q16.16`, `[-0.5, 0.5)` for `Q0.32`. -/
+def rangeLabel (f : PortFormat) : String :=
+  let w := wordBits f.kind
+  if w == 0 then "" else
+    let k : Int := (w : Int) - 1 - f.fracBits
+    s!"[-{pow2Decimal k}, {pow2Decimal k})"
+
+/-- Why real value `x` (shown as `shown`) does not fit an integer format, if
+    it does not: its word `x · 2^fracBits` must lie in the word's range (it is
+    then truncated toward zero, `Kernel.encodeWord`). A value past the range
+    would saturate, so it is refused instead, at ingest (`paramDecl.value`)
+    and at `set_param` alike. `none` for `float`. -/
+def rangeError? (f : PortFormat) (shown : String) (x : Float) : Option String :=
+  if !f.kind.isInteger then none else
+    let w := wordBits f.kind
+    let scaled := x * (2.0 : Float) ^ f.fracBits.toFloat
+    let lo := -((2.0 : Float) ^ (w - 1).toFloat)
+    let hi := (2.0 : Float) ^ (w - 1).toFloat
+    if lo ≤ scaled && scaled < hi then none
+    else some s!"value {shown} is outside the range of {f.describe}, {f.rangeLabel}"
+
+/-- The word a bare literal stands for at an integer port of format `f`: the
+    literal is the real value, exactly as `paramDecl.value` is, so `440` at a
+    Q16.16 port is the word `440 · 2^16`. Exact decimal arithmetic: a literal
+    whose word is not an integer, or lies outside the word's range, is
+    refused. -/
+def encodeLiteral? (f : PortFormat) (n : Lean.JsonNumber) : Except String Int := do
+  let num : Int := n.mantissa * (2 : Int) ^ f.fracBits
+  let den : Int := (10 : Int) ^ n.exponent
+  if num % den != 0 then
+    throw s!"literal {n} is not exactly representable in {f.describe} (steps of 2^-{f.fracBits})"
+  let w := num / den
+  let (lo, hi) := f.wordRange
+  unless lo ≤ w && w < hi do
+    throw s!"literal {n} is outside the range of {f.describe}, {f.rangeLabel}"
+  return w
+
 /-- The format a `type_obj`/declaration JSON object carries: `scalar` (the
     kind, default `float`) and `frac_bits` (default 0). -/
 def ofJson? (j : Json) : Except String PortFormat := do

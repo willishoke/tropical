@@ -171,6 +171,27 @@ decreasing_by
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
     | (simp; omega)
 
+/-- A bare literal crossing into a fixed-point input is the REAL value, as a
+    `paramDecl.value` is: `440` into an `int32` Q16.16 input is 440, the word
+    `440 · 2^16` (`PortFormat.encodeLiteral?`). The rule is the bare-crossing
+    rule of the format check (`checkWireFormats`): it applies to a wire that is
+    exactly a literal; a literal inside arithmetic stays a word, like every
+    other value the IR computes with. A literal whose word is not an integer,
+    or lies outside the format, is refused. An input with no fraction bits
+    keeps its literal as written (the word is the value), and float inputs
+    are untouched. -/
+def bareLiteralAtPort (what : String) (decl : Tropical.Ir.InputDecl)
+    (expr : Tropical.WireExpr) : Except String Tropical.WireExpr :=
+  match expr, decl.type? with
+  | .num n, some (.scalar k) =>
+    if k.isInteger && decl.fracBits != 0 then
+      let f : Tropical.PortFormat := { kind := k, fracBits := decl.fracBits }
+      match f.encodeLiteral? n with
+      | .ok w => .ok (.num ⟨w, 0⟩)
+      | .error e => .error s!"input {what}: {e}"
+    else .ok expr
+  | _, _ => .ok expr
+
 /-- Build the resolved session root `Program` directly from the graph (instances
     already carry resolved type snapshots via `resolverTbl`), deleting the
     `sessionToParsed → reparse → elaborate` round-trip. Byte-identical to the
@@ -227,7 +248,8 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
     for w in wires do
       let some pos := tgt.inputs.findIdx? (·.name == w.portName)
         | .error s!"sessionToResolvedRoot: '{name}' ({tgt.name}) has no input '{w.portName}'"
-      let (value, exprs') ← (wireExprToResolved ctx w.expr).run exprs
+      let wexpr ← bareLiteralAtPort s!"'{name}.{w.portName}'" tgt.inputs[pos]! w.expr
+      let (value, exprs') ← (wireExprToResolved ctx wexpr).run exprs
       exprs := exprs'
       inputs := inputs.push { port := ⟨pos⟩, value }
     decls := decls.push (.inst name tgt.name inputs)

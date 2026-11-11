@@ -76,7 +76,8 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--ports-only" then
     let a ← Tropical.Tropicaltest.TypedPorts.runTypedPortsJit
     let b ← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals
-    return if a && b then 0 else 1
+    let c ← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine
+    return if a && b && c then 0 else 1
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--emitarrow-only" || args.contains "--arena-native-only" then
@@ -297,6 +298,8 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsJit) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine) then failed := failed + 1
 
   -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
   IO.println "device boundary (the safety class):"
