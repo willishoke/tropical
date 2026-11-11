@@ -15,6 +15,7 @@
 
 #include "jit/OrcJitEngine.hpp"
 #include "runtime/ClockFormat.hpp"
+#include "runtime/PortFormat.hpp"
 
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -496,7 +497,13 @@ struct ParsedKernel1
   double rate = 44100.0;
   uint32_t output_channel_count = 1;
   std::vector<std::string> input_names;      // [0] = "tau"
+  // Per input, in port order ([0] is tau's placeholder): the param's element
+  // type and fixed-point format, and for an integer param the word its
+  // `default` seeds (read as an integer, so an i64 word stays exact).
+  std::vector<tropical_port::Format> input_formats;
+  std::vector<int64_t> input_default_words;
   std::vector<std::string> output_channels;  // one name per channel ("" = silent)
+  tropical_port::Format output_format;       // f64, or i32 with frac_bits
   ParsedPlan7 plan;
 };
 
@@ -539,25 +546,52 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
   result.frames = tau.at("shape").at(0).get<uint32_t>();
   if (result.frames == 0)
     throw std::runtime_error("NumericProgramParser: kernel frames must be positive");
+  result.input_formats.assign(inputs.size(), {});
+  result.input_default_words.assign(inputs.size(), 0);
   for (std::size_t i = 1; i < inputs.size(); ++i)
   {
     const auto & port = inputs.at(i);
-    if (port.value("elem", std::string{}) != "f64" || !port.contains("shape")
+    const std::string elem = port.value("elem", std::string{});
+    if ((elem != "f64" && elem != "i32" && elem != "i64") || !port.contains("shape")
         || !port.at("shape").empty() || port.value("role", std::string{}) != "param")
       throw std::runtime_error(
         "NumericProgramParser: kernel input '" + result.input_names[i]
-        + "' is not a scalar f64 param (this host binds params only)");
+        + "' is not a scalar f64, i32 or i64 param (this host binds params only)");
+    tropical_port::Format f{tropical_port::elem_of_wire(elem),
+                            port.value("frac_bits", 0u)};
+    if (f.is_word())
+    {
+      if (f.frac_bits > tropical_port::word_bits(f.elem))
+        throw std::runtime_error(
+          "NumericProgramParser: kernel input '" + result.input_names[i]
+          + "' has more fraction bits than its word");
+      if (port.contains("default"))
+      {
+        const auto & d = port.at("default");
+        if (!d.is_number_integer())
+          throw std::runtime_error(
+            "NumericProgramParser: integer param '" + result.input_names[i]
+            + "' has a non-integer default word");
+        result.input_default_words[i] = d.get<int64_t>();
+      }
+    }
+    result.input_formats[i] = f;
   }
 
   const auto & outputs = manifest.at("outputs");
   if (!outputs.is_array() || outputs.size() != 1)
     throw std::runtime_error("NumericProgramParser: kernel manifest must declare one output");
   const auto & out = outputs.at(0);
-  if (out.value("elem", std::string{}) != "f64" || !out.contains("shape")
+  const std::string out_elem = out.value("elem", std::string{});
+  if ((out_elem != "f64" && out_elem != "i32") || !out.contains("shape")
       || out.at("shape").size() != 2
       || out.at("shape").at(0).get<uint32_t>() != result.frames)
     throw std::runtime_error(
-      "NumericProgramParser: kernel output must be f64[frames, channels]");
+      "NumericProgramParser: kernel output must be f64 or i32 [frames, channels]");
+  result.output_format = {tropical_port::elem_of_wire(out_elem), out.value("frac_bits", 0u)};
+  if (result.output_format.frac_bits > tropical_port::word_bits(result.output_format.elem))
+    throw std::runtime_error(
+      "NumericProgramParser: kernel output has more fraction bits than its word");
   result.output_channel_count = out.at("shape").at(1).get<uint32_t>();
   if (result.output_channel_count == 0
       || result.output_channel_count > tropical_jit::kMaxOutputChannels)

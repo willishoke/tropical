@@ -85,8 +85,10 @@ make_observation_program_image(
   image->kernel = state.kernel;
   image->frames = state.frames;
   image->output_channel_count = state.output_channel_count;
+  image->output_format = state.output_format;
   image->input_slots = state.input_slots;
   image->slot_names = state.slot_names;
+  image->slot_formats = state.slot_formats;
   image->initial_slots = state.slots;
   image->slot_lookup.reserve(image->slot_names.size());
   for (uint32_t i = 0; i < image->slot_names.size(); ++i)
@@ -112,8 +114,18 @@ make_observation_control_image(
        i < audio_state.slot_names.size() && i < audio_state.slots.size(); ++i)
   {
     const auto found = program.slot_lookup.find(audio_state.slot_names[i]);
+    // A typed param's cell is its word's bits: carry it only into a slot of
+    // the same format.
+    const tropical_port::Format audio_format =
+      i < audio_state.slot_formats.size() ? audio_state.slot_formats[i]
+                                          : tropical_port::Format{};
+    const tropical_port::Format program_format =
+      found != program.slot_lookup.end() && found->second < program.slot_formats.size()
+        ? program.slot_formats[found->second] : tropical_port::Format{};
     if (found != program.slot_lookup.end()
-        && found->second < image->slots.size())
+        && found->second < image->slots.size()
+        && audio_format.elem == program_format.elem
+        && audio_format.frac_bits == program_format.frac_bits)
       image->slots[found->second] = audio_state.slots[i];
   }
   return image;
@@ -365,15 +377,19 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
   // Slot array
   new_state.slots.assign(parsed.slot_count, 0.0);
   new_state.slot_names = parsed.slot_names;
+  new_state.slot_formats.assign(parsed.slot_count, {});
   for (std::size_t i = 0;
        i < parsed.slot_defaults.size() && i < new_state.slots.size();
        ++i)
   {
     new_state.slots[i] = parsed.slot_defaults[i];
   }
-  for (auto & generation : new_state.slot_generations)
-    generation = new_state.slots;
-  new_state.audio_slots = new_state.slots;
+
+  // The output port: an i32 word output renders into its own buffer.
+  new_state.output_format = kernel.output_format;
+  if (kernel.output_format.is_word())
+    new_state.out_words.assign(
+      static_cast<std::size_t>(kernel.frames) * kernel.output_channel_count, 0);
 
   // The param inputs, in port order, resolved to their slots by name. The
   // manifest's inputs after tau ARE the `param:` slots in slot order, but
@@ -387,9 +403,19 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
       throw std::runtime_error(
         "FlatRuntime: kernel input '" + kernel.input_names[j]
         + "' names no slot of the nested plan");
-    new_state.input_slots.push_back(
-      static_cast<uint32_t>(it - new_state.slot_names.begin()));
+    const uint32_t slot = static_cast<uint32_t>(it - new_state.slot_names.begin());
+    new_state.input_slots.push_back(slot);
+    // A typed param: its cell holds the word (the manifest's integer default).
+    const tropical_port::Format f = kernel.input_formats[j];
+    if (f.is_word())
+    {
+      new_state.slot_formats[slot] = f;
+      new_state.slots[slot] = tropical_port::cell_of_word(kernel.input_default_words[j]);
+    }
   }
+  for (auto & generation : new_state.slot_generations)
+    generation = new_state.slots;
+  new_state.audio_slots = new_state.slots;
 
   // Host-contract dispatch table — swaps with the plan it describes, like
   // slot_names. Field-copied because the runtime keeps its own struct (the
@@ -1074,6 +1100,17 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   };
   const double now = static_cast<double>(sample_index);
 
+  // An integer param is written raw: every other discipline re-anchors in
+  // float arithmetic on f64 companions, and the compiler refuses to attach
+  // one to a typed port (`FlatPlan.portError?`). Refuse here too.
+  if (discipline != "raw")
+  {
+    const uint32_t bi = slot_of("param:" + name);
+    if (bi != UINT32_MAX && state.slot_word_format(bi))
+      return fail("set_param: '" + name + "' is an integer param; discipline '"
+        + discipline + "' is not defined on it");
+  }
+
   if (discipline == "glide")
   {
     const uint32_t v0i = slot_of("param:" + name + "#v0");
@@ -1148,7 +1185,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   const uint32_t bi = slot_of("param:" + name);
   if (bi == UINT32_MAX)
     return unknown();
-  write(bi, value);
+  write(bi, state.control_cell(bi, value));
   return commit();
 }
 

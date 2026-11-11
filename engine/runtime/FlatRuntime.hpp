@@ -11,6 +11,7 @@
  */
 
 #include "ClockFormat.hpp"
+#include "PortFormat.hpp"
 #include "ControlParam.hpp"
 #include "jit/OrcJitEngine.hpp"
 
@@ -142,8 +143,10 @@ struct ObservationProgramImage
   tropical_jit::KernelArgvFn kernel = nullptr;
   uint32_t frames = 0;
   uint32_t output_channel_count = 1;
+  tropical_port::Format output_format;      // f64, or an i32 word to widen
   std::vector<uint32_t> input_slots;        // param input j → slot index
   std::vector<std::string> slot_names;
+  std::vector<tropical_port::Format> slot_formats;
   std::vector<double> initial_slots;
   std::unordered_map<std::string, uint32_t> slot_lookup;
   std::vector<std::string> channel_names;
@@ -173,6 +176,7 @@ struct ObservationRenderWorkspace
   std::vector<int64_t> tau;
   std::vector<double> slots;
   std::vector<double> out;
+  std::vector<int32_t> out_words;
   std::vector<void *> argv;
 };
 
@@ -218,6 +222,13 @@ struct KernelState
   tropical_jit::Stage0Fn             stage0 = nullptr;
   uint32_t                           output_channel_count = 1;
 
+  // The output port's element type. An `i32` output (an `int32` program
+  // output, `frac_bits` from the program) is rendered into `out_words` and
+  // widened into the f64 output buffer as `word * 2^-frac_bits`, the real
+  // value it means. Sized at load, so the audio path never allocates.
+  tropical_port::Format              output_format;
+  std::vector<int32_t>               out_words;
+
   // The coefficient-column slots (indices into array_storage/array_ptrs), the
   // three storage generations ([gen][j] backs slot coeff_array_slots[j]), the
   // coefficient kernel's own pointer view (column entries repointed at the
@@ -254,6 +265,25 @@ struct KernelState
   // current parameter values.
   std::vector<double>      slots;
   std::vector<std::string> slot_names;
+  // Per slot: f64, or the integer word format of a typed param, whose cell
+  // holds the word's bits (`PortFormat.hpp`). Writes encode the control
+  // value; the kernel reads the word straight from the cell.
+  std::vector<tropical_port::Format> slot_formats;
+
+  const tropical_port::Format * slot_word_format(uint32_t i) const
+  {
+    return i < slot_formats.size() && slot_formats[i].is_word()
+      ? &slot_formats[i] : nullptr;
+  }
+
+  // The cell a control write of `value` stores in slot `i`: the value itself,
+  // or for a typed param the bits of its word (`encode_word`).
+  double control_cell(uint32_t i, double value) const
+  {
+    if (const tropical_port::Format * f = slot_word_format(i))
+      return tropical_port::cell_of_word(tropical_port::encode_word(*f, value));
+    return value;
+  }
 
   // Host-contract dispatch table: which write discipline each base param
   // carries. Lives here so a hot-swap replaces it together with the plan
@@ -565,8 +595,14 @@ public:
     state.argv[0] = state.tau.data();
     for (std::size_t j = 0; j < state.input_slots.size(); ++j)
       state.argv[1 + j] = &state.audio_slots[state.input_slots[j]];
-    state.argv.back() = rendered_output;
+    const bool word_output = state.output_format.is_word();
+    state.argv.back() = word_output
+      ? static_cast<void *>(state.out_words.data()) : rendered_output;
     state.kernel(state.argv.data());
+    if (word_output)
+      for (std::size_t k = 0; k < state.out_words.size(); ++k)
+        rendered_output[k] =
+          tropical_port::word_value(state.output_format, state.out_words[k]);
 
     audio_sample_index_ += buffer_length_;
     audio_device_frame_ += buffer_length_;
@@ -685,7 +721,7 @@ public:
     if (idx < state.slots.size())
     {
       const std::vector<double> previous = state.slots;
-      state.slots[idx] = value;
+      state.slots[idx] = state.control_cell(idx, value);
 #ifdef TROPICAL_METAL
       if (state.metal)
       {
@@ -706,6 +742,8 @@ public:
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     const KernelState & state = states_[state_idx];
     if (idx >= state.slots.size()) return 0.0;
+    if (const tropical_port::Format * f = state.slot_word_format(idx))
+      return tropical_port::word_value(*f, tropical_port::word_of_cell(state.slots[idx]));
     return state.slots[idx];
   }
 
@@ -728,7 +766,7 @@ public:
       if (state.slot_names[i] == name)
       {
         const std::vector<double> previous = state.slots;
-        state.slots[i] = value;
+        state.slots[i] = state.control_cell(i, value);
 #ifdef TROPICAL_METAL
         if (state.metal)
         {
@@ -863,6 +901,8 @@ public:
     {
       workspace.tau.assign(N, 0);
       workspace.out.assign(static_cast<std::size_t>(N) * C, 0.0);
+      workspace.out_words.assign(
+        program.output_format.is_word() ? static_cast<std::size_t>(N) * C : 0, 0);
       workspace.argv.assign(program.input_slots.size() + 2, nullptr);
       workspace.program_version = program.program_version;
     }
@@ -872,7 +912,10 @@ public:
     workspace.argv[0] = workspace.tau.data();
     for (std::size_t j = 0; j < program.input_slots.size(); ++j)
       workspace.argv[1 + j] = &workspace.slots[program.input_slots[j]];
-    workspace.argv.back() = workspace.out.data();
+    const bool word_output = program.output_format.is_word();
+    workspace.argv.back() = word_output
+      ? static_cast<void *>(workspace.out_words.data())
+      : static_cast<void *>(workspace.out.data());
 
     // The kernel's shape is static: `count` coordinates render in chunks of
     // N calls, each over its own tau image (coordinates past `count` in the
@@ -883,6 +926,10 @@ public:
       for (uint32_t i = 0; i < N; ++i)
         workspace.tau[i] = tau_of(chunk + i);
       program.kernel(workspace.argv.data());
+      if (word_output)
+        for (std::size_t k = 0; k < workspace.out_words.size(); ++k)
+          workspace.out[k] =
+            tropical_port::word_value(program.output_format, workspace.out_words[k]);
       const uint32_t produced = std::min<uint32_t>(N, count - chunk);
       for (uint32_t k = 0; k < n_channels; ++k)
         for (uint32_t i = 0; i < produced; ++i)
