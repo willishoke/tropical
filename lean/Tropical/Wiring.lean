@@ -25,21 +25,15 @@ open Tropical.Expr (getField? getStrField?)
 abbrev ScalarKind := Tropical.Parse.ScalarKind
 
 /-- The widening order a connection may cross implicitly: bool → int → float,
-    and bool → int32. `int32` widens to nothing: the patch bay never turns it
-    into an `int` or a `float` silently (a 64-bit or soft-float conversion the
-    wire does not show), so such a wire spells the cast (`toInt`, `toFloat`). -/
-def widens (src dst : ScalarKind) : Bool :=
-  src == dst ||
-    match src, dst with
-    | .bool, _ => true
-    | .int, .float => true
-    | _, _ => false
+    and bool → int32 (`ScalarKind.widensTo`, the one relation the compiler
+    also enforces at instance inputs and output ports). `int32` widens to
+    nothing: the patch bay never turns it into an `int` or a `float` silently
+    (a 64-bit or soft-float conversion the wire does not show), so such a wire
+    spells the cast (`toInt`, `toFloat`). -/
+def widens (src dst : ScalarKind) : Bool := src.widensTo dst
 
-def narrowingHint : ScalarKind → String
-  | .int   => "to_int()"
-  | .int32 => "toInt32()"
-  | .bool  => "to_bool()"
-  | .float => "to_float()"
+/-- The wire-expression cast into `dst` (the `tropical_program_2` op name). -/
+def narrowingHint (dst : ScalarKind) : String := s!"{dst.castName}()"
 
 /-- An array element: display name plus the underlying scalar kind
     (aliases carry their base). -/

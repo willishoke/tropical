@@ -255,7 +255,7 @@ private def resolveNumericLiteralType (n : JsonNumber) (expected : Option Scalar
   match expected with
   | some .int =>
     unless jsIsInteger n do
-      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to int. Wrap the source in to_int() to narrow explicitly."
+      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to int. Wrap the source in toInt to narrow explicitly."
     pure .int
   | some .int32 =>
     -- An int32 literal is a value of ℤ/2³² written in its signed range; a
@@ -268,7 +268,7 @@ private def resolveNumericLiteralType (n : JsonNumber) (expected : Option Scalar
     pure .int32
   | some .bool =>
     unless jsIsZeroOrOne n do
-      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to bool. Wrap the source in to_bool() to narrow explicitly."
+      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to bool. Wrap the source in toBool to narrow explicitly."
     pure .bool
   | _ => pure .float
 
@@ -337,13 +337,27 @@ private def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
     pure (.scalar (.reg dst rt) rt)
   | r => pure r
 
-/-- Is `id` a bare numeric literal? Such a literal takes its sort from its
-    context, so next to an `int32` operand it is an `int32` constant (the
-    rule `compileBinary`/`compileTernary` apply after the operands compile). -/
-private def isNumLit (arena : ExprArena) (id : ExprId) : Bool :=
-  match arena.deref id with
-  | some (.num _) => true
-  | _ => false
+/-- Is `id` a literal-only subtree — numeric literals under the integer
+    arithmetic ops (`neg`, `abs`, `bitNot`, `add`, `sub`, `mul`, `div`,
+    `mod`, `floorDiv`, the bitwise ops and shifts)? Such a subtree takes its
+    sort from its context, so next to an `int32` operand it is an `int32`
+    computation on `int32` constants (the rule `compileBinary`/
+    `compileTernary` apply after the operands compile), on either side.
+    `fuel` bounds the walk; a deeper literal tree is simply not adopted. -/
+private def isLitOnly (arena : ExprArena) (id : ExprId) : Nat → Bool
+  | 0 => false
+  | fuel + 1 =>
+    match arena.deref id with
+    | some (.num _) => true
+    | some (.unary tag a) =>
+      (tag == .neg || tag == .abs || tag == .bitNot) && isLitOnly arena a fuel
+    | some (.binary tag a b) =>
+      [BinaryOpTag.add, .sub, .mul, .div, .mod, .floorDiv,
+        .bitAnd, .bitOr, .bitXor, .lshift, .rshift].contains tag
+        && isLitOnly arena a fuel && isLitOnly arena b fuel
+    | _ => false
+
+private def isNumLit (arena : ExprArena) (id : ExprId) : Bool := isLitOnly arena id 12
 
 private def isInt32Scalar (r : CompileResult) : Bool :=
   !r.isArray && r.scalarType == .int32
@@ -490,7 +504,8 @@ private def compileBinary (arena : ExprArena) (hw : arena.wf = true) (bound : Na
     else if isInt32Scalar l then some .int32
     else argExpected
   let r ← compileNode arena hw rhs secondExpected
-  -- A literal on the left of an int32 operand is an int32 constant too.
+  -- A literal-only subtree on the left of an int32 operand is int32 too (on
+  -- the right, `secondExpected` already made it so).
   let l ← if isInt32Scalar r && !isInt32Scalar l && isNumLit arena lhs then
       compileNode arena hw lhs (some .int32)
     else pure l
@@ -821,11 +836,23 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
   | .inst _ _ i => i
   | _ => #[]
 
+/-- A value of kind `src` reaching a port declared `dst` must cross by
+    widening only (`ScalarKind.widensTo`: bool → int → float, bool → int32).
+    Anything else — every crossing into or out of `int32`, and a narrowing —
+    is a compile error naming the cast that spells it. -/
+private def checkPortCrossing (what : String) (src dst : ScalarType) : EmitM Unit := do
+  unless src.widensTo dst do
+    if src == .int32 || dst == .int32 then
+      throw s!"emit_resolved: Kind mismatch: {what} is {dst.wire} but its value is {src.wire}; int32 converts only explicitly — wrap the value in {dst.castName}"
+    else
+      throw s!"emit_resolved: Lossy conversion: {what} is {dst.wire} but its value is {src.wire} — wrap the value in {dst.castName} to narrow explicitly"
+
 def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
     (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
     (nested : NestedContext)
-    (staging : StagingInfo := {}) : EmitM FlatProgram := do
+    (staging : StagingInfo := {})
+    (outputPortTypes : Array ScalarType := #[]) : EmitM FlatProgram := do
   let mut outputTargets : Array Nat := #[]
 
   -- ── Fractal: per-child pre-input blocks ──
@@ -857,6 +884,9 @@ def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
       | some slot =>
         let portT := inputDeclScalarType portDecl.type?
         let r ← compileNode arena hw wireExpr (some portT)
+        unless r.isArray do
+          checkPortCrossing s!"input '{portDecl.name}' of instance '{instName decl}'"
+            r.scalarType portT
         withStage wireStage do
           let valOp ← match r with
             | .array op _ rt =>
@@ -896,7 +926,16 @@ def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
   for portI in [0:outputExprs.size] do
     let expr := outputExprs[portI]!
     let declaredCount := outputPortScalarCounts[portI]!
-    let r ← compileNode arena hw expr (some .float)
+    -- An output reaches its declared kind by widening only; the target
+    -- register then holds exactly that kind (the session labels it so,
+    -- `Compile.lean`). It compiles under a `float` expectation as it always
+    -- has (an `int` expression's instructions do not depend on it), except an
+    -- `int32` output. A literal-only expression takes the declared kind.
+    let declT := outputPortTypes[portI]?.getD .float
+    let r ← compileNode arena hw expr (some (if declT == .int32 then .int32 else .float))
+    let r ← if !r.isArray && !(r.scalarType.widensTo declT) && isNumLit arena expr then
+        compileNode arena hw expr (some declT)
+      else pure r
     let outStage := some (Staging.stageOf arena (← get).stageCtx expr)
     modify fun s => { s with curStage := outStage }
     if declaredCount == 1 then
@@ -905,7 +944,10 @@ def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
       | .array op _ rt =>
         emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
       | .scalar op rt =>
-        emit (Tropical.Plan.instrScalar "Add" dst #[op, .const (0 : Nat) rt] rt)
+        checkPortCrossing s!"output port {portI}" rt declT
+        -- `rt` widens to `declT`, so `Add(op, 0 : declT)` infers `declT`;
+        -- when they agree this is the plain identity copy it always was.
+        emit (Tropical.Plan.instrScalar "Add" dst #[op, .const (0 : Nat) declT] declT)
       outputTargets := outputTargets.push dst
     else
       match r with
@@ -941,7 +983,8 @@ def emitResolvedProgram
     (slots : EmitSlots)
     (arena : ExprArena)
     (nested : NestedContext)
-    (staging : StagingInfo := {}) : Except String FlatProgram := do
+    (staging : StagingInfo := {})
+    (outputPortTypes : Array ScalarType := #[]) : Except String FlatProgram := do
   -- Port-default fallback (an unwired child port with no declared default):
   -- one shared `0` id, interned BEFORE the walk begins — the only node emit
   -- ever synthesizes, so the arena the traversal sees is immutable.
@@ -950,7 +993,8 @@ def emitResolvedProgram
   -- built through `intern` is child-descending by construction).
   if hw : arena.wf then
     let st : EmitSt := { slots, inputPortTypes }
-    let (prog, _) ← (emitProgram arena hw zeroId outputExprs outputPortScalarCounts nested staging).run st
+    let (prog, _) ← (emitProgram arena hw zeroId outputExprs outputPortScalarCounts nested staging
+      outputPortTypes).run st
     return prog
   else
     throw "emit_resolved: arena is not child-descending (internal interning-order bug)"

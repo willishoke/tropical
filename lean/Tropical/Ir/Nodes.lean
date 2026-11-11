@@ -124,7 +124,8 @@ inductive UnaryOpTag where
   | neg | not | bitNot
   | sqrt | abs | floor | ceil | round
   | floatExponent | toInt | toBool | toFloat
-  /-- To `int32`: the low 32 bits of an `int`, `float` truncated toward zero. -/
+  /-- To `int32`: the low 32 bits of an `int`; a `float` truncated toward
+      zero and saturated to the word (NaN → 0). -/
   | toInt32
 deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 

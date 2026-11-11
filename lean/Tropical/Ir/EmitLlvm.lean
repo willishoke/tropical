@@ -197,12 +197,20 @@ def fail {α} (msg : String) : M α := throw msg
 -- Coercion (mirrors EmitCtx::coerce_val)
 -- ─────────────────────────────────────────────────────────────
 
+/-- The saturating float → integer conversion of the total integer
+    semantics (`ConstFold.truncSatToInt`): truncate toward zero, clamp to the
+    word, NaN → 0. Plain `fptosi` is poison outside the word's range; the
+    `.sat` intrinsic is defined everywhere (wasm `trunc_sat`, AArch64
+    `fcvtzs`). `ity` is `i64` or `i32`. -/
+def fptosiSatLine (r v ity : String) : String :=
+  s!"{r} = call {ity} @llvm.fptosi.sat.{ity}.f64(double {v})"
+
 def coerce (v : TVal) (to : ScalarType) : M TVal := do
   if v.ty == to then pure v else
   let r ← fresh
   match v.ty, to with
-  | .float, .int  => line s!"{r} = fptosi double {v.ref} to i64"; pure ⟨r, .int⟩
-  | .float, .int32 => line s!"{r} = fptosi double {v.ref} to i32"; pure ⟨r, .int32⟩
+  | .float, .int  => line (fptosiSatLine r v.ref "i64"); pure ⟨r, .int⟩
+  | .float, .int32 => line (fptosiSatLine r v.ref "i32"); pure ⟨r, .int32⟩
   | .float, .bool => line s!"{r} = fcmp une double {v.ref}, 0x0000000000000000"; pure ⟨r, .bool⟩
   | .int,   .float => line s!"{r} = sitofp i64 {v.ref} to double"; pure ⟨r, .float⟩
   | .int,   .int32 => line s!"{r} = trunc i64 {v.ref} to i32"; pure ⟨r, .int32⟩
@@ -362,8 +370,8 @@ def resolveOperand : NOperand → M TVal
     let v ← loadSlotF64 idx
     match t with
     | .float => pure ⟨v, .float⟩
-    | .int  => let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
-    | .int32 => let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure ⟨r, .int32⟩
+    | .int  => let r ← fresh; line (fptosiSatLine r v "i64"); pure ⟨r, .int⟩
+    | .int32 => let r ← fresh; line (fptosiSatLine r v "i32"); pure ⟨r, .int32⟩
     | .bool => let r ← fresh; line s!"{r} = fcmp one double {v}, 0x0000000000000000"; pure ⟨r, .bool⟩
   -- External inputs never reached the session path (the compile maps them
   -- to constant zero); the port has no such region, so the operand IS zero.
@@ -407,24 +415,49 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   let isInt := resultType == .int
   let isI32 := resultType == .int32
   -- comparison dispatch: int compare if either operand is natively an
-  -- integer; in i32 when an operand is int32 (never mixed with int — the
-  -- compiler and `PlanWellFormed` refuse that), else in i64
+  -- integer; in i32 when an operand is int32 (never mixed with int: the
+  -- compiler refuses that, and `emitKernel` refuses a plan that spells it,
+  -- `FlatPlan.kindError?`), else in i64
   let argIs (t : ScalarType) : Bool :=
     ((args[0]?).map (·.ty == t)).getD false || ((args[1]?).map (·.ty == t)).getD false
   let eitherInt : M Bool := pure (argIs .int || argIs .int32)
   let cmpInt (pred : String) : M TVal := do
     if argIs .int32 && !argIs .int then cmpI32 pred (← aI32 0) (← aI32 1)
     else cmpI pred (← aI 0) (← aI 1)
-  -- zero-guarded integer quotient/remainder (`sdiv`/`srem`), at the result width
+  -- Total integer quotient/remainder (`sdiv`/`srem`) at the result width.
+  -- `sdiv`/`srem` are immediate UB for a zero divisor and for MIN / -1, so a
+  -- select AFTER them cannot rescue the result (and `opt` deletes such a
+  -- guard). Divide by a safe divisor instead: 1 where the divisor is 0 or the
+  -- quotient overflows. MIN / 1 = MIN is the wrapped quotient and MIN % 1 = 0
+  -- the remainder, so only the zero divisor needs its result selected (0).
   let guardedI (op : String) : M TVal := do
+    let (ity, rty, minLit, a, b) ←
+      if isI32 then pure ("i32", (.int32 : ScalarType), "-2147483648", ← aI32 0, ← aI32 1)
+      else pure ("i64", (.int : ScalarType), "-9223372036854775808", ← aI 0, ← aI 1)
+    let z ← fresh; line s!"{z} = icmp eq {ity} {b}, 0"
+    let am ← fresh; line s!"{am} = icmp eq {ity} {a}, {minLit}"
+    let bm ← fresh; line s!"{bm} = icmp eq {ity} {b}, -1"
+    let ov ← fresh; line s!"{ov} = and i1 {am}, {bm}"
+    let bad ← fresh; line s!"{bad} = or i1 {z}, {ov}"
+    let bs ← fresh; line s!"{bs} = select i1 {bad}, {ity} 1, {ity} {b}"
+    let q ← fresh; line s!"{q} = {op} {ity} {a}, {bs}"
+    let r ← fresh
+    line s!"{r} = select i1 {z}, {ity} 0, {ity} {q}"; pure ⟨r, rty⟩
+  -- A shift amount is taken modulo the width (wasm/Java): LLVM's `shl`/`ashr`
+  -- are poison for an amount ≥ the width. A literal amount is reduced here
+  -- (the IR of a constant shift is the plain shift it always was); a runtime
+  -- amount is masked.
+  let shiftAmt (ity : String) (width : Int) (b : String) : M String := do
+    match b.toInt? with
+    | some n => pure (toString (n % width))
+    | none => let m ← fresh; line s!"{m} = and {ity} {b}, {width - 1}"; pure m
+  let shiftI (op : String) : M TVal := do
     if isI32 then
-      let b ← aI32 1; let q ← binI32 op (← aI32 0) b
-      let z ← cmpI32 "eq" b "0"; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, i32 0, i32 {q.ref}"; pure ⟨r, .int32⟩
+      let a ← aI32 0; let m ← shiftAmt "i32" 32 (← aI32 1)
+      binI32 op a m
     else
-      let b ← aI 1; let q ← binI op (← aI 0) b
-      let z ← cmpI "eq" b "0"; let r ← fresh
-      line s!"{r} = select i1 {z.ref}, i64 0, i64 {q.ref}"; pure ⟨r, .int⟩
+      let a ← aI 0; let m ← shiftAmt "i64" 64 (← aI 1)
+      binI op a m
   let op ← match validateScalarOp "EmitLlvm" tag args.size with
     | .ok op => pure op
     | .error e => fail e
@@ -473,8 +506,8 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   | .bitAnd => if isI32 then binI32 "and" (← aI32 0) (← aI32 1) else binI "and" (← aI 0) (← aI 1)
   | .bitOr  => if isI32 then binI32 "or" (← aI32 0) (← aI32 1) else binI "or"  (← aI 0) (← aI 1)
   | .bitXor => if isI32 then binI32 "xor" (← aI32 0) (← aI32 1) else binI "xor" (← aI 0) (← aI 1)
-  | .lshift => if isI32 then binI32 "shl" (← aI32 0) (← aI32 1) else binI "shl" (← aI 0) (← aI 1)
-  | .rshift => if isI32 then binI32 "ashr" (← aI32 0) (← aI32 1) else binI "ashr" (← aI 0) (← aI 1)
+  | .lshift => shiftI "shl"
+  | .rshift => shiftI "ashr"
   | .neg =>
     if isI32 then binI32 "sub" "0" (← aI32 0)
     else if isInt then binI "sub" "0" (← aI 0) else
@@ -495,7 +528,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   | .round => callF "@llvm.round.f64" (← aF 0)
   | .ldexp =>
     let x ← aF 0
-    let ni ← fresh; line s!"{ni} = fptosi double {← aF 1} to i64"
+    let ni ← fresh; line (fptosiSatLine ni (← aF 1) "i64")
     let add ← fresh; line s!"{add} = add i64 {ni}, 1023"
     let bias ← fresh; line s!"{bias} = shl i64 {add}, 52"
     let scale ← fresh; line s!"{scale} = bitcast i64 {bias} to double"
@@ -856,8 +889,9 @@ private def outIndex (outputChannelCount target : Nat) : M String := do
     and applies its gain in binary64. `.i32` is the integer output a target
     without an FPU stores: each sink must be one input at gain 1. An `int32`
     program output is stored as it is, from its slot's 32-bit lane; an `int`
-    one keeps its low 32 bits. Any other value is converted toward zero
-    (`fptosi`) from its f64 copy, which is exact for an integer in the slot. -/
+    one keeps its low 32 bits. Any other value is converted from its f64 copy
+    by the saturating conversion (`fptosi.sat`), which is exact for an
+    integer in the slot. -/
 def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
     (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
   let (ty, zero, align) ← match outElem with
@@ -882,7 +916,7 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
         | some lv => pure (← coerce lv .int32).ref
         | none =>
           let v ← loadSlotF64 slot
-          let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure r
+          let r ← fresh; line (fptosiSatLine r v "i32"); pure r
       | _ => do
         let mut acc := zeroF
         for slotIdx in sink.inputs do
@@ -917,7 +951,9 @@ private def intrinsicDecls : String :=
   "declare double @llvm.floor.f64(double)\n" ++
   "declare double @llvm.ceil.f64(double)\n" ++
   "declare double @llvm.round.f64(double)\n" ++
-  "declare double @llvm.fabs.f64(double)\n"
+  "declare double @llvm.fabs.f64(double)\n" ++
+  "declare i64 @llvm.fptosi.sat.i64.f64(double)\n" ++
+  "declare i32 @llvm.fptosi.sat.i32.f64(double)\n"
 
 /-- A counted loop storing zero into `n` i64 cells at `ptr`. Explicit IR
     rather than `llvm.memset`, so the wasm32 lowering never needs a libc
@@ -953,6 +989,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
   let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
+  if let some e := plan.kindError? then throw s!"EmitLlvm: ill-kinded plan: {e}"
+  if let some c := split.coeff? then
+    if let some e := c.kindError? then throw s!"EmitLlvm: ill-kinded stage-0 plan: {e}"
   if frames == 0 then throw "EmitLlvm: frames must be positive"
   let paramSlots := Tropical.Kernel.paramSlotIndices plan
   let slotCount := max plan.slotCount 1

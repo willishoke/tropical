@@ -72,8 +72,12 @@ private def planOpArity : PlanOp → Nat
 
 /-- The instruction's result sort is the one its op infers from its operand
     sorts, and the operands do not mix `int32` with `int` or `float`
-    (`PlanOp.kindMix?`): a hand-written plan cannot ask a backend for the
-    implicit crossing the compiler refuses. -/
+    (`PlanOp.kindMix?`). The dataflow half (each `reg` read at its
+    producer's sort, stores and array elements by widening only, constants
+    within their kind) is `FlatPlan.kindError?`, a conjunct of
+    `flatPlanWellFormed`; `PlanDecode` and both kernel emitters enforce it,
+    so a hand-written plan cannot ask a backend for the implicit crossing the
+    compiler refuses. -/
 private def wellKinded (op : PlanOp) (argTypes : Array ScalarType)
     (resultType : ScalarType) : Bool :=
   resultType == op.resultType argTypes && (op.kindMix? argTypes).isNone
@@ -369,7 +373,7 @@ def flatPlanWellFormed (plan : FlatPlan) : Bool :=
   (plan.sources == defaultSources &&
   (indicesUniqueAndInRange plan.arraySlotCount plan.coeffArraySlots &&
   (plan.instanceFunctions.all (instanceWellFormed plan) &&
-   sinkInputsInRange plan))))))))
+   (sinkInputsInRange plan && plan.kindError?.isNone)))))))))
 
 /-- Canonical theorem-facing structural predicate. -/
 def FlatPlanWellFormed (plan : FlatPlan) : Prop :=
@@ -392,7 +396,7 @@ theorem FlatPlanWellFormed.sinkTargets {plan : FlatPlan}
 theorem FlatPlanWellFormed.sinkInputs {plan : FlatPlan}
     (hwf : FlatPlanWellFormed plan) : SinkInputsWellFormed plan := by
   simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
-  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, hinputs⟩
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, hinputs, _⟩
   exact hinputs
 
 theorem FlatPlanWellFormed.instanceFunction {plan : FlatPlan}
@@ -400,8 +404,15 @@ theorem FlatPlanWellFormed.instanceFunction {plan : FlatPlan}
     (hindex : index < plan.instanceFunctions.size) :
     InstanceFunctionWellFormed plan plan.instanceFunctions[index] := by
   simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
-  rcases hwf with ⟨_, _, _, _, _, _, _, _, hinstances, _⟩
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, hinstances, _, _⟩
   exact hinstances index hindex
+
+/-- A well-formed Plan is well-kinded (`FlatPlan.kindError?`). -/
+theorem FlatPlanWellFormed.kinds {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) : plan.kindError? = none := by
+  simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, _, hkinds⟩
+  exact hkinds
 
 /-- A well-formed Plan has balanced structured regions throughout every
 recursive instance tree. -/

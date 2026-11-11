@@ -15,17 +15,22 @@ execution. This module makes the integer half of that sentence checked:
   `Int` implementation realizes the quotient ring `ℤ/2^64ℤ`;
 * `toU64` is exactly the nonnegative residue and `bit64` always returns an
   i64-range value;
-* every integer-only `foldOp` route is pinned to its intended equation:
-  arithmetic (including zero guards), comparisons, truthiness, bitwise ops,
-  shifts (including the `[0,63]` refusal), casts, clamp, and select;
+* every integer-only `foldOp` route is pinned to its intended equation, with
+  no hypothesis — the integer semantics is total: arithmetic (a zero divisor
+  gives 0, `MIN / -1` wraps to `MIN`), comparisons, truthiness, bitwise ops,
+  shifts (the amount reduced modulo 64), casts, clamp, and select;
 * the same for `int32`: `wrap32` is the canonical representative modulo
   `2^32` and a ring homomorphism, `wrap32 ∘ wrap64 = wrap32` (an i32 result is
   the low word of the i64 one), each int32 `foldOp` route is pinned (shifts
-  refuse outside `[0,31]`, the undefined `INT32_MIN / -1` is not folded), and
-  the wrap edge cases are evaluated outright.
+  reduce the amount modulo 32, `INT32_MIN / -1 = INT32_MIN`,
+  `INT32_MIN % -1 = 0`), and the wrap edge cases are evaluated outright;
+* float → int conversion is saturating: `foldOp` routes it through
+  `truncSatToInt`/`truncSatToInt32`, whose results always lie in the target
+  word (`truncSatToInt_isI64`, `truncSatToInt32_isI32`).
 
-No Float claim is made here. In particular, `toFloat`, Float comparisons,
-transcendentals, and `truncToInt?` remain outside this proof boundary.
+No other Float claim is made here: `toFloat`, Float comparisons,
+transcendentals, and which integer a finite in-range float truncates to
+remain outside this proof boundary.
 -/
 
 namespace Tropical.Ir
@@ -63,6 +68,14 @@ private theorem scalar_int_beq_bool :
 
 @[local simp] private theorem scalar_int32_beq_int :
     ((Tropical.Parse.ScalarKind.int32 == Tropical.Parse.ScalarKind.int) = false) := by
+  decide
+
+@[local simp] private theorem scalar_float_beq_int :
+    ((Tropical.Parse.ScalarKind.float == Tropical.Parse.ScalarKind.int) = false) := by
+  decide
+
+@[local simp] private theorem scalar_float_beq_int32 :
+    ((Tropical.Parse.ScalarKind.float == Tropical.Parse.ScalarKind.int32) = false) := by
   decide
 
 -- ─────────────────────────────────────────────────────────────
@@ -328,23 +341,35 @@ theorem foldOp_bitNot_int (a : Int) :
       some (.i (bit64 (· ^^^ ·) a (-1))) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
 
-theorem foldOp_lshift_int {a sh : Int} (h0 : 0 ≤ sh) (h63 : sh ≤ 63) :
+/-- A left shift takes its amount modulo 64 (`Int`'s `%` is the least
+    nonnegative residue, so `-1` shifts by 63). -/
+theorem foldOp_lshift_int (a sh : Int) :
+    foldOp PlanOp.lshift.name .int #[.i a, .i sh] =
+      some (.i (wrap64 (a <<< (sh % 64).toNat))) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+/-- An arithmetic right shift takes its amount modulo 64. -/
+theorem foldOp_rshift_int (a sh : Int) :
+    foldOp PlanOp.rshift.name .int #[.i a, .i sh] =
+      some (.i (a >>> (sh % 64).toNat)) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+/-- Within `[0, 63]` the reduction is the identity: the ordinary shift. -/
+theorem foldOp_lshift_int_inRange {a sh : Int} (h0 : 0 ≤ sh) (h63 : sh ≤ 63) :
     foldOp PlanOp.lshift.name .int #[.i a, .i sh] =
       some (.i (wrap64 (a <<< sh.toNat))) := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h0, h63]
+  rw [foldOp_lshift_int, Int.emod_eq_of_lt h0 (by omega)]
 
-theorem foldOp_lshift_int_refuses {a sh : Int} (h : sh < 0 ∨ 63 < sh) :
-    foldOp PlanOp.lshift.name .int #[.i a, .i sh] = none := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h]
-
-theorem foldOp_rshift_int {a sh : Int} (h0 : 0 ≤ sh) (h63 : sh ≤ 63) :
+theorem foldOp_rshift_int_inRange {a sh : Int} (h0 : 0 ≤ sh) (h63 : sh ≤ 63) :
     foldOp PlanOp.rshift.name .int #[.i a, .i sh] =
       some (.i (a >>> sh.toNat)) := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h0, h63]
+  rw [foldOp_rshift_int, Int.emod_eq_of_lt h0 (by omega)]
 
-theorem foldOp_rshift_int_refuses {a sh : Int} (h : sh < 0 ∨ 63 < sh) :
-    foldOp PlanOp.rshift.name .int #[.i a, .i sh] = none := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h]
+/-- The reduced amount is always a valid shift for the word. -/
+theorem shiftAmount64_lt (sh : Int) : (sh % 64).toNat < 64 := by
+  have h0 := Int.emod_nonneg sh (by decide : (64 : Int) ≠ 0)
+  have h1 := Int.emod_lt_of_pos sh (by decide : (0 : Int) < 64)
+  omega
 
 -- ─────────────────────────────────────────────────────────────
 -- foldOp — integer clamp and select
@@ -470,22 +495,45 @@ theorem foldOp_abs_int32 (a : Int) :
       some (.i32 (if a < 0 then wrap32 (-a) else a)) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
 
-theorem foldOp_div_int32 {a b : Int} (h : ¬(a = -2147483648 ∧ b = -1)) :
+/-- int32 division: 0 for a zero divisor, else the truncated quotient
+    wrapped to the word — total, like `int`'s. -/
+theorem foldOp_div_int32 (a b : Int) :
     foldOp PlanOp.div.name .int32 #[.i32 a, .i32 b] =
-      some (.i32 (if b == 0 then 0 else Int.tdiv a b)) := by
-  by_cases hb : b = 0
-  · simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, hb]
-  · have : ¬(a = -2147483648 ∧ b = -1) := h
-    simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, hb]
-    intro ha hb'; exact absurd ⟨ha, hb'⟩ this
-
-theorem foldOp_div_int32_overflow_refuses :
-    foldOp PlanOp.div.name .int32 #[.i32 (-2147483648), .i32 (-1)] = none := by
+      some (.i32 (if b == 0 then 0 else wrap32 (Int.tdiv a b))) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
 
-theorem foldOp_mod_int32_overflow_refuses :
-    foldOp PlanOp.mod.name .int32 #[.i32 (-2147483648), .i32 (-1)] = none := by
+theorem foldOp_mod_int32 (a b : Int) :
+    foldOp PlanOp.mod.name .int32 #[.i32 a, .i32 b] =
+      some (.i32 (if b == 0 then 0 else wrap32 (Int.tmod a b))) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+theorem foldOp_floorDiv_int32 (a b : Int) :
+    foldOp PlanOp.floorDiv.name .int32 #[.i32 a, .i32 b] =
+      some (.i32 (if b == 0 then 0 else wrap32 (Int.tdiv a b))) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+/-- The overflowing quotient wraps: `INT32_MIN / -1 = INT32_MIN`. -/
+theorem foldOp_div_int32_min_neg_one :
+    foldOp PlanOp.div.name .int32 #[.i32 (-2147483648), .i32 (-1)] =
+      some (.i32 (-2147483648)) := by
+  rw [foldOp_div_int32]; rfl
+
+/-- … and its remainder is 0: `INT32_MIN % -1 = 0`. -/
+theorem foldOp_mod_int32_min_neg_one :
+    foldOp PlanOp.mod.name .int32 #[.i32 (-2147483648), .i32 (-1)] =
+      some (.i32 0) := by
+  rw [foldOp_mod_int32]; rfl
+
+/-- The i64 rule is the same: `INT64_MIN / -1 = INT64_MIN`, `INT64_MIN % -1 = 0`. -/
+theorem foldOp_div_int_min_neg_one :
+    foldOp PlanOp.div.name .int #[.i (-9223372036854775808), .i (-1)] =
+      some (.i (-9223372036854775808)) := by
+  rw [foldOp_div_int]; rfl
+
+theorem foldOp_mod_int_min_neg_one :
+    foldOp PlanOp.mod.name .int #[.i (-9223372036854775808), .i (-1)] =
+      some (.i 0) := by
+  rw [foldOp_mod_int]; rfl
 
 theorem foldOp_less_int32 (a b : Int) :
     foldOp PlanOp.less.name .bool #[.i32 a, .i32 b] = some (.b (decide (a < b))) := by
@@ -515,23 +563,32 @@ theorem foldOp_bitNot_int32 (a : Int) :
       some (.i32 (bit32 (· ^^^ ·) a (-1))) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
 
-theorem foldOp_lshift_int32 {a sh : Int} (h0 : 0 ≤ sh) (h31 : sh ≤ 31) :
+/-- An int32 left shift takes its amount modulo 32. -/
+theorem foldOp_lshift_int32 (a sh : Int) :
+    foldOp PlanOp.lshift.name .int32 #[.i32 a, .i32 sh] =
+      some (.i32 (wrap32 (a <<< (sh % 32).toNat))) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+/-- An int32 arithmetic right shift takes its amount modulo 32. -/
+theorem foldOp_rshift_int32 (a sh : Int) :
+    foldOp PlanOp.rshift.name .int32 #[.i32 a, .i32 sh] =
+      some (.i32 (a >>> (sh % 32).toNat)) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+theorem foldOp_lshift_int32_inRange {a sh : Int} (h0 : 0 ≤ sh) (h31 : sh ≤ 31) :
     foldOp PlanOp.lshift.name .int32 #[.i32 a, .i32 sh] =
       some (.i32 (wrap32 (a <<< sh.toNat))) := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h0, h31]
+  rw [foldOp_lshift_int32, Int.emod_eq_of_lt h0 (by omega)]
 
-theorem foldOp_lshift_int32_refuses {a sh : Int} (h : sh < 0 ∨ 31 < sh) :
-    foldOp PlanOp.lshift.name .int32 #[.i32 a, .i32 sh] = none := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h]
-
-theorem foldOp_rshift_int32 {a sh : Int} (h0 : 0 ≤ sh) (h31 : sh ≤ 31) :
+theorem foldOp_rshift_int32_inRange {a sh : Int} (h0 : 0 ≤ sh) (h31 : sh ≤ 31) :
     foldOp PlanOp.rshift.name .int32 #[.i32 a, .i32 sh] =
       some (.i32 (a >>> sh.toNat)) := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h0, h31]
+  rw [foldOp_rshift_int32, Int.emod_eq_of_lt h0 (by omega)]
 
-theorem foldOp_rshift_int32_refuses {a sh : Int} (h : sh < 0 ∨ 31 < sh) :
-    foldOp PlanOp.rshift.name .int32 #[.i32 a, .i32 sh] = none := by
-  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty, h]
+theorem shiftAmount32_lt (sh : Int) : (sh % 32).toNat < 32 := by
+  have h0 := Int.emod_nonneg sh (by decide : (32 : Int) ≠ 0)
+  have h1 := Int.emod_lt_of_pos sh (by decide : (0 : Int) < 32)
+  omega
 
 /-- `toInt` of an int32 sign-extends: the value is unchanged. -/
 theorem foldOp_toInt_int32 (a : Int) :
@@ -541,6 +598,46 @@ theorem foldOp_toInt_int32 (a : Int) :
 /-- `toInt32` of an int keeps its low 32 bits. -/
 theorem foldOp_toInt32_int (a : Int) :
     foldOp PlanOp.toInt32.name .int32 #[.i a] = some (.i32 (wrap32 a)) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+-- ─────────────────────────────────────────────────────────────
+-- Saturating float → int conversion
+-- ─────────────────────────────────────────────────────────────
+
+theorem clampInt_ge (lo hi x : Int) : lo ≤ clampInt lo hi x := by
+  unfold clampInt; omega
+
+theorem clampInt_le (lo hi x : Int) (h : lo ≤ hi) : clampInt lo hi x ≤ hi := by
+  unfold clampInt; omega
+
+/-- A saturated conversion to `int` always lands in the i64 range — for
+    every float, NaN and the infinities included. -/
+theorem truncSatToInt_isI64 (v : Float) : IsI64 (truncSatToInt v) := by
+  unfold IsI64 i64Half truncSatToInt
+  exact ⟨clampInt_ge _ _ _, by
+    have := clampInt_le (-9223372036854775808) 9223372036854775807
+      (if v.isNaN then 0
+        else if v >= 9.223372036854775808e18 then 9223372036854775807
+        else if v <= -9.223372036854775808e18 then -9223372036854775808
+        else if v >= 0.0 then Int.ofNat v.toUInt64.toNat
+        else -(Int.ofNat (-v).toUInt64.toNat)) (by decide)
+    omega⟩
+
+/-- … and a saturated conversion to `int32` in the i32 range. -/
+theorem truncSatToInt32_isI32 (v : Float) : IsI32 (truncSatToInt32 v) := by
+  unfold IsI32 i32Half truncSatToInt32
+  exact ⟨clampInt_ge _ _ _, by
+    have := clampInt_le (-2147483648) 2147483647 (truncSatToInt v) (by decide)
+    omega⟩
+
+/-- `toInt` of a float folds, for every float, to the saturated truncation. -/
+theorem foldOp_toInt_float (x : Float) :
+    foldOp PlanOp.toInt.name .int #[.f x] = some (.i (truncSatToInt x)) := by
+  simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
+
+/-- `toInt32` of a float folds, for every float, to the saturated truncation. -/
+theorem foldOp_toInt32_float (x : Float) :
+    foldOp PlanOp.toInt32.name .int32 #[.f x] = some (.i32 (truncSatToInt32 x)) := by
   simp [foldOp, PlanOp.name, PlanOp.ofString?, CVal.coerce?, CVal.ty]
 
 theorem foldOp_clamp_int32 (v lo hi : Int) :
@@ -574,16 +671,31 @@ example : foldOp "Neg" .int32 #[.i32 (-2147483648)] = some (.i32 (-2147483648)) 
 
 /-- `1 << 31` is `INT32_MIN`; `INT32_MIN >> 31` is `-1` (arithmetic). -/
 example : foldOp "LShift" .int32 #[.i32 1, .i32 31] = some (.i32 (-2147483648)) := by
-  rw [show "LShift" = PlanOp.lshift.name from rfl,
-    foldOp_lshift_int32 (by decide) (by decide)]; rfl
+  rw [show "LShift" = PlanOp.lshift.name from rfl, foldOp_lshift_int32]; rfl
 
 example : foldOp "RShift" .int32 #[.i32 (-2147483648), .i32 31] = some (.i32 (-1)) := by
-  rw [show "RShift" = PlanOp.rshift.name from rfl,
-    foldOp_rshift_int32 (by decide) (by decide)]; rfl
+  rw [show "RShift" = PlanOp.rshift.name from rfl, foldOp_rshift_int32]; rfl
 
-/-- A shift by the word size is outside the defined range: not folded. -/
-example : foldOp "LShift" .int32 #[.i32 1, .i32 32] = none :=
-  foldOp_lshift_int32_refuses (Or.inr (by decide))
+/-- A shift by the word size is a shift by 0; by 33, a shift by 1; by -1, a
+    shift by 31. -/
+example : foldOp "LShift" .int32 #[.i32 5, .i32 32] = some (.i32 5) := by
+  rw [show "LShift" = PlanOp.lshift.name from rfl, foldOp_lshift_int32]; rfl
+
+example : foldOp "LShift" .int32 #[.i32 5, .i32 33] = some (.i32 10) := by
+  rw [show "LShift" = PlanOp.lshift.name from rfl, foldOp_lshift_int32]; rfl
+
+example : foldOp "LShift" .int32 #[.i32 1, .i32 (-1)] = some (.i32 (-2147483648)) := by
+  rw [show "LShift" = PlanOp.lshift.name from rfl, foldOp_lshift_int32]; rfl
+
+example : foldOp "RShift" .int #[.i (-8), .i 65] = some (.i (-4)) := by
+  rw [show "RShift" = PlanOp.rshift.name from rfl, foldOp_rshift_int]; rfl
+
+/-- A zero divisor gives 0 in both widths. -/
+example : foldOp "Div" .int32 #[.i32 7, .i32 0] = some (.i32 0) := by
+  rw [show "Div" = PlanOp.div.name from rfl, foldOp_div_int32]; rfl
+
+example : foldOp "Mod" .int #[.i 7, .i 0] = some (.i 0) := by
+  rw [show "Mod" = PlanOp.mod.name from rfl, foldOp_mod_int]; rfl
 
 /-- `toInt32 (2^32 + 5) = 5` and `toInt32 2^31 = INT32_MIN`. -/
 example : foldOp "ToInt32" .int32 #[.i 4294967301] = some (.i32 5) := by

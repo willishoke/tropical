@@ -43,6 +43,24 @@ def ScalarKind.isInteger : ScalarKind → Bool
   | .int | .int32 => true
   | _ => false
 
+/-- The widening order a value may cross implicitly — at a patch-bay
+    connection, an instance-input binding, or an output port: bool → int →
+    float, and bool → int32. `int32` widens to nothing, and nothing but
+    `bool` widens to it: the compiler never turns it into an `int` or a
+    `float` silently (a 64-bit or soft-float conversion the source does not
+    show), so such a crossing spells the cast (`toInt`, `toFloat`,
+    `toInt32`). -/
+def ScalarKind.widensTo (src dst : ScalarKind) : Bool :=
+  src == dst ||
+    match src, dst with
+    | .bool, _ => true
+    | .int, .float => true
+    | _, _ => false
+
+/-- The explicit cast that converts into `dst`. -/
+def ScalarKind.castName : ScalarKind → String
+  | .int => "toInt" | .int32 => "toInt32" | .bool => "toBool" | .float => "toFloat"
+
 theorem ScalarKind.ofWire_wire (k : ScalarKind) :
     ScalarKind.ofWire? k.wire = some k := by
   cases k <;> rfl

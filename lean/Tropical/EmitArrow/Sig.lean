@@ -181,10 +181,12 @@ def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
 def toIntE (a : Sig) : BuildM Sig := unary .toInt a
 
 /-- The cast to `int32`: an `int`'s low 32 bits, a `float` truncated toward
-    zero. `int32` arithmetic wraps on ℤ/2³² (`add`, `sub`, `mul`, `lshift`
-    are the 32-bit word ops), and an `int32` never meets an `int` or `float`
-    operand without a cast; a bare literal next to an `int32` operand is an
-    `int32` constant. `toIntE` sign-extends back, `toFloatE` converts. -/
+    zero and saturated to the word (NaN → 0). `int32` arithmetic wraps on
+    ℤ/2³² (`add`, `sub`, `mul`, `lshift` are the 32-bit word ops), every op
+    is total (see `ConstFold`), and an `int32` never meets an `int` or
+    `float` operand without a cast; a bare literal (or a literal-only
+    subtree) next to an `int32` operand is `int32`. `toIntE` sign-extends
+    back, `toFloatE` converts. -/
 def toInt32E (a : Sig) : BuildM Sig := unary .toInt32 a
 
 /-- A standalone `int32` constant (`litI`'s 32-bit counterpart), refused at
