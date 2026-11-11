@@ -234,11 +234,13 @@ generate native code.
 — `tau` the Q48.16 clock of each frame (`design/fixed-carrier.md`), one value
 per `param:` slot, one frame-major output — with static shapes (a different
 buffer length is a different artifact) and everything else inside the
-function. A param is `f64` unless it declares an integer word (`int32` or
-`int` with `frac_bits`, e.g. Q16.16), and the output is `f64` unless the
+function. A param is a float unless it declares an integer word (`int32` or
+`int` with `frac_bits`, e.g. Q16.16), and the output is a float unless the
 program's output is an `int32` (then `i32` with the output's declared
 `frac_bits`); the kernel loads and stores those words as words, never
-through f64 (`design/typed-kernel.md`, "Typed ports"). The manifest is
+through a float (`design/typed-kernel.md`, "Typed ports"). A float is `f64`,
+or `f32` in an artifact compiled at `--float f32` on the LLVM path
+(`design/typed-kernel.md`, "The float format per target"). The manifest is
 its type, `tropical_kernel_1`. The scope reads output channels of a separate
 observation artifact of the same plan.
 

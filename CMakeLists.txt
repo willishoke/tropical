@@ -235,6 +235,17 @@ if(TROPICAL_BUILD_TESTS)
         tropical_core nlohmann_json::nlohmann_json)
     add_test(NAME current_module_process COMMAND test_module_process)
 
+    # The binary32 floor/ceil/round sequences (tests/fixtures/rounding_f32.ll,
+    # EmitLlvm's own text) through the JIT on all 2^32 inputs, against libm.
+    add_executable(test_rounding_f32 engine/tests/test_rounding_f32.cpp)
+    target_include_directories(test_rounding_f32 PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(test_rounding_f32 PRIVATE ${LLVM_DEFINITIONS}
+        TROPICAL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_features(test_rounding_f32 PRIVATE cxx_std_20)
+    target_link_libraries(test_rounding_f32 PRIVATE tropical_core)
+    add_test(NAME current_rounding_f32 COMMAND test_rounding_f32)
+    set_tests_properties(current_rounding_f32 PROPERTIES TIMEOUT 300)
+
     if(TROPICAL_WASM_EMIT)
         add_executable(test_wasm_emit engine/tests/test_wasm_emit.cpp)
         target_include_directories(test_wasm_emit PRIVATE engine)

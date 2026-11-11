@@ -4,10 +4,11 @@
  * (design/typed-kernel.md); knows nothing of the compiler. Extract to its own package when
  * a second consumer appears (see design notes / CLAUDE.md).
  */
-export type { KernelManifest, KernelPort, KernelElem, KernelRole } from './manifest.js'
+export type { KernelManifest, KernelPort, KernelElem, KernelRole, FloatFormat } from './manifest.js'
 export {
   kernelFrames, kernelParams, kernelOutputChannelCount, kernelOutputWordScale,
-  encodeWord, wordValue, isWordPort, wordRangeError,
+  kernelOutputElemBytes, kernelFloatFormat,
+  encodeWord, wordValue, isWordPort, wordRangeError, binary32RangeError, paramRangeError,
   MAX_KERNEL_OUTPUT_CHANNELS, CLOCK_FRAC_BITS, TAU_ELEM,
 } from './manifest.js'
 export type { KernelLayout } from './layout.js'

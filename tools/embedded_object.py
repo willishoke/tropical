@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
-"""Build and check a tropical kernel as relocatable objects for a no-FPU MCU.
+"""Build and check a tropical kernel as relocatable objects for a microcontroller.
 
 `diffcli compile-object` emits the objects; this script is the gate and the
-report around them:
+report around them. Two cores (`--core`):
 
-  * libcalls — `llvm-nm -u` on the thumbv6m object must list nothing (no
+  * `m0plus` (default) — Cortex-M0+, `thumbv6m-none-eabi`, no FPU: an integer
+    program at the default float format. Sizes, libcalls and cycles.
+  * `m4f` — Cortex-M4F, `thumbv7em-none-eabihf`, FPv4-SP-D16 (binary32 only):
+    the artifact is compiled at `--float f32`. Sizes and libcalls only. The
+    cycle table below is the M0+'s; for any other core the script counts no
+    cycles and says so, and `--wait-states` on one exits non-zero rather than
+    print a number that does not hold.
+
+What it checks and reports:
+
+  * libcalls — `llvm-nm -u` on the thumb object must list nothing (no
     __aeabi_*, __mul*, __div*, soft-float helpers). Exit 1 otherwise.
+    `compile-object` already refuses such an object, naming the op; a
+    refusal is reported as a failure with its message.
   * cycles — a static count from `llvm-objdump` on the Cortex-M0+ timing
     table (ARM DDI 0484, zero wait states), assuming the single-cycle
     multiplier (the M0+'s 32-cycle iterative multiplier is a build option;
@@ -32,16 +44,28 @@ report around them:
 
     tools/embedded_object.py --diffcli lean/.lake/build/bin/diffcli \\
         --llvm-bin /opt/homebrew/opt/llvm@22/bin --patch P --out-dir D \\
-        [--frames N] [--rate R] [--wait-states W] [--check-only]
+        [--core m0plus|m4f] [--frames N] [--rate R] [--wait-states W] [--check-only]
     tools/embedded_object.py --llvm-bin ... --object O.o [--frames N]
+
+With `--object` the core is read from the object's own ARM build attributes
+(`Tag_CPU_arch`), not from a flag.
 
 Port element types and fixed-point formats come from the program, not from
 flags (`design/typed-kernel.md`, "Typed ports").
 """
 import argparse, json, os, re, subprocess, sys
 
-TRIPLES = [("host", ""), ("thumbv6m", "thumbv6m-none-eabi"),
-           ("wasm32", "wasm32-unknown-unknown")]
+# Per core: the object's tag, triple, cpu and float format (None: the
+# compiler's default), and the Tag_CPU_arch its object carries.
+CORES = {
+    "m0plus": {"tag": "thumbv6m", "triple": "thumbv6m-none-eabi", "cpu": "cortex-m0plus",
+               "float": None, "cpu_arch": "ARM v6S-M"},
+    "m4f": {"tag": "thumbv7em", "triple": "thumbv7em-none-eabihf", "cpu": "cortex-m4",
+            "float": "f32", "cpu_arch": "ARM v7E-M"},
+}
+# The objects built per patch besides the core's own: the host and wasm32,
+# at the core's float format, for comparison runs.
+OTHER_TRIPLES = [("host", ""), ("wasm32", "wasm32-unknown-unknown")]
 LIBCALL = re.compile(r"__aeabi_|__mul|__div|__mod|__udiv|__add|__sub|__fix|__float|__extend|__trunc|__cmp|__eq|__ne|__lt|__le|__gt|__ge|__un|memcpy|memset")
 # The cycle table the counts assume, stated in every report: the Cortex-M0+
 # multiplier is a build-time option, and the counts hold only for the
@@ -263,9 +287,33 @@ def wait_estimate(cfg, entry, around, leave, epilogue, frames, wait):
                                           hi_e + (frames - 1) * hi_f + hi_x]}
 
 
+M0PLUS_ARCH = CORES["m0plus"]["cpu_arch"]
+
+
+def cycles_refusal(attrs):
+    """Why this object gets no cycle count, or None for a Cortex-M0+ one."""
+    arch = attrs.get("CPU_arch")
+    if arch == M0PLUS_ARCH:
+        return None
+    cpu = attrs.get("CPU_name", "an unnamed core")
+    return (f"no cycle count: the timing table is the Cortex-M0+'s ({M0PLUS_ARCH}); "
+            f"this object is for {cpu} ({arch or 'no Tag_CPU_arch'}), whose pipeline, "
+            f"multiplier and FPU timings it does not model")
+
+
 def object_report(a, thumb, frames):
     undef = [l.split()[-1] for l in run([f"{a.llvm_bin}/llvm-nm", "-u", thumb]).splitlines() if l.strip()]
-    rep = loop_report(disasm(a.llvm_bin, thumb), frames, a.wait_states)
+    attrs_text = run([f"{a.llvm_bin}/llvm-readelf", "-A", thumb])
+    attrs = {m.group(1).strip(): m.group(2).strip() for m in
+             re.finditer(r"TagName: (\w+)\s*\n\s*(?:Value|Description): ([^\n]+)", attrs_text)}
+    refusal = cycles_refusal(attrs)
+    if refusal is None:
+        rep = loop_report(disasm(a.llvm_bin, thumb), frames, a.wait_states)
+    else:
+        if a.wait_states:
+            raise SystemExit(f"embedded_object: --wait-states: {refusal}")
+        print(f"embedded_object: {thumb}: {refusal}", file=sys.stderr)
+        rep = {"cycles": None, "cycles_refused": refusal, "frames": frames}
     rep["undefined_symbols"] = undef
     rep["libcalls"] = [u for u in undef if LIBCALL.search(u)]
     sizes = {}
@@ -282,9 +330,7 @@ def object_report(a, thumb, frames):
     st = run([f"{a.llvm_bin}/llvm-readobj", "--stack-sizes", thumb])
     rep["stack_bytes"] = {m.group(1): int(m.group(2), 0) for m in
                           re.finditer(r"Functions: \[(\w+)\]\s+Size: (0x[0-9A-Fa-f]+|\d+)", st)}
-    attrs = run([f"{a.llvm_bin}/llvm-readelf", "-A", thumb])
-    rep["arm_attributes"] = {m.group(1).strip(): m.group(2).strip() for m in
-                             re.finditer(r"TagName: (\w+)\s*\n\s*Description: ([^\n]+)", attrs)}
+    rep["arm_attributes"] = attrs
     return rep, undef
 
 
@@ -293,13 +339,15 @@ def main():
     ap.add_argument("--diffcli")
     ap.add_argument("--llvm-bin", required=True)
     ap.add_argument("--patch", action="append", default=[])
-    ap.add_argument("--object", help="report on an existing thumbv6m object; no compile")
+    ap.add_argument("--object", help="report on an existing thumb object; no compile")
+    ap.add_argument("--core", choices=sorted(CORES), default="m0plus",
+                    help="the microcontroller to build for (default m0plus)")
     ap.add_argument("--out-dir")
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--rate", type=int, default=48000)
     ap.add_argument("--wait-states", type=int, default=0)
     ap.add_argument("--check-only", action="store_true",
-                    help="thumbv6m objects only; fail on any undefined symbol")
+                    help="the core's objects only; fail on any undefined symbol")
     a = ap.parse_args()
     if a.object:
         rep, undef = object_report(a, a.object, a.frames)
@@ -307,22 +355,41 @@ def main():
         return 1 if undef else 0
     if not (a.diffcli and a.patch and a.out_dir):
         ap.error("--diffcli, --patch and --out-dir are required without --object")
+    core = CORES[a.core]
+    if a.wait_states and a.core != "m0plus":
+        raise SystemExit(f"embedded_object: --wait-states: the timing table is the "
+                         f"Cortex-M0+'s; --core {a.core} gets no cycle count")
     os.makedirs(a.out_dir, exist_ok=True)
     status = 0
     for patch in a.patch:
         name = os.path.splitext(os.path.basename(patch))[0]
         objs = {}
-        for tag, triple in (TRIPLES[1:2] if a.check_only else TRIPLES):
+        builds = [(core["tag"], core["triple"], core["cpu"])]
+        if not a.check_only:
+            builds += [(tag, triple, None) for tag, triple in OTHER_TRIPLES]
+        failed = False
+        for tag, triple, cpu in builds:
             o = os.path.join(a.out_dir, f"{name}-{tag}.o")
             cmd = [a.diffcli, "compile-object", patch, "--out", o, "--frames", str(a.frames),
                    "--rate", str(a.rate)]
             if triple:
                 cmd += ["--triple", triple]
-            if tag == "thumbv6m":
-                cmd += ["--cpu", "cortex-m0plus"]
-            run(cmd)
+            if cpu:
+                cmd += ["--cpu", cpu]
+            if core["float"]:
+                cmd += ["--float", core["float"]]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                # compile-object refuses an object that needs a libcall, or a
+                # float format the target cannot realize, and says why.
+                print(f"FAIL embedded-object: {patch} for {tag}: {r.stderr.strip()}")
+                failed = True
+                break
             objs[tag] = o
-        thumb = objs["thumbv6m"]
+        if failed:
+            status = 1
+            continue
+        thumb = objs[core["tag"]]
         if a.check_only:
             undef = [l.split()[-1] for l in run([f"{a.llvm_bin}/llvm-nm", "-u", thumb]).splitlines() if l.strip()]
             if undef:
@@ -337,15 +404,16 @@ def main():
             man = json.load(f)
         man["object"]["stack_bytes"] = rep["stack_bytes"].get("tropical_kernel")
         man["object"]["sections"] = rep["sections"]
-        man["object"]["m0plus_cycles"] = {
-            "entry": rep["entry_cycles"], "frame_lower": rep["frame_cycles_lower"],
-            "frame_upper": rep["frame_cycles_upper"], "exit": rep["exit_cycles"],
-            "call_lower": rep["call_cycles_lower"], "call_upper": rep["call_cycles_upper"],
-            "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL}
-        man["object"]["float_abi"] = "soft (no FP instructions; Tag_FP_arch absent)"
+        if a.core == "m0plus":
+            man["object"]["m0plus_cycles"] = {
+                "entry": rep["entry_cycles"], "frame_lower": rep["frame_cycles_lower"],
+                "frame_upper": rep["frame_cycles_upper"], "exit": rep["exit_cycles"],
+                "call_lower": rep["call_cycles_lower"], "call_upper": rep["call_cycles_upper"],
+                "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL}
+            man["object"]["float_abi"] = "soft (no FP instructions; Tag_FP_arch absent)"
         with open(mpath, "w") as f:
             json.dump(man, f, indent=2)
-        with open(os.path.join(a.out_dir, f"{name}-cycles-thumbv6m.json"), "w") as f:
+        with open(os.path.join(a.out_dir, f"{name}-report-{core['tag']}.json"), "w") as f:
             json.dump(rep, f, indent=2)
         print(json.dumps(rep, indent=2))
         if undef:

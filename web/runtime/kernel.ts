@@ -11,6 +11,7 @@
 import {
   CLOCK_FRAC_BITS, encodeWord, isWordPort, kernelFrames, kernelOutputChannelCount,
   kernelOutputWordScale, kernelParams, wordValue, type KernelManifest, type KernelPort,
+  type KernelElem,
 } from './manifest.js'
 import { computeLayout, type KernelLayout } from './layout.js'
 
@@ -95,6 +96,9 @@ export class WasmKernel {
   /** An `i32` output's words, widened into `outView` (then a host-owned
    *  scratch) as `word · outScale` after each call. */
   private outWords?: Int32Array
+  /** An `f32` output (a binary32 artifact), widened exactly into `outView`
+   *  (then a host-owned scratch) after each call. */
+  private outBinary32?: Float32Array
 
   private constructor(
     private readonly memory: WebAssembly.Memory,
@@ -103,6 +107,7 @@ export class WasmKernel {
     readonly outputChannelCount: number,
     private readonly params: KernelPort[],
     private readonly outScale: number | null,
+    private readonly outElem: KernelElem,
   ) {
     this.argv = [layout.tau, ...layout.params, layout.output]
   }
@@ -139,18 +144,27 @@ export class WasmKernel {
     if (needPages > initialPages) memory.grow(needPages - initialPages)
 
     const k = new WasmKernel(memory, kernel, layout, outputChannelCount,
-      kernelParams(manifest), kernelOutputWordScale(manifest))
+      kernelParams(manifest), kernelOutputWordScale(manifest), manifest.outputs[0]!.elem)
     k.initParams()
     return k
   }
 
   /** Seed every param from its default (an integer port's default is its
-   *  word). */
+   *  word, an `f32` port's the binary32 itself). */
   private initParams(): void {
     this.params.forEach((port, j) => {
       if (isWordPort(port)) this.writeWord(j, port, port.default ?? 0)
-      else new Float64Array(this.memory.buffer)[this.layout.params[j]! >> 3] = port.default ?? 0
+      else this.writeFloat(j, port, port.default ?? 0)
     })
+  }
+
+  /** A float param's cell: an f64, or a binary32 at the cell's low address
+   *  (a `Float32Array` store rounds to the nearest binary32, ties to even,
+   *  as the native host's `(float)` does). */
+  private writeFloat(index: number, port: KernelPort, x: number): void {
+    const cell = this.layout.params[index]!
+    if (port.elem === 'f32') new Float32Array(this.memory.buffer)[cell >> 2] = x
+    else new Float64Array(this.memory.buffer)[cell >> 3] = x
   }
 
   private writeWord(index: number, port: KernelPort, w: number | bigint): void {
@@ -191,7 +205,7 @@ export class WasmKernel {
     const port = this.params[index]
     if (cell === undefined || port === undefined) throw new RangeError(`no param input ${index}`)
     if (isWordPort(port)) this.writeWord(index, port, encodeWord(port, value))
-    else new Float64Array(this.memory.buffer)[cell >> 3] = value
+    else this.writeFloat(index, port, value)
   }
 
   /** Read a param input's current value (port order after `tau`): for an
@@ -202,6 +216,7 @@ export class WasmKernel {
     if (cell === undefined || port === undefined) throw new RangeError(`no param input ${index}`)
     if (port.elem === 'i64') return wordValue(port, new BigInt64Array(this.memory.buffer)[cell >> 3]!)
     if (port.elem === 'i32') return wordValue(port, new Int32Array(this.memory.buffer)[cell >> 2]!)
+    if (port.elem === 'f32') return new Float32Array(this.memory.buffer)[cell >> 2]!
     return new Float64Array(this.memory.buffer)[cell >> 3]!
   }
 
@@ -216,7 +231,11 @@ export class WasmKernel {
     const L = this.layout
     if (this.tauWords?.buffer !== this.memory.buffer) {
       this.tauWords = new Uint32Array(this.memory.buffer, L.tau, 2 * L.frames)
-      if (this.outScale === null) {
+      if (this.outElem === 'f32') {
+        this.outBinary32 = new Float32Array(
+          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+        this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
+      } else if (this.outScale === null) {
         this.outView = new Float64Array(
           this.memory.buffer, L.output, L.frames * this.outputChannelCount)
       } else {
@@ -234,7 +253,10 @@ export class WasmKernel {
       words[2 * s + 1] = Math.floor(idx / lowSpan) // a u32 store wraps mod 2³²
     }
     this.kernel(...this.argv)
-    if (this.outScale !== null) {
+    if (this.outElem === 'f32') {
+      // An f32 output: every binary32 is a binary64, so the copy is exact.
+      this.outView!.set(this.outBinary32!)
+    } else if (this.outScale !== null) {
       // An i32 output: widen each word to the real value it means.
       const words = this.outWords!, out = this.outView!, scale = this.outScale
       for (let k = 0; k < words.length; k++) out[k] = words[k]! * scale

@@ -24,6 +24,12 @@ arithmetic semantics in `tropicaltest`.
 `libtropical_wasm` and reads the module back: the shadow stack is linked first
 and covers the kernel's allocas, and a non-constant alloca is refused.
 
+`test_rounding_f32.cpp` is registered as `current_rounding_f32`. It JIT-compiles
+`tests/fixtures/rounding_f32.ll` (the binary32 floor/ceil/round sequences
+`EmitLlvm` inlines; tropicaltest's `f32-rounding-fixture` gate keeps the file
+equal to the emitter's text) and checks all 2^32 binary32 inputs against
+libm: exact bits for every non-NaN result, a NaN for every NaN.
+
 `test_metal_kernel.cpp` is registered as `current_metal_kernel` when
 `TROPICAL_METAL` is enabled. It tests the current MSL runtime boundary.
 

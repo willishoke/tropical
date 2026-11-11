@@ -61,9 +61,9 @@ function compileViaLean(program: ProgramFile): string {
 /** The `tropical_kernel_1` manifest the runtime consumes, for the same
  *  source, via `diffcli compile-kernel` (128 frames per call: the worklet
  *  quantum, and what `compile-wasm` defaults to). */
-function kernelManifestViaLean(program: ProgramFile): KernelManifest {
+function kernelManifestViaLean(program: ProgramFile, float: Float = 'f64'): KernelManifest {
   writeFileSync(PROG_TMP, JSON.stringify(program))
-  const r = spawnSync([diffcli, 'compile-kernel', PROG_TMP, '--fixtures'], { cwd: repoRoot, env: cliEnv })
+  const r = spawnSync([diffcli, 'compile-kernel', PROG_TMP, '--fixtures', '--float', float], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile-kernel failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   return JSON.parse(r.stdout.toString()) as KernelManifest
 }
@@ -78,11 +78,15 @@ function outputChannelsOfPlan(planJson: string): number {
     )
 }
 
+/** The format the artifact realizes `float` in (`--float`). Both sides of a
+ *  comparison are compiled at the same one. */
+type Float = 'f64' | 'f32'
+
 /** Native side: render the wire plan through the engine's JIT. */
-function runNative(wirePlan: string, samples: number): Float64Array {
+function runNative(wirePlan: string, samples: number, float: Float = 'f64'): Float64Array {
   const tmp = '/tmp/wvj-native.plan.json'
   writeFileSync(tmp, wirePlan)
-  const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
+  const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples), '--float', float], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   const b = r.stdout
   const outputSamples = samples * outputChannelsOfPlan(wirePlan)
@@ -93,11 +97,11 @@ function runNative(wirePlan: string, samples: number): Float64Array {
 /** WASM side: lower the same source to wasm32 in-process and drive it through
  *  the runtime package (the artifacts the browser ships). */
 async function runWasm(program: ProgramFile, _plan: string, samples: number,
-    writes: Array<[string, number]> = []): Promise<Float64Array> {
-  const manifest = kernelManifestViaLean(program)
+    writes: Array<[string, number]> = [], float: Float = 'f64'): Promise<Float64Array> {
+  const manifest = kernelManifestViaLean(program, float)
   writeFileSync(PROG_TMP, JSON.stringify(program))
   const out = '/tmp/wvj-program.wasm'
-  const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`, '--fixtures'], { cwd: repoRoot, env: cliEnv })
+  const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`, '--fixtures', '--float', float], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile-wasm failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   // The kernel's shape is static (128 frames); `render` chunks a longer
   // window over the same closed form, so the sample count is free.
@@ -254,13 +258,32 @@ function intEdgeProgram(program: string): ProgramFile {
   }
 }
 
-async function expectBitIdentical(name: string, prog: ProgramFile, N: number): Promise<void> {
+async function expectBitIdentical(name: string, prog: ProgramFile, N: number,
+    float: Float = 'f64'): Promise<void> {
   const wire = compileViaLean(prog)
-  const nat = runNative(wire, N)
+  const nat = runNative(wire, N, float)
   expectAudible(name, nat)
-  const wasm = await runWasm(prog, wire, N)
+  const wasm = await runWasm(prog, wire, N, [], float)
   expect(wasm.length).toBe(nat.length)
   for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  if (float === 'f32')
+    for (let i = 0; i < nat.length; i++) expect(Math.fround(nat[i]!)).toBe(nat[i]!)
+}
+
+// A float param into SoftClip after a sine: an f32 param cell in a binary32
+// artifact, seeded from its binary32 default or written by the host.
+function drivePatch(drive: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_drive',
+    body: { op: 'block', decls: [
+      { op: 'paramDecl', name: 'drive', value: drive },
+      { op: 'instanceDecl', name: 'osc', program: 'FixedSinOsc', inputs: { freq: 440 } },
+      { op: 'instanceDecl', name: 'sc', program: 'SoftClip', inputs: {
+        input: { op: 'ref', instance: 'osc', output: 'sine' },
+        drive: { op: 'param', name: 'drive' } } },
+    ], assigns: [dacOut('sc', 'out')] },
+  }
 }
 
 // Same IR, two LLVM targets → bit-exact in practice; keep a tolerance for safety.
@@ -396,6 +419,34 @@ describe('wasm vs native JIT', () => {
       await expectBitIdentical(program, intEdgeProgram(program), frames)
     })
   }
+
+  // The binary32 value lane (`--float f32`): the same LLVM at `float`, FMA
+  // off on both targets, so the two agree bit for bit, and every output
+  // sample is a binary32. Floor, ceil and round are inline sequences at
+  // binary32 (no `env.round` import).
+  test('f32: FixedSinOsc 440 Hz — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('FixedSinOsc f32', sinOscProgram(440), 512, 'f32')
+  })
+
+  test('f32: FixedSinOsc → SoftClip(drive 4) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('SoftClip chain f32', softClipChainProgram(4), 512, 'f32')
+  })
+
+  test('f32: op-zoo (rounding, casts, mod, floorDiv, select) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('op-zoo f32', opZooProgram(), 256, 'f32')
+  })
+
+  test('f32: SpectralSaw (200-partial family) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('SpectralSaw f32', spectralSawProgram(110), 512, 'f32')
+  })
+
+  test('f32: a float param, seeded and written — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('drive param f32', drivePatch(3), 512, 'f32')
+    const nat = runNative(compileViaLean(drivePatch(0.1)), 512, 'f32')
+    const wasm = await runWasm(drivePatch(3), '', 512, [['param:drive', 0.1]], 'f32')
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
     const prog = opZooProgram()

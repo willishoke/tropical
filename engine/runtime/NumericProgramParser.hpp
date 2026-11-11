@@ -638,6 +638,32 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     for (const auto & name : out.at("channels"))
       result.output_channels.push_back(name.get<std::string>());
   result.output_channels.resize(result.output_channel_count);
+
+  // The format the artifact realizes `float` in (`realization.float`, f64
+  // when absent): any other is refused by name, and so is a float port
+  // declared at a different format, whose cell the kernel would read at
+  // another width.
+  std::string float_format = "f64";
+  if (manifest.contains("realization") && manifest.at("realization").contains("float"))
+  {
+    const auto & f = manifest.at("realization").at("float");
+    if (!f.is_string())
+      throw std::runtime_error("NumericProgramParser: realization.float must be a string");
+    float_format = f.get<std::string>();
+    if (float_format != "f64" && float_format != "f32")
+      throw std::runtime_error(
+        "NumericProgramParser: unknown float format '" + float_format
+        + "'; this host reads f64 and f32 artifacts");
+  }
+  auto check_float_port = [&](const std::string & name, const std::string & elem) {
+    if ((elem == "f64" || elem == "f32") && elem != float_format)
+      throw std::runtime_error(
+        "NumericProgramParser: port '" + name + "' is " + elem
+        + " in an artifact whose float format is " + float_format);
+  };
+  for (std::size_t i = 1; i < inputs.size(); ++i)
+    check_float_port(result.input_names[i], inputs.at(i).value("elem", std::string{}));
+  check_float_port(out.value("name", std::string{"out"}), out_elem);
   return result;
 }
 
