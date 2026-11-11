@@ -463,9 +463,17 @@ with the increment signed, so a frequency is taken modulo the rate into
 **Cycles.** `tools/embedded_object.py` counts on the M0+ table (ARM DDI
 0484, zero wait states: ALU and `MULS` 1, loads and stores 2, `PUSH`/`POP`
 1+N, `POP` with PC 3+N counting PC, `B` 2, `B<cond>` 2 taken and 1 not,
-`BL` 3). It enumerates every path once around the frame loop, data-dependent
-branches included, and adds the path that enters the loop and the one that
-leaves it. An ARMv6-M emulator on the same table measured two objects, and
+`BL` 3). `MULS` at one cycle assumes the M0+ is built with the single-cycle
+multiplier. The small iterative multiplier is a build option that takes 32
+cycles, which adds 31 cycles per `MULS` (279 per frame for `SinOscQ15`'s
+nine). Each report states the assumption as `timing_model`. The script
+enumerates every path once around the frame loop, data-dependent branches
+included, and adds the path that enters the loop and the one that leaves
+it. The enumeration is exhaustive or the script exits non-zero: a path that
+revisits an instruction (an inner loop) has no bounded cost, and past the
+path limit the set is not known to be complete, so in either case no range
+is printed. The epilogue's cheapest and dearest paths both enter the call
+range (`exit_cycles` and `exit_cycles_upper`). An ARMv6-M emulator on the same table measured two objects, and
 both measurements fall inside the computed ranges:
 
 | object (N = 16) | entry | frame | exit | call | measured |
@@ -654,10 +662,24 @@ semantics reads a format.
   input of the same integer kind must have the same `frac_bits`. A wire that
   computes (`rshift(param(f), 8)`) yields a plain word and binds any input
   of its kind, because arithmetic on words is how a patch converts between
-  formats. A literal wired into a formatted input is a word, not a real
-  value. Declarations are refused when a fraction has no integer kind, when
+  formats. Declarations are refused when a fraction has no integer kind, when
   more fraction bits than the word has are asked for, when the type is
   `bool`, and when a default falls outside the format's range.
+- *Literals.* A bare literal crossing into a formatted input is the real
+  value, exactly as `paramDecl.value` is: `{"freq": 440}` into `SinOscQ15`'s
+  Q16.16 `freq` is 440 Hz, the word `440 · 2^16`. The rule is the
+  bare-crossing rule above: it applies to a wire that is exactly a literal
+  (`Session.bareLiteralAtPort`, in the session compile and in
+  `export_program`). The arithmetic is exact decimal, and a literal whose
+  word is not an integer (`0.00001` at Q16.16) or lies outside the format
+  (`40000` at Q16.16, `0.5` at Q0.32) is refused at compile, as `0.5` is at
+  an `int32` Q32.0 input. A literal inside arithmetic stays a word, like
+  every value the IR computes with: `{"op":"add","args":[65536,0]}` is 1 Hz.
+  An input with no fraction bits takes its literal as written, since there
+  the word is the value. A program's own default is authored as a word
+  (`litI32 65536`, which reaches the patch bay as `toInt32(65536)`), and an
+  exported program's default that came from a bare literal is spelled the
+  same way, so `save` → `load` never reads a word as a real value.
 - *The plan.* `slot_types` lists each typed param slot and each output
   channel's source that carries an `int32` program output, with the format.
   It is omitted when empty. A typed param's `slot_defaults` entry is its
@@ -667,10 +689,13 @@ semantics reads a format.
   `FlatPlan.portError?` holds the rest. A typed param is read only at its
   kind and never written by the kernel. One output buffer has one element
   type. An integer channel has exactly one source at gain 1, since the f64
-  mix and gain have no integer counterpart to pick silently. An `int32`
+  mix and gain have no integer counterpart to pick silently, and that
+  source is `int32`: an `int` slot has no output element type. An `int32`
   value reaches an output only through a listed source. That closes the
-  last implicit `int32` crossing, the f64 sink. The session compile,
-  `PlanDecode` and both emitters refuse a plan that fails it.
+  last implicit `int32` crossing, the f64 sink. A typed param's default is
+  an integer word within its kind's range, never a value to round or wrap.
+  The session compile, `PlanDecode` and both emitters refuse a plan that
+  fails it, and the hosts refuse such a manifest at load.
 - *The kernel.* `EmitLlvm` loads a typed param as `i32` or `i64` straight
   into its slot's integer lane, so it never passes through f64. An `i32`
   output channel stores the word from its 32-bit lane.
@@ -684,9 +709,19 @@ semantics reads a format.
   (patch-bay params carry no discipline, and playground knobs are `float`),
   and `portError?` refuses one whose base or companion is a typed slot
   rather than dropping it. The C++ dispatcher and the web `ParamWriter`
-  refuse it too. An integer `anchor` is the natural next form: with the
+  refuse it too, over every slot the discipline touches: the base, the
+  companions the manifest lists, and those it implies by name. An integer `anchor` is the natural next form: with the
   increment as the port, its correction `Δinc · now` is exact mod 2³². It
   waits for a producer.
+- *Range.* A value is refused where it would saturate: a `paramDecl.value`
+  at ingest and a `set_param` value alike must have its word
+  `value · 2^fracBits` inside the word (`PortFormat.rangeError?`; the error
+  names the range, e.g. `int32 Q16.16, [-32768, 32768)`). The engine refuses
+  before the write, so its mirror, and so `save`, never holds a value `load`
+  would refuse. The C++ dispatcher (`set_param` by name, reached from the
+  control socket without the engine) and the web `ParamWriter` refuse it
+  too. `FlatRuntime::set_slot`, the raw by-index writer, has no error
+  channel and still saturates.
 - *Hosts.* Both hosts take the real value and write the word.
   `FlatRuntime` keeps a typed param's word in its 8-byte slot cell (an
   `int32` sign-extended, so an `i32` load of the cell reads it). `set_param`
@@ -695,15 +730,27 @@ semantics reads a format.
   buffer and is widened to `word · 2^-fracBits` for the f64 output, the
   scope and the DAC. The web `WasmKernel` writes the word into the param's
   cell (`Int32Array` or `BigInt64Array`) and widens an `i32` output the same
-  way. Both readers refuse other elements by name. Existing f64 manifests
+  way. Both readers refuse other elements by name, and a default word that
+  does not fit its element. The web reader also refuses an `i64` default past
+  ±(2⁵³ − 1): `JSON.parse` hands it a double, which may not be the word
+  written (`INT64_MAX` reads as 2⁶³ and would wrap to `INT64_MIN`), so it is
+  refused rather than seeded wrong. The native reader takes the word
+  exactly, so the two never seed different words. Existing f64 manifests
   read and play exactly as before.
 - *Metal.* Metal binds params through the f32 slot vector and its f64 CPU
   pre-pass, and neither holds a 32- or 64-bit word exactly, so `EmitMsl`
   refuses a typed param; typed params run on the JIT and wasm. An `int32`
   output on Metal writes `word · 2^-fracBits` as f32, which is exact for a
   word below 2²⁴, and equals the JIT port widened by the runtime.
-- *Gates.* `typed-ports-jit` and `typed-ports-refusals` in `tropicaltest`
-  (`--ports-only`), the typed-param cases in `wasm_vs_jit`, and
+- *Export.* `export_program` keeps an exposed input's and an exported
+  output's format (`InputDecl.fracBits`, `OutputDecl.fracBits`, and
+  `frac_bits` in the exported `ports`), so an exported `SinOscQ15` still
+  plays at its Q1.15 peak and still binds a Q16.16 param.
+- *Gates.* `typed-ports-jit`, `typed-ports-refusals` and
+  `typed-ports-engine` (export, `save` → `load`, `set_param` range) in
+  `tropicaltest` (`--ports-only`), the typed-param cases in `wasm_vs_jit`,
+  the `SinOscQ15` literal cases in `metal_vs_jit`, the typed-param case in
+  `test_module_process` (range, companions, default words), and
   `tests/web/runtime_typed_ports.test.ts` (the web reader, `encodeWord`,
   refusals). `FixedSinOscQ15`'s three frozen renders and the stdlib goldens
   are unchanged.
@@ -722,6 +769,18 @@ semantics reads a format.
    `int32` output's `fracBits` is the program's, carried into `Kernel.Port`
    and the manifest. `--out-elem` and `--out-format` are gone.
 4. *f32* as a per-target float format on the LLVM path was not attempted.
+   The same question is open on Metal's slots. Metal binds params and the
+   stage-0 coefficient slots through its f32 slot vector, so an `int32` word
+   computed once per call crosses as an f32 and keeps 24 bits. With
+   `SinOscQ15`'s `freq` from a float param through `toInt32(mul(f, 65536))`,
+   the increment arrives as `f32(inc)`: measured against the JIT at 44.1 kHz
+   (8 192 frames from τ = 0), -1 increment LSB at 440 Hz, -15 at 5 kHz and
+   -61 at 20 kHz (an increment near 2³¹, where an f32 step is 128, so up to
+   64 LSB), and the output drifts by up to 26 Q1.15 LSB in that window,
+   growing with τ. A literal frequency folds to a constant and is exact
+   (`metal_vs_jit`), and `EmitMsl` refuses a typed param outright. The fix
+   is an integer lane in Metal's slot vector (or an `i32` slot type per
+   target), which is this item's question.
 
 **Clocks across nodes.** The kernel reads τ from its caller. Exact ratios
 (phase-locked partials, the ℤ/2³² phase identity) hold only between

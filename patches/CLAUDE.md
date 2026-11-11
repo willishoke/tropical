@@ -41,7 +41,15 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
   integer param is a fixed-point word with `"frac_bits"` fraction bits
   (`"type": "int32", "frac_bits": 16` is Q16.16), `value` is its real value,
   and it binds bare only to an input of the same kind and format
-  (`design/typed-kernel.md`, "Typed ports").
+  (`design/typed-kernel.md`, "Typed ports"). `value` and every `set_param`
+  value must lie in the format's range (Q16.16 holds `[-32768, 32768)`);
+  outside it they are refused, not saturated.
+- **literals into fixed-point inputs** — a bare literal wired into an input
+  that declares `frac_bits` is the real value, like `paramDecl.value`:
+  `"inputs": {"freq": 440}` into `SinOscQ15` is 440 Hz (the Q16.16 word
+  `440 · 2^16`). It must be exactly representable in the format and in
+  range, or the compile refuses it. A literal inside arithmetic
+  (`{"op":"add","args":[65536,0]}`) stays a raw word.
 - **ports** — *(optional)* port metadata retained for serialization.
   Top-level patches don't need it; a loaded patch cannot use this field to
   define a new program type.
