@@ -51,7 +51,7 @@ patch-bay front door.
 | Plan-4 compatibility CTest and fixture payload | acceptance evidence | deleted; useful program input remains |
 | Plan 6's integer `tick` time source | source 0 was the sample index | refused with a recompile message: Plan 7's source 0 is the fixed-point τ (Q48.16, `fixed-carrier.md`), so a Plan 6 document cannot be reinterpreted |
 | `tau:i64q32` kernel manifests | the Q32.32 clock rail (2026-10-28 to 2026-11-01, unreleased) | refused by the native and web manifest readers: τ's element type names the rail's format, and the rail is now Q48.16 (`i64q16`) |
-| the `MulLo32` scalar op | a 32-bit multiply on the i64 rail (2026-11-09 to 2026-11-10, unreleased) | refused as an unknown tag by the Lean decoder and the native manifest reader; the `int32` kind's `Mul` is the 32-bit multiply |
+| the `MulLo32` scalar op | a 32-bit multiply on the i64 rail (2026-11-09 to 2026-11-10, unreleased) | refused as an unknown instruction tag by the Lean decoder (`PlanDecode`, via `FlatPlan.kindError?`, which admits only `PlanOp` tags and the structural instructions), by both Lean emitters, and by the native manifest reader's tag table; the `int32` kind's `Mul` is the 32-bit multiply |
 
 ## Additive changes within Plan 7
 
@@ -65,6 +65,20 @@ redefined source 0, so a Plan 6 document is refused).
   `scalar_type`/`result_type` value and a new tag; no existing spelling
   changes meaning, and an older reader refuses both as unknown. Retiring
   `MulLo32` at the same time is a refusal, not a reinterpretation.
+- Total integer semantics (2026-11-10). Integer results the Plan left
+  undefined are now defined: a zero divisor gives 0, `MIN / -1` gives `MIN`
+  and `MIN % -1` gives 0, a shift amount is taken modulo the width, and a
+  float → integer conversion saturates (NaN → 0). This is a refinement: every
+  result that was defined is unchanged, and no shipped program depended on
+  an undefined one (the audio goldens are bit-identical).
+- Kind checking at decode (2026-11-10). `PlanDecode` refuses a document
+  that fails `FlatPlan.kindError?`: an unknown instruction tag, a `reg`
+  read at a sort its producer did not write, an op whose result sort is not
+  the one its operands give or that mixes `int32` with `int`/`float`, a
+  store or array element reached by anything but widening, an `int32` read
+  out of an array, and an integer constant outside its kind. Every plan the
+  compiler emits passes; the check only refuses hand-edited crossings the
+  compiler would refuse.
 
 ## Required rejection behavior
 

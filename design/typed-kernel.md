@@ -464,42 +464,110 @@ products are only wanted mod 2³².
 formats for reals are a target's choice. `int32` is a scalar kind next to
 the 64-bit `int`: two's complement on ℤ/2³² on every target (`i32` in LLVM,
 `int` in MSL). Add, sub, mul, neg and left shift wrap modulo 2³²; right
-shift is arithmetic; division and remainder truncate toward zero and give 0
-for a zero divisor, as `int`'s do. Results that `int` leaves undefined stay
-undefined at the same places, scaled to the word: a shift amount outside
-[0, 31], and `INT32_MIN / -1` or `INT32_MIN % -1` (LLVM's result is poison).
-The constant folder declines to fold those; it folds everything else with
-`wrap32`, and `ConstFoldLaws` proves its int32 routes (ring laws for
-`wrap32`, `wrap32 ∘ wrap64 = wrap32`, the shift and quotient refusals, and
-the edge cases `INT32_MIN · -1`, `INT32_MAX + 1`, `2¹⁶ · 2¹⁶`).
+shift is arithmetic; division and remainder truncate toward zero.
+
+**Total integer semantics.** Every integer op, on `int` and on `int32`, is
+defined on every input in the IR, so no backend is ever handed undefined
+behaviour (LLVM's `sdiv`/`srem` are immediate UB for a zero divisor and for
+`MIN / -1`, `shl`/`ashr` past the width and an out-of-range `fptosi` are
+poison, and the wasm instructions trap). The definitions are the standard
+ones:
+
+- `div`, `mod` (and `floorDiv` on integers) by zero give 0. `MIN / -1` is
+  `MIN` (the quotient 2³¹ or 2⁶³ wrapped) and `MIN % -1` is 0.
+- A shift amount is taken modulo the width, 32 or 64, as wasm and Java do:
+  `x << 33` on `int32` is `x << 1`, and `x << -1` is `x << 31`.
+- A float → integer conversion (`toInt`, `toInt32` of a `float`, and every
+  implicit one, such as an array index or a dynamic bank count) saturates:
+  truncate toward zero, clamp to the word, NaN → 0. This is Rust's `as` and
+  wasm's `trunc_sat`.
+
+`ConstFold.foldOp` is the definition: it folds every case, and
+`ConstFoldLaws` states each integer route as an unconditional equation
+(`foldOp_div_int32`, `foldOp_lshift_int32`, `foldOp_div_int32_min_neg_one`,
+`truncSatToInt32_isI32`, …) with no `sorry` and no axiom. The reference
+semantics is the same function: `Semantics.Scalar.algebra` evaluates a
+Plan's ops with `foldOp` at each instruction's result sort (the Plan
+semantics passes every constant's kind, instruction's result sort and slot
+store's kind to the algebra, so it tells `int32` from `int`). The backends
+implement it without UB. `EmitLlvm` divides by a safe divisor (1 where the
+divisor is 0 or the quotient overflows) and then selects 0 for a zero
+divisor, so `opt` cannot delete the guard. It masks a runtime shift amount,
+reduces a literal one at emit time (so a constant shift's IR is unchanged),
+and converts with `llvm.fptosi.sat`. `EmitMsl` does the same with a guarded
+ternary quotient, masked or reduced shift amounts, `uint`/`ulong` ring ops
+reinterpreted with `as_type` (signed overflow is undefined in MSL as in
+C++), and an explicit NaN-and-range clamp before `int(f)`/`long(f)`. On
+AArch64 the hardware already behaves this way (`sdiv` gives 0 for a zero
+divisor, `fcvtzs` saturates), which is why the JIT rarely showed the bug;
+LLVM's optimizer and wasm did.
 
 There is no implicit crossing. An op never takes an `int32` operand
 together with an `int` or `float` one, and a float-only op (`sqrt`,
-`floor`, …) takes no `int32`; the compiler refuses these
-(`PlanOp.kindMix?`) and `PlanWellFormed` refuses them in a hand-written
-plan.
+`floor`, …) takes no `int32` (`PlanOp.kindMix?`). A value reaches an
+instance input, an output port or a slot by widening only
+(`ScalarKind.widensTo`: bool → int → float and bool → int32), so an `int32`
+value never becomes an `int` or `float`, and nothing but `bool` becomes an
+`int32`, without the cast spelled. The compiler checks this where it binds
+an instance input and where it writes an output port, with an error naming
+the cast; a wire lifted into a `__wire_N` instance keeps an `int32`
+source's kind on its input. A plan that crosses anyway is refused before
+any backend sees it: `FlatPlan.kindError?` checks every instruction in
+execution order (each `reg` read at its producer's sort, each op's result
+sort and operand kinds, stores and array elements by widening only, no
+`int32` read out of an array, constants within their kind, known tags), and
+`PlanDecode`, `EmitLlvm.emitKernel` and `EmitMsl.emitKernel` refuse a plan
+that fails it. `flatPlanWellFormed` includes it.
+
 The casts are the crossings: `toInt32` keeps an `int`'s low 32 bits or
-truncates a `float` toward zero (undefined outside the i32 range, as
-`toInt` is outside i64's), `toInt` sign-extends, `toFloat` converts. `bool`
-promotes to `int32` as it does to `int`. A bare literal beside an `int32`
-operand, on either side, is an `int32` constant, and must lie in
-[-2³¹, 2³¹) (a bit pattern above 2³¹ − 1 is spelled as its negative); a
-compound literal expression does not adopt the kind, so it is written with
-`litI32` or after the `int32` operand. Builders author with `toInt32E` and
-`litI32`. The patch bay connects an `int32` output only to an `int32` input
-(and widens `bool` into one); any other connection spells the cast in the
-wire. Arrays hold floats, so an `int32` array element is refused.
+converts a `float` saturating, `toInt` sign-extends, `toFloat` converts.
+`bool` promotes to `int32` as it does to `int`. A bare literal, or a
+literal-only subtree (`neg(3)`, `2 * 3`), beside an `int32` operand on
+either side is `int32`, and its literals must lie in [-2³¹, 2³¹) (a bit
+pattern above 2³¹ − 1 is spelled as its negative). Builders author with
+`toInt32E` and `litI32`. In the patch bay an `int32` output connects only
+to an `int32` input (and `bool` widens into one); any other connection
+spells the cast in the wire. Arrays hold floats, so an `int32` array
+element is refused. On Metal an `int32` bank reduction stays on the serial
+loop at any width (the cooperative lane partials are float or long arenas).
 
 `int32` sits inside `tropical_plan_7` as an additive change
-(`compatibility-matrix.md`). The gates: `tropicaltest`'s `int32-model`
-renders every op through the JIT and compares it bit for bit with the same
-word computed on `Int` (across the input's 2³¹ wrap, and through a 32-bit
-slot from `FixedSinOscQ15`); `wasm_vs_jit` compares WASM and JIT bit for
-bit on `FixedSinOscQ15` and the op zoo; `metal_vs_jit` requires
-`FixedSinOscQ15` bit-identical on the GPU at τ = 0 and τ = 2⁴⁰. The
-rewrite left `FixedSinOscQ15`'s output bit-identical: three renders frozen
-before it (`tests/golden/embedded/`) still hold, and so do renders at
-τ = 10¹² samples.
+(`compatibility-matrix.md`). The gates, all in `tropicaltest` unless named:
+
+- `int32-model`: `Int32Zoo`'s word, which has every int32 op at runtime
+  including zero and -1 divisors under `INT32_MIN`, shifts past the word
+  and a saturating conversion, rendered by the JIT equals the reference
+  semantics bit for bit. It runs across the input's 2³¹ wrap, and again
+  through a 32-bit slot from `FixedSinOscQ15`.
+- `int-edge`, the edge-value differential: `IntEdge64`, `IntEdge32` and
+  `IntEdgeConv` run every `int` and `int32` op on MIN, MAX, -1, 0 and 1,
+  runtime divisors 0 and -1, shift amounts -1/0/1/31/32/33/63/64/65, NaN,
+  ±∞ and out-of-range floats, and a seeded random sample. Results are read
+  out as exact 16-bit pieces. JIT and Metal (offline) equal the reference
+  frame for frame, and every op's segment is checked to be non-zero.
+  `wasm_vs_jit` holds WASM to the JIT bit for bit on the same programs, and
+  `metal_vs_jit` holds Metal to it again.
+- `int32-refusals` covers the builder spellings, the patch bay, and the
+  real ingest path (`Session.compilePatch`, what `diffcli compile` and
+  `load` run). An `int32` output into a `float` input refuses, bare or as
+  `add(lfo.out, 1)`. So do `int32` and `float` into an `int` clock, `float`
+  into an `int32` input, and an `int32` element in a lifted array. The same
+  wires with the cast compile.
+- `int32-well-kinded`: `PlanDecode` refuses hand-edited plans: an operand
+  relabeled, a `reg` read at a foreign sort, an int32 constant
+  of 3 000 000 000, an int32 store into a float slot, an int32 array read,
+  and `MulLo32`.
+- `wasm_vs_jit` compares WASM and JIT bit for bit on `FixedSinOscQ15`;
+  `metal_vs_jit` requires `FixedSinOscQ15` bit-identical on the GPU at
+  τ = 0 and τ = 2⁴⁰.
+
+The rewrite onto `int32` left `FixedSinOscQ15`'s output bit-identical: three
+renders frozen before it (`tests/golden/embedded/`) held, and so did renders
+at τ = 10¹² samples. The total semantics changed none of them, and the
+frozen renders still hold. The thumbv6m object is unchanged by the total
+semantics: 75
+hot-loop instructions, 90–93 cycles, no libcalls. The LFO's shifts are all
+by literals, which the emitter reduces at emit time.
 
 **Gaps left open (smallest honest fix for each).**
 
