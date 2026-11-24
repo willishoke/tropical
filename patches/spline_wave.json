@@ -1,0 +1,36 @@
+{
+  "schema": "tropical_program_2",
+  "name": "spline_wave",
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "instanceDecl", "name": "ph", "program": "ClockPhasor",
+        "inputs": { "clk": { "op": "clock" }, "freq": 220 } },
+      { "op": "instanceDecl", "name": "wave", "program": "PeriodicCatmullRom8",
+        "inputs": {
+          "phase": { "op": "toInt", "args": [
+            { "op": "mul", "args": [{ "op": "ref", "instance": "ph", "output": "phase" }, 4294967296] }] },
+          "c0": 0, "c1": 0.5, "c2": 0.6, "c3": 0.2,
+          "c4": -0.1, "c5": -0.5, "c6": -0.4, "c7": -0.2
+        } },
+      { "op": "instanceDecl", "name": "ev", "program": "ClockPhasor",
+        "inputs": { "clk": { "op": "clock" }, "freq": 8 } },
+      { "op": "instanceDecl", "name": "env", "program": "OpenBSpline8",
+        "inputs": {
+          "phase": { "op": "toInt", "args": [
+            { "op": "mul", "args": [{ "op": "ref", "instance": "ev", "output": "phase" }, 4294967296] }] },
+          "c0": 0, "c1": 1, "c2": 0.8, "c3": 0.6,
+          "c4": 0.45, "c5": 0.3, "c6": 0.15, "c7": 0
+        } },
+      { "op": "instanceDecl", "name": "vca", "program": "VCA",
+        "inputs": {
+          "audio": { "op": "ref", "instance": "wave", "output": "out" },
+          "cv": { "op": "ref", "instance": "env", "output": "out" }
+        } }
+    ],
+    "assigns": [
+      { "op": "outputAssign", "name": "dac.out",
+        "expr": { "op": "ref", "instance": "vca", "output": "out" } }
+    ]
+  }
+}

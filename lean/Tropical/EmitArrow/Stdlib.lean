@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Numerics
+import Tropical.EmitArrow.Spline
 
 /-!
 # EmitArrow.Stdlib — ID-native standard-library authoring
@@ -578,6 +579,44 @@ def buildReversibleComb (arena : Arena)
   let registry ← buildRegistry arena resolved #["ModalVoice"]
   warpBank3 arena "ReversibleComb" "ModalVoice" registry 110
 
+/-- The control count of the registered splines. -/
+def stdlibSplineControls : Nat := 8
+
+/-- A spline program (`splineSig`): an integer `phase` (Q0.32, one cycle is
+    2³², the DDS phase rail; `toInt(phase · 2³²)` of a `ClockPhasor`) and
+    `stdlibSplineControls` float control values `c0 …`, each live when wired
+    from a `param:` slot. Basis, boundary and K are fixed per program. -/
+private def splineProgram (arena : Arena) (name : String) (basis : SplineBasis)
+    (boundary : SplineBoundary) : Except String (Arena × ProgramIdx) :=
+  assemble arena name #[floatOut] #[] do
+    let k := stdlibSplineControls
+    let phase ← inputRef ⟨0⟩
+    let controls ← (Array.range k).mapM fun j => inputRef ⟨j + 1⟩
+    let body ← splineSig basis boundary controls phase
+    let zero ← lit 0
+    let phaseInput : AInputDecl :=
+      { name := "phase", type? := some (.scalar .int), defaultSig := some zero }
+    pure {
+      inputs := #[phaseInput] ++ (Array.range k).map fun j => floatDecl s!"c{j}" zero
+      assigns := #[(.port ⟨0⟩, body)]
+    }
+
+def buildPeriodicCatmullRom8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  splineProgram arena "PeriodicCatmullRom8" catmullRomBasis .wrap
+
+def buildOpenCatmullRom8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  splineProgram arena "OpenCatmullRom8" catmullRomBasis .clamp
+
+def buildPeriodicBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  splineProgram arena "PeriodicBSpline8" uniformBSplineBasis .wrap
+
+def buildOpenBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  splineProgram arena "OpenBSpline8" uniformBSplineBasis .clamp
+
 def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ClockPhasor", buildClockPhasor), ("FixedSin", buildFixedSin),
   ("FixedSinOsc", buildFixedSinOsc), ("MorphOsc", buildMorphOsc),
@@ -588,7 +627,11 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ReversibleComb", buildReversibleComb), ("ScrubClock", buildScrubClock),
   ("ThroughZeroFlanger", buildThroughZeroFlanger),
   ("SoftClip", buildSoftClip), ("FixedSinOscQ15", buildFixedSinOscQ15),
-  ("SinOscQ15", buildSinOscQ15)]
+  ("SinOscQ15", buildSinOscQ15),
+  ("PeriodicCatmullRom8", buildPeriodicCatmullRom8),
+  ("OpenCatmullRom8", buildOpenCatmullRom8),
+  ("PeriodicBSpline8", buildPeriodicBSpline8),
+  ("OpenBSpline8", buildOpenBSpline8)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}

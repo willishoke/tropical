@@ -266,6 +266,16 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     gate('scrub_reverb', 'patches/scrub_reverb.json', 4096, 125)
   })
 
+  // The splines, each read by `toInt(phase · 2³²)` of a `ClockPhasor`.
+  // Measured at 138.9 dB at τ = 0 and at τ + 2^40: the f32 value floor, flat.
+  test('spline_wave — periodic Catmull-Rom × open B-spline', () => {
+    gate('spline_wave', 'patches/spline_wave.json', 4096, 125)
+  })
+
+  test('spline_wave @ τ+2^40 — stays flat', () => {
+    gate('spline_wave far', 'patches/spline_wave.json', 4096, 125, FAR)
+  })
+
   test('ring-mod — product of voices', () => {
     gate('ring-mod', 'web/patches/ring-mod.json', 4096, 125)
   })
