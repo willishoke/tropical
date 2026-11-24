@@ -96,12 +96,21 @@ def evaluate(t, env, memo):
     memo[k] = v
     return v
 
-def prove_with_cuts(name, spec, obj, samples=48, cut_timeout_ms=3000, seed=1, return_cuts=False):
+def prove_with_cuts(name, spec, obj, samples=48, cut_timeout_ms=3000, seed=1, return_cuts=False, halves=False):
     t0 = time.time()
     rng = random.Random(seed)
     allnodes = {}
     nodes_of(spec, allnodes); nodes_of(obj, allnodes)
     specids = set(nodes_of(spec, {}))
+    if halves:
+        # 32-bit words of 64-bit spec nodes as extra merge targets, so an
+        # object that computes a 64-bit ring op in two words (adds/adcs,
+        # limb products) can be aligned word by word
+        for k in list(specids):
+            t = allnodes[k]
+            if z3.is_bv(t) and t.size() == 64 and not z3.is_const(t):
+                for hl in (z3.Extract(31, 0, t), z3.Extract(63, 32, t)):
+                    allnodes[hl.get_id()] = hl; specids.add(hl.get_id())
     inputs = {t.decl().name(): t.size() if z3.is_bv(t) else 1
               for t in allnodes.values() if z3.is_const(t) and not z3.is_bv_value(t)
               and not z3.is_true(t) and not z3.is_false(t)}

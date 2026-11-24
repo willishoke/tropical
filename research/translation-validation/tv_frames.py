@@ -14,6 +14,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument('--spec', required=True); ap.add_argument('--obj', required=True)
 ap.add_argument('--triple', default='thumbv6m-none-eabi')
 ap.add_argument('--cuts', action='store_true')
+ap.add_argument('--halves', action='store_true', help='autocut may merge into 32-bit words of 64-bit spec nodes')
 a = ap.parse_args()
 manifest = json.load(open(a.obj + '.manifest.json'))
 frames = manifest['object']['frames']
@@ -50,7 +51,7 @@ for k in range(frames):
         o_k = st.mem[(out_base, 4 * (k * nch + ch))]
         if a.cuts:
             import autocut
-            autocut.prove_with_cuts('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k, o_k)
+            autocut.prove_with_cuts('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k, o_k, halves=a.halves)
         else:
             prove('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k == o_k)
 prove('r4-r7 restored, returns to lr',
