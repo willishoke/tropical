@@ -167,21 +167,32 @@ def main(spec_file, obj_file, out_file):
         earlier = [(oo, ss) for ss, oo in cuts[:i]]
         o_c = z3.substitute(o, *earlier) if earlier else o
         o_c = z3.substitute(o_c.decl()(*[z3.substitute(c, *earlier) if earlier else c for c in o.children()]) if o.num_args() else o_c)
-        fresh = [(allnodes[f], z3.FreshConst(allnodes[f].sort(), 'fr')) for f in fr]
-        lhs_z = z3.substitute(o_c, *fresh) if fresh else o_c
-        rhs_z = z3.substitute(s_node, *fresh) if fresh else s_node
-        sv = z3.SolverFor('QF_BV'); sv.set('timeout', 5000); sv.add(lhs_z != rhs_z)
-        if sv.check() != z3.unsat:
+        def valid(frontier):
+            fresh = [(allnodes[f], z3.FreshConst(allnodes[f].sort(), 'fr')) for f in frontier]
+            lhs_z = z3.substitute(o_c, *fresh) if fresh else o_c
+            rhs_z = z3.substitute(s_node, *fresh) if fresh else s_node
+            sv = z3.SolverFor('QF_BV'); sv.set('timeout', 5000); sv.add(lhs_z != rhs_z)
+            return sv.check() == z3.unsat
+        fr0 = set(fr)
+        depth = 0
+        while not valid(fr) and depth < 4:   # unfold the frontier one level at a time
+            fr = {c.get_id() for f in fr for c in allnodes[f].children()
+                  if leaf(None, c) is None and c.get_id() in specids}
+            depth += 1
+        if not valid(fr):
             fr = set(); nfull += 1
         unfold = spec_below(s_node, fr)
-        if not fr:      # unfold the merged children's spec targets as well
-            for f in merged_expr_frontier(o): unfold |= spec_below(allnodes[f], set())
-        names = ', '.join(['p%d' % 0 for _ in []] + obj_pdefs(o) + ['n%d' % u for u in sorted(unfold)])
+        for f in fr0: unfold |= spec_below(allnodes[f], fr)
+        names = ', '.join(list(dict.fromkeys(obj_pdefs(o))) + ['n%d' % u for u in sorted(unfold)])
         lhs = E.op(o, ['(%s)' % pref(c) for c in o.children()])
         out.append('theorem a%d %s : (%s) = n%d %s := by' % (k, E.sig, lhs, sk, E.args))
         if names: out.append('  try simp only [%s]' % names)
-        out.append('  all_goals first | rfl | bv_decide (config := { acNf := true, timeout := 120 })')
-    print('merge obligations: %d with opaque frontier, %d fully unfolded' % (len(cuts) - nfull, nfull))
+        comm = ' | exact BitVec.mul_comm _ _' if o.decl().kind() == z3.Z3_OP_BMUL and o.num_args() == 2 else ''
+        # plain rfl can unfold BitVec arithmetic on literals cheaply, but on an
+        # ite/Bool goal it can hit the recursion limit, which `first` cannot catch
+        rfl = '' if o.decl().kind() == z3.Z3_OP_ITE or not z3.is_bv(o) else ' | (set_option maxHeartbeats 100000 in rfl)'
+        out.append('  all_goals first | with_reducible rfl%s%s | bv_decide (config := { acNf := true, timeout := 300 })' % (comm, rfl))
+    print('merge obligations: %d with an opaque frontier, %d fully unfolded' % (len(cuts) - nfull, nfull))
     # b: original object nodes equal their merged forms, bottom-up
     for t in order:
         k = t.get_id()
