@@ -22,12 +22,13 @@ for asrt in z3.parse_smt2_string(open(a.spec).read()):
     spec[int(asrt.arg(0).decl().name().split('.')[1])] = asrt.arg(1)
 nch = len(spec)
 ports = manifest['object']['ports']
-if len(ports) > 4: raise SystemExit('stack-passed pointers not modeled')
 callee = {r: z3.BitVec('orig_' + r, 32) for r in ('r4', 'r5', 'r6', 'r7', 'lr')}
 regs0 = dict(callee); loads = {}; out_base = None
 taus = [z3.BitVec('tau@%d' % k, 64) for k in range(frames)]
 for i, p in enumerate(ports):
-    base = 'arg%d' % i; regs0['r%d' % i] = ('ptr', base, 0)
+    base = 'arg%d' % i
+    if i < 4: regs0['r%d' % i] = ('ptr', base, 0)
+    else: loads[('sp', 4 * (i - 4))] = ('ptr', base, 0)     # AAPCS: stacked arguments at sp on entry
     if p['name'] == 'tau':
         for k, t in enumerate(taus):
             loads[(base, 8 * k)] = z3.Extract(31, 0, t); loads[(base, 8 * k + 4)] = z3.Extract(63, 32, t)

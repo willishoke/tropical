@@ -163,7 +163,7 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 return x - y if sub else x + y
             branch = None
             nzcv = None
-            flagset = mn in ('movs', 'muls', 'adds', 'subs', 'asrs', 'lsls', 'lsrs', 'ands', 'orrs', 'eors', 'mvns', 'rsbs')
+            flagset = mn in ('movs', 'muls', 'adds', 'subs', 'asrs', 'lsls', 'lsrs', 'ands', 'orrs', 'eors', 'mvns', 'bics')
             if mn == 'push':
                 rs = re.findall(r'r\d+|lr', o[0])
                 sp = R['sp']; base = sp[2] - 4 * len(rs)
@@ -247,6 +247,28 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 a, n = g(o[1]), imm(o[2])
                 if not (0 <= n <= 31 or (mn != 'lsls' and n == 32)): raise Unsupported('shift %d' % n)
                 R[o[0]] = (a >> n) if mn == 'asrs' else (a << n) if mn == 'lsls' else z3.LShR(a, n)
+            elif mn in ('lsrs', 'lsls', 'asrs') and len(o) == 2:   # Rdn, Rm: shift by Rm[7:0]
+                a = g(o[0]); n = z3.ZeroExt(24, z3.Extract(7, 0, g(o[1])))
+                if mn == 'lsrs': r = z3.If(z3.UGE(n, 32), bv(0), z3.LShR(a, n))
+                elif mn == 'lsls': r = z3.If(z3.UGE(n, 32), bv(0), a << n)
+                else: r = z3.If(z3.UGE(n, 32), a >> 31, a >> n)
+                R[o[0]] = r
+            elif mn == 'adcs' and len(o) == 2:                     # Rdn = Rdn + Rm + C
+                if st.flags is None or st.flags[2] is None:
+                    raise Unsupported('adcs without a modeled carry at %x' % st.pc)
+                a, b = g(o[0]), g(o[1]); cin = z3.If(st.flags[2], z3.BitVecVal(1, 33), z3.BitVecVal(0, 33))
+                wide = z3.ZeroExt(1, a) + z3.ZeroExt(1, b) + cin
+                res = z3.Extract(31, 0, wide); R[o[0]] = res
+                V = z3.Extract(31, 31, ~(a ^ b) & (a ^ res)) == 1
+                st.flags = (z3.Extract(31, 31, res) == 1, res == 0, z3.Extract(32, 32, wide) == 1, V)
+                st.pc = nxt; continue
+            elif mn == 'rsbs' and len(o) == 3 and imm(o[2]) == 0:   # Rd = 0 - Rn
+                x = g(o[1]); res = bv(0) - x; R[o[0]] = res
+                nzcv = (x == 0, z3.Extract(31, 31, x & res) == 1)   # C: 0 >= x unsigned; V: 0 - x overflows
+                st.flags = (z3.Extract(31, 31, res) == 1, res == 0) + nzcv
+                st.pc = nxt; continue
+            elif mn == 'bics' and len(o) == 2:
+                R[o[0]] = g(o[0]) & ~g(o[1])
             elif mn == 'uxth':
                 R[o[0]] = g(o[1]) & bv(0xFFFF)
             elif mn in ('ands', 'orrs', 'eors') and len(o) == 2:

@@ -229,7 +229,7 @@ theorem a87 (v_tau : BitVec 64) : (((p86 v_tau)) <<< (((1#32)))) = n16 v_tau := 
   try simp only [p86, n16]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a90 (v_tau : BitVec 64) : (((p89 v_tau)) >>> (((16#32)))) = n23 v_tau := by
-  try simp only [p89, n21, n23]
+  try simp only [p89, n19, n21, n23]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a84 (v_tau : BitVec 64) : (((p83 v_tau)) + ((p82 v_tau))) = n9 v_tau := by
   try simp only [p82, p81, p83, p80, n8, n9]
@@ -244,16 +244,16 @@ theorem a91 (v_tau : BitVec 64) : (((p88 v_tau)) + ((p90 v_tau))) = n24 v_tau :=
   try simp only [p90, p88, n24]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a93 (v_tau : BitVec 64) : (((p91 v_tau)) + ((p92 v_tau))) = n28 v_tau := by
-  try simp only [p92, p91, n26, n28]
+  try simp only [p92, p91, n24, n26, n28]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a94 (v_tau : BitVec 64) : (((p93 v_tau)) >>> (((16#32)))) = n30 v_tau := by
-  try simp only [p93, n29, n30]
+  try simp only [p93, n28, n29, n30]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a96 (v_tau : BitVec 64) : (((p94 v_tau)) + ((p95 v_tau))) = n32 v_tau := by
   try simp only [p95, p94, n32]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a102 (v_tau : BitVec 64) : ((((2#32))) &&& ((p101 v_tau))) = n37 v_tau := by
-  try simp only [p101, p96, n34, n36, n37]
+  try simp only [p101, p96, n30, n32, n34, n36, n37]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a99 (v_tau : BitVec 64) : (((p98 v_tau)) &&& ((p96 v_tau))) = n39 v_tau := by
   try simp only [p96, p98, n30, n32, n34, n39]
@@ -322,7 +322,7 @@ theorem a124 (v_tau : BitVec 64) : (BitVec.sshiftRight' ((p123 v_tau)) (((14#32)
   try simp only [p123, n65]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a167 (v_tau : BitVec 64) : (if ((p166 v_tau)) then ((p124 v_tau)) else ((p164 v_tau))) = n72 v_tau := by
-  try simp only [p164, p157, p154, p153, p149, p148, p147, p146, p141, p145, p143, p142, p140, p139, p137, p136, p134, p133, p132, p131, p125, p124, p130, p128, p126, p135, p129, p163, p162, p165, p161, p160, p159, p158, p152, p144, p156, p155, p138, p166, n67, n68, n70, n71, n72]
+  try simp only [p164, p157, p154, p153, p149, p148, p147, p146, p141, p145, p143, p142, p140, p139, p137, p136, p134, p133, p132, p131, p125, p124, p130, p128, p126, p135, p129, p163, p162, p165, p161, p160, p159, p158, p152, p144, p156, p155, p138, p166, n63, n64, n65, n67, n68, n70, n71, n72]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem b80 (v_tau : BitVec 64) : n80 v_tau = p80 v_tau := by
   rw [n80, p80]

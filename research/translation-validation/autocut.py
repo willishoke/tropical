@@ -80,6 +80,13 @@ def evaluate(t, env, memo):
         elif K == z3.Z3_OP_SGT: v = int(sx(a[0], cw) > sx(a[1], cw))
         elif K == z3.Z3_OP_SGEQ: v = int(sx(a[0], cw) >= sx(a[1], cw))
         elif K == z3.Z3_OP_ULT: v = int(a[0] < a[1])
+        elif K == z3.Z3_OP_ULEQ: v = int(a[0] <= a[1])
+        elif K == z3.Z3_OP_UGT: v = int(a[0] > a[1])
+        elif K == z3.Z3_OP_UGEQ: v = int(a[0] >= a[1])
+        elif K == z3.Z3_OP_BUREM: v = a[0] if a[1] == 0 else a[0] % a[1]
+        elif K == z3.Z3_OP_BSREM:
+            x, y = sx(a[0], cw), sx(a[1], cw)
+            v = x if y == 0 else (abs(x) % abs(y)) * (1 if x >= 0 else -1)
         elif K == z3.Z3_OP_BSDIV:
             x, y = sx(a[0], cw), sx(a[1], cw)
             if y == 0: v = -1 if x >= 0 else 1          # SMT-LIB bvsdiv by zero

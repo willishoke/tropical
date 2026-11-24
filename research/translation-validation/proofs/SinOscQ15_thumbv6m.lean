@@ -259,7 +259,7 @@ theorem a101 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : Bit
   try simp only [p100, n19, n20, n21]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a98 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((n12 v_param_freq v_param_phase v_tau)) + ((v_param_freq))) = n13 v_param_freq v_param_phase v_tau := by
-  try simp only [n8, n13]
+  try simp only [n8, n12, n13]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a105 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p104 v_param_freq v_param_phase v_tau)) + ((p103 v_param_freq v_param_phase v_tau))) = n27 v_param_freq v_param_phase v_tau := by
   try simp only [p103, p97, p104, p96, n26, n27]
@@ -283,25 +283,25 @@ theorem a109 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : Bit
   try simp only [p107, p108, n33]
   all_goals first | with_reducible rfl | exact BitVec.mul_comm _ _ | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a114 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p113 v_param_freq v_param_phase v_tau)) >>> (((16#32)))) = n38 v_param_freq v_param_phase v_tau := by
-  try simp only [p113, n37, n38]
+  try simp only [p113, n36, n37, n38]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a106 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p102 v_param_freq v_param_phase v_tau)) * ((p105 v_param_freq v_param_phase v_tau))) = n28 v_param_freq v_param_phase v_tau := by
   try simp only [p105, p102, n28]
   all_goals first | with_reducible rfl | exact BitVec.mul_comm _ _ | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a115 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p111 v_param_freq v_param_phase v_tau)) + ((p114 v_param_freq v_param_phase v_tau))) = n41 v_param_freq v_param_phase v_tau := by
-  try simp only [p114, p111, p106, p110, p109, n34, n39, n41]
+  try simp only [p114, p111, p106, p110, p109, n23, n27, n28, n29, n32, n33, n34, n37, n38, n39, n41]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a117 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p115 v_param_freq v_param_phase v_tau)) + ((p116 v_param_freq v_param_phase v_tau))) = n43 v_param_freq v_param_phase v_tau := by
   try simp only [p116, p115, n43]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a118 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p117 v_param_freq v_param_phase v_tau)) >>> (((16#32)))) = n45 v_param_freq v_param_phase v_tau := by
-  try simp only [p117, n44, n45]
+  try simp only [p117, n43, n44, n45]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a120 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p118 v_param_freq v_param_phase v_tau)) + ((p119 v_param_freq v_param_phase v_tau))) = n47 v_param_freq v_param_phase v_tau := by
   try simp only [p119, p118, n47]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a126 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : ((((2#32))) &&& ((p125 v_param_freq v_param_phase v_tau))) = n52 v_param_freq v_param_phase v_tau := by
-  try simp only [p125, p120, n49, n50, n52]
+  try simp only [p125, p120, n45, n47, n49, n50, n52]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a123 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (((p122 v_param_freq v_param_phase v_tau)) &&& ((p120 v_param_freq v_param_phase v_tau))) = n54 v_param_freq v_param_phase v_tau := by
   try simp only [p120, p122, n45, n47, n49, n54]
@@ -370,7 +370,7 @@ theorem a148 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : Bit
   try simp only [p147, n80]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem a191 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : (if ((p190 v_param_freq v_param_phase v_tau)) then ((p148 v_param_freq v_param_phase v_tau)) else ((p188 v_param_freq v_param_phase v_tau))) = n88 v_param_freq v_param_phase v_tau := by
-  try simp only [p188, p181, p178, p177, p173, p172, p171, p170, p165, p169, p167, p166, p164, p163, p161, p160, p158, p157, p156, p155, p149, p148, p154, p152, p150, p159, p153, p187, p186, p189, p185, p184, p183, p182, p176, p168, p180, p179, p162, p190, n82, n83, n85, n86, n88]
+  try simp only [p188, p181, p178, p177, p173, p172, p171, p170, p165, p169, p167, p166, p164, p163, p161, p160, p158, p157, p156, p155, p149, p148, p154, p152, p150, p159, p153, p187, p186, p189, p185, p184, p183, p182, p176, p168, p180, p179, p162, p190, n78, n79, n80, n82, n83, n85, n86, n88]
   all_goals first | with_reducible rfl | bv_decide (config := { acNf := true, timeout := 300 })
 theorem b96 (v_param_freq : BitVec 32) (v_param_phase : BitVec 32) (v_tau : BitVec 64) : n96 v_param_freq v_param_phase v_tau = p96 v_param_freq v_param_phase v_tau := by
   rw [n96, p96]
