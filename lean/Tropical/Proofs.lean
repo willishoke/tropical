@@ -10,6 +10,7 @@ import Tropical.Testing.PlanSemantics
 import Tropical.Testing.StrataSemantics
 import Tropical.Testing.PipelineCapstones
 import Tropical.Testing.StagingLaws
+import Tropical.Testing.ClockMultDivLaws
 
 /-!
 Public aggregate for the proof-initiative theorem modules and their

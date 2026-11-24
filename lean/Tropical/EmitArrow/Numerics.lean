@@ -182,6 +182,100 @@ def fixedSinQ15Sig (phaseQ : Sig) : BuildM Sig := do
   let y ← rshift (← add (← mul x acc1) half14) shift14
   clamp y (← lit (-32767)) (← lit 32767)
 
+/-! ### The 64-bit ring in 32-bit multiplies
+
+`int` is ℤ/2⁶⁴ and its `mul` is the ring product, but on a core without a
+64-bit multiply (ARMv6-M has no `UMULL`) LLVM lowers an `i64` `mul` to the
+libcall `__aeabi_lmul`, which `compile-object` refuses. These helpers spell the
+same products with `int32` multiplies only: every multiply below is a 16×16
+limb product (below 2³², so its low word read unsigned is the exact product)
+or a product wanted only mod 2³². The sums are `int` adds and shifts by
+literals, which a 32-bit core does inline. Each equals the `int` product mod
+2⁶⁴ on every input (`Tropical.Testing.ClockMultDivLaws`).
+
+The spelling matters to the optimizer, not only to the core: a high-word-only
+form (the textbook 16-bit "ladder" for the top word of `a · b_lo`, with the
+middle column's carry) is recognized by LLVM 22 as a widening multiply and
+comes back as `__aeabi_lmul` on thumbv6m. The full-product assembly below is
+not. `make validate` checks the thumbv6m object for libcalls. -/
+
+/-- An `int32` word read unsigned, as an `int` in `[0, 2³²)`. -/
+def wordU32 (x : Sig) : BuildM Sig := do
+  bitAnd (← toIntE x) (← lit 4294967295)
+
+/-- The full product of two `int32` words read unsigned, as an `int` in
+    `[0, 2⁶⁴)`: four 16×16 limb products. -/
+def mulWideU32 (a b : Sig) : BuildM Sig := do
+  let shift16 ← lit 16
+  let mask16 ← lit 65535
+  let a0 ← bitAnd a mask16
+  let a1 ← bitAnd (← rshift a shift16) mask16
+  let b0 ← bitAnd b mask16
+  let b1 ← bitAnd (← rshift b shift16) mask16
+  let ll ← wordU32 (← mul a0 b0)
+  let lh ← wordU32 (← mul a0 b1)
+  let hl ← wordU32 (← mul a1 b0)
+  let hh ← wordU32 (← mul a1 b1)
+  let mid ← lshift (← add lh hl) shift16
+  add (← add ll mid) (← lshift hh (← lit 32))
+
+/-- `a · b` mod 2⁶⁴ for an `int32` word `a` read unsigned and an `int` `b`:
+    `a · b_lo` in full plus `(a · b_hi mod 2³²) · 2³²`. Five 32-bit
+    multiplies. -/
+def mulLoU32By64 (a b : Sig) : BuildM Sig := do
+  let shift32 ← lit 32
+  let bLo ← toInt32E b
+  let bHi ← toInt32E (← rshift b shift32)
+  let low ← mulWideU32 a bLo
+  let high ← mul a bHi
+  add low (← lshift (← toIntE high) shift32)
+
+/-- `a · b` mod 2⁶⁴ for `int`s `a` and `b` (the `int` `mul`), in six 32-bit
+    multiplies: `mulLoU32By64 a_lo b` plus `(a_hi · b_lo mod 2³²) · 2³²`. -/
+def mulLo64 (a b : Sig) : BuildM Sig := do
+  let shift32 ← lit 32
+  let aLo ← toInt32E a
+  let aHi ← toInt32E (← rshift a shift32)
+  let low ← mulLoU32By64 aLo b
+  let cross ← mul aHi (← toInt32E b)
+  add low (← lshift (← toIntE cross) shift32)
+
+/-- A frequency in Hz as an `int32` Q16.16 word `F`, to the per-sample
+    increment on ℤ/2⁶⁴ when one wrap of the ring is `cycles` cycles of that
+    frequency: `I = ⌊F · K / 2¹⁶⌋` with `K = round(2⁶⁴ / (cycles · rate))`, a
+    constant of the artifact. `K` is split at bit 16 (`K = Kh·2¹⁶ + Kl`), so
+    `I = F·Kh + ⌊F·Kl / 2¹⁶⌋`, exact mod 2⁶⁴ at every rate (`F·Kl` is below
+    2⁴⁷ in magnitude). Per call (stage 0), never per frame. -/
+def hzQ16ToInc64 (cycles : Nat) (freqQ16 : Sig) : BuildM Sig := do
+  let shift16 ← lit 16
+  let ringOne ← lit 18446744073709551616
+  let k ← toIntE (← roundE (← div ringOne (← mul (← lit cycles) (← sampleRate))))
+  let kh ← rshift k shift16
+  let kl ← toInt32E (← bitAnd k (← lit 65535))
+  let f ← toIntE freqQ16
+  let whole ← mulLo64 f kh
+  let part ← rshift (← mulLoU32By64 kl f) shift16
+  add whole part
+
+/-- The position on ℤ/2⁶⁴ at clock `clk`, `⌊inc · τ / 2¹⁶⌋` mod 2⁶⁴, for an
+    `int` increment per sample. As in `phaseQ32`, τ splits into the
+    whole-sample count and the fraction (`τ = whole·2¹⁶ + frac`) and the
+    increment at bit 16 (`inc = hi·2¹⁶ + lo`, `hi = inc >> 16` arithmetic,
+    `0 ≤ lo < 2¹⁶`): `inc·whole + hi·frac + ⌊lo·frac / 2¹⁶⌋`, the floor of a
+    sum whose other terms are integers. `lo·frac < 2³²` is one 32-bit
+    multiply whose bits 16..31 the shift and mask recover. -/
+def ringPosition64 (inc clk : Sig) : BuildM Sig := do
+  let shift16 ← lit 16
+  let mask16 ← lit 65535
+  let whole ← rshift clk (← clockFracLit)
+  let frac ← toInt32E (← bitAnd clk (← clockFracMaskLit))
+  let incHi ← rshift inc shift16
+  let incLo ← toInt32E (← bitAnd inc mask16)
+  let pWhole ← mulLo64 inc whole
+  let pHi ← mulLoU32By64 frac incHi
+  let pLo ← bitAnd (← rshift (← mul incLo frac) shift16) mask16
+  add (← add pWhole pHi) (← toIntE pLo)
+
 def fixedOutQ (fracBits : Nat) (x : Sig) : BuildM Sig := do
   let xf ← toFloatE x
   let scale ← lit (Int.pow 2 fracBits)
