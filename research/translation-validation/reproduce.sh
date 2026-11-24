@@ -39,3 +39,6 @@ $PY tv_frames.py --spec lfo_knob2.spec.smt2 --obj gen/lfo_knob2-f128.o --cuts
 # differential check of the symbolic carrier against the concrete reference (bounded)
 #   lake env lean --run tools/RefOfPlanJson.lean <plan.json> <vectors> > ref_out.txt
 #   $PY diff_ref.py lfo_knob2.spec.smt2 <vectors> ref_out.txt param:freq param:phase
+# kernel-checked version: z3 only picks the merges; Lean (bv_decide + rewriting) checks
+$PY tolean2.py lfo_knob2.spec.smt2 gen/lfo_knob2.o gen/TVlfo.lean
+(cd ../../lean && lake env lean --tstack=200000 ../research/translation-validation/gen/TVlfo.lean)

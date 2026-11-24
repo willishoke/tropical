@@ -188,16 +188,17 @@ def main(spec_file, obj_file, out_file):
         out.append('theorem a%d %s : (%s) = n%d %s := by' % (k, E.sig, lhs, sk, E.args))
         if names: out.append('  try simp only [%s]' % names)
         comm = ' | exact BitVec.mul_comm _ _' if o.decl().kind() == z3.Z3_OP_BMUL and o.num_args() == 2 else ''
-        # plain rfl can unfold BitVec arithmetic on literals cheaply, but on an
-        # ite/Bool goal it can hit the recursion limit, which `first` cannot catch
-        rfl = '' if o.decl().kind() == z3.Z3_OP_ITE or not z3.is_bv(o) else ' | (set_option maxHeartbeats 100000 in rfl)'
+        # no plain `rfl`: definitional unfolding of BitVec arithmetic over opaque
+        # atoms can take minutes or hit the recursion limit (which `first`
+        # cannot catch); bv_decide settles these in well under a second
+        rfl = ''
         out.append('  all_goals first | with_reducible rfl%s%s | bv_decide (config := { acNf := true, timeout := 300 })' % (comm, rfl))
     print('merge obligations: %d with an opaque frontier, %d fully unfolded' % (len(cuts) - nfull, nfull))
     # b: original object nodes equal their merged forms, bottom-up
     for t in order:
         k = t.get_id()
         if leaf(None, t) is not None or k in specids or k not in objids: continue
-        kids = [c for c in t.children() if leaf(None, c) is None and c.get_id() not in specids]
+        kids = list({c.get_id(): c for c in t.children() if leaf(None, c) is None and c.get_id() not in specids}.values())
         bs = ' '.join('b%d' % c.get_id() for c in kids)
         out.append('theorem b%d %s : n%d %s = p%d %s := by' % (k, E.sig, k, E.args, k, E.args))
         if k in merged:
