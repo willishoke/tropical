@@ -73,10 +73,21 @@ class State:
 
 def is_ptr(v): return isinstance(v, tuple)
 
+_skel = {}
 def skeleton(v):
+    """('c', n) for a word that simplifies to a constant, else 'sym'. Cached:
+    simplifying large terms at every merge check dominated the run time."""
     if is_ptr(v): return v
-    s = z3.simplify(v)
-    return ('c', s.as_long()) if z3.is_bv_value(s) else 'sym'
+    if z3.is_bv_value(v): return ('c', v.as_long())
+    k = v.get_id()
+    if k not in _skel:
+        # only small terms can be constants in disguise (e.g. 1 << 15)
+        if len(v.children()) <= 2 and all(z3.is_bv_value(c) or len(c.children()) <= 2 for c in v.children()):
+            s = z3.simplify(v)
+            _skel[k] = ('c', s.as_long()) if z3.is_bv_value(s) else 'sym'
+        else:
+            _skel[k] = 'sym'
+    return _skel[k]
 
 def mergeable(a, b):
     if a.pc != b.pc or a.back != b.back or set(a.R) != set(b.R) or set(a.mem) != set(b.mem):
