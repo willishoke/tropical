@@ -11,7 +11,7 @@ images of in-range values has, as its signed value (`toInt`), exactly what
 injective, the term and the reference agree as words.
 
 What is NOT here (the open part of the carrier's obligation): the same laws
-for `bvor`/`bvxor`/`bvnot`, `bvsub`/`bvneg` at 64 bits, masked runtime shift
+for `bvnot`, and `bvor`/`bvxor`/`bvshl` at 64 bits, masked runtime shift
 amounts, the bool<->int coercions, and the theorem that `Symbolic.symOp`'s
 dispatch (which sort, which coercion) composes these primitives into exactly
 `foldOp` at every sort. Also trusted: SMT-LIB's `bvadd` etc. mean Lean's
@@ -140,5 +140,37 @@ theorem shl32 (k : Nat) :
   rw [e, ← Int.emod_bmod (x := a % _ * _), ← Int.emod_bmod (x := a * _)]
   congr 1
   rw [Int.mul_emod, Int.emod_emod, ← Int.mul_emod]
+
+theorem or32 :
+    (BitVec.ofInt 32 a ||| BitVec.ofInt 32 b).toInt = bit32 (· ||| ·) a b := by
+  rw [BitVec.toInt_eq_toNat_bmod, BitVec.toNat_or, BitVec.toNat_ofInt, BitVec.toNat_ofInt]
+  unfold bit32 toU32; rw [wrap32_eq_bmod]
+  have e : ∀ x : Int, ((x % 4294967296 + 4294967296) % 4294967296) = x % ((2 ^ 32 : Nat) : Int) := by
+    intro x; simp only [Nat.reducePow]; omega
+  rw [e a, e b]; rfl
+
+theorem xor32 :
+    (BitVec.ofInt 32 a ^^^ BitVec.ofInt 32 b).toInt = bit32 (· ^^^ ·) a b := by
+  rw [BitVec.toInt_eq_toNat_bmod, BitVec.toNat_xor, BitVec.toNat_ofInt, BitVec.toNat_ofInt]
+  unfold bit32 toU32; rw [wrap32_eq_bmod]
+  have e : ∀ x : Int, ((x % 4294967296 + 4294967296) % 4294967296) = x % ((2 ^ 32 : Nat) : Int) := by
+    intro x; simp only [Nat.reducePow]; omega
+  rw [e a, e b]; rfl
+
+theorem and64 :
+    (BitVec.ofInt 64 a &&& BitVec.ofInt 64 b).toInt = bit64 (· &&& ·) a b := by
+  rw [BitVec.toInt_eq_toNat_bmod, BitVec.toNat_and, BitVec.toNat_ofInt, BitVec.toNat_ofInt]
+  unfold bit64 toU64; rw [wrap64_eq_bmod]
+  have e : ∀ x : Int, ((x % 18446744073709551616 + 18446744073709551616) % 18446744073709551616)
+      = x % ((2 ^ 64 : Nat) : Int) := by
+    intro x; simp only [Nat.reducePow]; omega
+  rw [e a, e b]; rfl
+
+theorem sub64 (ha : InI64 a) (hb : InI64 b) :
+    (BitVec.ofInt 64 a - BitVec.ofInt 64 b).toInt = wrap64 (a - b) := by
+  rw [BitVec.toInt_sub, toInt_img64 ha, toInt_img64 hb, wrap64_eq_bmod]
+
+theorem neg64 (ha : InI64 a) : (-BitVec.ofInt 64 a).toInt = wrap64 (-a) := by
+  rw [BitVec.toInt_neg, toInt_img64 ha, wrap64_eq_bmod]
 
 end Tropical.Semantics.SymbolicLaws
