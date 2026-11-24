@@ -32,7 +32,7 @@ mode. `make test-lean-engine` runs them against
 
 ```bash
 make mcp-lean   # build C++ core + Lean front door, then launch the MCP server
-make lean       # build just the lean/ front door (compiler + MCP server, one binary)
+make lean       # build just the lean/ binaries: frontend (compiler + MCP server), diffcli, tropicalc, tropicaltest, tropicaltest-core, trustreport
 ```
 
 The server is also configured in `.mcp.json` for Claude Code — it
@@ -40,8 +40,7 @@ builds the front door (`make -s lean`) and execs
 `lean/.lake/build/bin/frontend`. Two modes:
 
 - default — the MCP server over stdio (`make mcp-lean`).
-- `--rpc` — the newline JSON-RPC surface the bun protocol suites and
-  the differential harness drive.
+- `--rpc` — the newline JSON-RPC surface the bun protocol suites drive.
 
 ## Compile pipeline behind every mutation
 
@@ -50,15 +49,16 @@ whole session to a single kernel and hot-swaps it. The shape (all
 inside the Lean engine):
 
 ```
-SessionState
+SessionSt
   → syncCompile
-       → liftIfNeeded          (anonymous instances for array-literal wires)
-       → buildSessionInputVia
-            → assertSessionAcyclic
-            → sessionToResolvedRoot
-       → compileSessionStaged  (partition + typed stage-0 split)
-       → emit LLVM/MSL artifacts + tropical_plan_7 metadata
-  → loadKernel                (C API → OrcJitEngine/MetalKernel → FlatRuntime publication)
+       → Session.compileStaged
+            → liftIfNeeded          (anonymous instances for array-literal wires)
+            → buildSessionInput
+                 → assertSessionAcyclic
+                 → sessionToResolvedRoot → checkResolvedArena
+            → compileSessionStaged  (partition → tropical_plan_7 + typed stage blocks)
+       → loadKernel                (typed stage-0 split, emit LLVM/MSL, publish
+                                    through the host port → FlatRuntime)
 ```
 
 The direct `Ir.Strata` lowering (`assertAcyclic → inlineInstances →
@@ -84,9 +84,10 @@ with the JIT (`tests/web/wasm_vs_jit`).
 A compile error doesn't kill the session; it returns a structured
 error envelope (see below) and the previous kernel keeps playing.
 
-## SessionState
+## SessionSt
 
-The engine owns one `SessionState`. The fields tools read and mutate:
+The engine owns one `SessionSt` (`lean/Tropical/Session.lean`). The fields
+tools read and mutate:
 
 - `programs` / `templateByName` — registered concrete program metadata and
   resolved roots. Populated by `Tropical.Stdlib` boot and
@@ -97,8 +98,11 @@ The engine owns one `SessionState`. The fields tools read and mutate:
 - `params` — current control values by name (the session compiler
   materializes `param:<name>` module slots, which `set_param` writes without
   relowering).
-- `paramDisciplines` — plan-carried `raw`, `glide`, `anchor`, or `velocity`
-  dispatch metadata for the loaded kernel.
+- `paramTypes` — the declared format of each typed param (`int32` or `int`
+  with `frac_bits`); a param not listed is `float`.
+
+The `raw`, `glide`, `anchor`, or `velocity` dispatch metadata is not session
+state: the loaded plan carries it (`param_disciplines`).
 
 The engine environment also owns the native runtime handle and a DAC created
 lazily on first `start_audio`.
@@ -112,7 +116,7 @@ not a real instance.
 
 New DSP types are **not** defined over the wire. They are authored as
 `Tropical.Stdlib` arrow-combinator builders in Lean and booted directly
-by the engine (15 at present) — no parse bridge, no literate `.md`
+by the engine (17 at present) — no parse bridge, no literate `.md`
 surface language. The former `define_program` tool and its entire
 generics apparatus (`type_params` / `type_args`, monomorphization, the
 specialization cache) are gone; every registered program is concrete.
@@ -155,7 +159,8 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
   reusable `ProgramType`. Current wiring becomes input defaults.
   Optionally removes the exported instances. It builds the resolved IR
   **directly** off the session mirror — there is no JSON round-trip.
-  This is the only route that registers a new program type at runtime.
+  This is the only tool that registers a new program type at runtime
+  (wire lifting registers anonymous `__wire_N` programs internally).
 - `load` — `tropical_program_2` JSON (path or inline). Stops audio,
   recreates the session from the file's instances + wiring over
   already-registered programs. It is a PATCH BAY: instances, wiring,
@@ -229,9 +234,10 @@ The four fail-shapes:
   types/required-ness/bounds.
 - predicate — domain check failed (e.g. range, ordering).
 
-`compile_failed` carries the lowering or emit error verbatim in
-`message` and is `retryable: true` — the previous kernel keeps
-playing while the agent edits and retries.
+No code path raises `compile_failed` today. A failed session compile
+(lowering or emit) returns `internal_error` with the error verbatim in
+`message` and `retryable: false`; the previous kernel keeps playing while
+the agent edits and retries.
 
 `errors.test.ts` and `wire_dac.test.ts` pin this behavior against the
 live Lean engine.
