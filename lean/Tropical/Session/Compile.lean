@@ -54,23 +54,23 @@ def liftIfNeeded : SessionM Unit := do
       programs := st.arena.programs.push lifted.program
       exprs := lifted.exprs }
     let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
-    -- Only the post-strata form is encoded into an entry below. Strata
+    -- Only the post-strata form becomes the instance's type below. Strata
     -- runs with no relink: a lifted body has no InstanceDecls.
     let (arenaPost, postIdx) ← match runStrataChecked arenaRaw rawIdx with
       | .error msg => internalError msg
       | .ok r => pure r
-    -- Persist the raw program + counter; the post-strata arena growth
-    -- is transient — the store adopts the entry's round trip, one copy,
-    -- like the registration path.
+    -- Persist the counter and the raw program's name; the store adopts the
+    -- post-strata arena (the raw program plus what strata appended), like
+    -- the registration path.
     modify fun s =>
-      { s with arena := arenaRaw,
-               nameCounters := s.nameCounters.insert "__wire" counter,
+      { s with nameCounters := s.nameCounters.insert "__wire" counter,
                templateByName := s.templateByName.insert synthName rawIdx }
+    adoptResolved arenaPost postIdx
     let entry ← match Tropical.Entries.concreteEntry arenaPost synthName postIdx with
       | .error e => internalError e
       | .ok j => pure j
     let pm := ProgMeta.fromEntry entry
-    let resolvedIdx ← adoptResolved entry
+    let resolvedIdx := some postIdx
     modify fun s =>
       let s := s.addProgram pm
       if (s.findInstance? synthName).isSome then s

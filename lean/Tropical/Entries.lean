@@ -1,5 +1,4 @@
 import Tropical.Ir.Nodes
-import Tropical.Ir.Codec
 import Tropical.Ir.Emit
 
 /-!
@@ -14,9 +13,8 @@ ExprNode lowered from the resolved input default (`literalDefault`),
 and the retained `registers` carrier is empty for current production
 programs.
 
-`resolved` is the program's own `tropical_resolved_1` encoding —
-`SessionSt.adoptResolved` decodes it back into the store, preserving
-the codec boundary between registration metadata and the session arena.
+The entry carries port metadata only. The program itself stays in the
+session arena where strata left it (`SessionSt.adoptResolved`).
 -/
 
 namespace Tropical.Entries
@@ -110,7 +108,6 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
     Except String Json := do
   let some prog := arena.program? idx
     | .error s!"entry render: program pool index {idx.idx} out of range"
-  let resolved ← Codec.encodeResolved arena idx
   let inputs ← prog.inputs.mapM fun d => do
     let (t, tObj) := match d.type? with
       | some pt => (Json.str (portTypeStr pt), portTypeObjF d.fracBits pt)
@@ -133,7 +130,6 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
     ("program_name", Json.str entryName),
     ("generic", Json.bool false),
     ("type_params", jsonNull),
-    ("resolved", resolved),
     ("inputs", Json.arr inputs),
     ("outputs", Json.arr outputs),
     ("registers", Json.arr registers)]

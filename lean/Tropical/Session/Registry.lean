@@ -5,11 +5,11 @@ import Tropical.Entries
 import Tropical.Stdlib
 
 /-!
-# Session.Registry — program registration (strata → entry → adopt)
+# Session.Registry — program registration (strata → adopt → entry)
 
 `registerResolved` lands an already-resolved (arrow-builder or
-directly-constructed) program in the typed store: strata, entry rendering,
-adoption. `registerStdlib` is the boot chain, registering the
+directly-constructed) program in the typed store: strata, adoption, entry
+rendering. `registerStdlib` is the boot chain, registering the
 `Tropical.EmitArrow.stdlibBuilders` in manifest order. The former raise →
 elaborate path died with the elaborator (2026-07-26): programs are authored
 in Lean (arrow builders) or crystallized from a session by
@@ -42,18 +42,14 @@ def runStrataChecked (arena : Tropical.Ir.Arena)
       throw s!"core check failed: {e}"
   pure (arena, rootIdx)
 
-/-- Adopt a catalog entry's `resolved` IR into the typed store (the
-    `SessionM` shell over `SessionSt.adoptResolved`). Returns the store
-    index, or `none` for entries without resolved IR (generic templates). A
-    decode failure is an engine bug — the service encoded it — so it maps
-    to `internal_error`. -/
-def adoptResolved (entry : Json) : SessionM (Option Tropical.Ir.ProgramIdx) := do
-  let st ← get
-  match st.adoptResolved entry with
+/-- Adopt a post-strata program into the typed store (the `SessionM` shell
+    over `SessionSt.adoptResolved`): the arena strata returned becomes the
+    store's, and the program is recorded under its own name. -/
+def adoptResolved (arena : Tropical.Ir.Arena) (idx : Tropical.Ir.ProgramIdx) :
+    SessionM Unit := do
+  match (← get).adoptResolved arena idx with
   | .error msg => internalError msg
-  | .ok (st', idx?) =>
-    set st'
-    pure idx?
+  | .ok st' => set st'
 
 /-- Run the lowering on a resolved concrete program: relink sub-program
     registry entries to the canonical post-strata registrations
@@ -80,20 +76,19 @@ def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
     boot registration links against the raw stdlib map) or `export_program`'s
     direct construction. `strataConcrete` relinks that raw registry to the
     post-strata canon (`templateByName`) and runs strata; the store adopts
-    the entry round-trip, one copy. -/
+    the post-strata program where strata left it, and the catalog entry
+    carries its port metadata. -/
 def registerResolved (name : String)
     (arena' : Tropical.Ir.Arena) (rawIdx : Tropical.Ir.ProgramIdx) :
     SessionM (Json × Tropical.Ir.ProgramIdx) := do
   let st ← get
   let (arenaShip, shipIdx) ← strataConcrete st arena' rawIdx
-  modify fun s => { s with arena := arenaShip }
+  adoptResolved arenaShip shipIdx
   let entry ← match Tropical.Entries.concreteEntry arenaShip name shipIdx with
     | .error e => internalError e
     | .ok j => pure j
-  modify (·.addProgram (ProgMeta.fromEntry entry))
-  let idx? ← adoptResolved entry
-  modify fun s => { s with
-    templateByName := s.templateByName.insert name (idx?.getD rawIdx) }
+  modify fun s => { s.addProgram (ProgMeta.fromEntry entry) with
+    templateByName := s.templateByName.insert name shipIdx }
   pure (entry, rawIdx)
 
 /-- The boot chain: register the stdlib, the arrow-builder chain
@@ -102,7 +97,7 @@ def registerResolved (name : String)
     bridge, no elaboration. Each builder appends its raw program to the
     arena, linking sub-programs by name against the chain built so far (deps
     precede dependents in manifest order); `registerResolved` relinks that
-    raw registry to the post-strata canon and adopts the catalog entry.
+    raw registry to the post-strata canon and adopts the lowered program.
     Manifest order == the chain order, so the catalog (and `list_programs`)
     ordering is preserved. -/
 def registerStdlib : SessionM Unit := do

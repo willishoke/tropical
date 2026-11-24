@@ -6,6 +6,7 @@ import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.KernelType
+import Tropical.Tropicaltest.BootStore
 
 /-!
 # tropicaltest-core — the gates that need no runtime
@@ -44,7 +45,9 @@ def sections : List (String × List (IO Bool)) := [
   ("block carrier (divided-difference Leibniz over the factor tree):", [
     Tropical.Tropicaltest.Block.runBlockAlgebra]),
   ("typed kernel (the port: tau/params/out, tropical_kernel_1 round trip):", [
-    Tropical.Tropicaltest.KernelType.runKernelType])]
+    Tropical.Tropicaltest.KernelType.runKernelType]),
+  ("stdlib boot store (adopted in place, well-formed, indexed by name):", [
+    Tropical.Tropicaltest.BootStore.runBootStore])]
 
 def main (_ : List String) : IO UInt32 := do
   let mut failed := 0
