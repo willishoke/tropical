@@ -23,23 +23,30 @@ What it checks and reports:
     multiplier (the M0+'s 32-cycle iterative multiplier is a build option;
     the report states the assumption as `timing_model`): ALU and MULS 1, LDR/STR 2,
     PUSH/POP 1+N, POP with PC 3+N (N counting PC), B 2, B<cond> 2 taken and
-    1 not taken, BL 3, BX 2. The sample loop is found from its back edges and
-    entered at the block the prologue branches to. Every path once around the
-    loop is enumerated, so the per-frame range is the cheapest and the
-    dearest path, data-dependent branches (the output clamp) included; a call
-    is entry path + (N - 1) frames + the last frame, which leaves through the
-    exit branch into the epilogue. The enumeration is exhaustive or the
-    script exits non-zero: a path that revisits an instruction (an inner
-    loop) or more paths than the limit means no bound, so none is printed.
-    Calibrated against an ARMv6-M emulator on
-    the TRM table: the #252 LFO object measured 20 + 114/frame + 10 (worst
-    block 1902), the int32 LFO 17 + 86/frame + 10 (worst 1451); both lie in
-    the computed ranges.
+    1 not taken, BL 3, BX 2. The cost of an instruction belongs to the edge
+    leaving it, so a conditional branch's two edges cost 2 and 1. The sample
+    loop is found from its back edges and entered at the block the prologue
+    branches to. Outside the frame loop's back edge the graph must be loop-free;
+    on it the per-frame range is the shortest and the longest path once around
+    the loop, by dynamic programming in topological order (linear in the
+    graph, however many paths it has), data-dependent branches (the output
+    clamp) included. A call is entry + (N - 1) frames + the last frame, which
+    leaves through the exit branch into the epilogue. These are BOUNDS over
+    every path of the graph, feasible or not: two branches on correlated
+    conditions contribute a path no input takes, so an upper bound may be
+    loose, and nothing says the lower one is reached (`cycle_bounds` in the
+    report says so). Any other cycle (an inner loop) has no bounded cost, and
+    the script exits non-zero without a number. Calibrated against an
+    ARMv6-M emulator on the TRM table: the #252 LFO object measured 20 +
+    114/frame + 10 (worst block 1902), the int32 LFO 17 + 86/frame + 10
+    (worst 1451); both lie in the computed ranges.
   * wait states (`--wait-states W`) — an estimate, not a bound, for code in
     flash: each flash access (a 32-bit instruction fetch, or a literal-pool
     load) costs W more cycles, and an instruction fetch hides behind the
     execution of the word before it when that takes long enough. The low end
-    assumes that overlap, the high end none.
+    assumes that overlap, the high end none. A stall depends on the words
+    before it on the same path, so the estimate enumerates paths and exits
+    non-zero past 4096 of them.
   * sizes, sections, stack depth (.stack_sizes), ARM build attributes.
 
     tools/embedded_object.py --diffcli lean/.lake/build/bin/diffcli \\
@@ -73,6 +80,14 @@ LIBCALL = re.compile(r"__aeabi_|__mul|__div|__mod|__udiv|__add|__sub|__fix|__flo
 TIMING_MODEL = ("Cortex-M0+ (ARM DDI 0484), zero wait states, single-cycle "
                 "multiplier: MULS = 1 cycle. A part built with the small iterative "
                 "multiplier takes 32 cycles per MULS; add 31 x muls_per_frame per frame.")
+# What the cycle numbers are, stated in every report next to the timing model.
+CYCLE_BOUNDS = ("Bounds, not counts: each lower/upper pair is the cheapest and the dearest "
+                "path through the control-flow graph on the timing model, found by "
+                "longest/shortest path over the loop-free graph. Every graph path counts, "
+                "including paths no input can take (branches on correlated conditions), so "
+                "an upper bound may be loose and a lower bound may not be reached; entry_cycles "
+                "and exit_cycles are lower bounds, with _upper beside them. A call is assumed "
+                "to run the frame loop exactly `frames` times.")
 COND = re.compile(r"b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$")
 
 
@@ -156,15 +171,94 @@ class Cfg:
         return [(self.nxt(k), cost(i.mn, i.ops), False)]
 
 
+def ends(s, stop, region):
+    """Does an edge into `s` end the path? A return (or falling off the end),
+    a member of `stop`, or leaving `region`."""
+    return s is None or s in stop or (region is not None and not region(s))
+
+
+def bounds(cfg, start, stop, region=None, what="path"):
+    """The cheapest and dearest path from index `start` to each way out, by
+    dynamic programming over the graph in topological order: {s: (lo, hi,
+    n)} for every end `s` reached (a member of `stop`, the first index
+    outside `region`, or None for a return), with n the number of paths.
+
+    The same paths as `paths` below and the same per-edge cycles (`Cfg.succ`:
+    a conditional branch costs 2 on its taken edge and 1 on its fall-through
+    edge), so the same minima and maxima, but linear in the graph's size
+    rather than in its number of paths. Every path of the graph counts,
+    including paths no input can take (two branches on correlated
+    conditions), so `hi` bounds the dearest real path from above and `lo`
+    the cheapest from below; neither is claimed to be attained.
+
+    A cycle among the instructions a path can run before it ends (a loop
+    other than the one `stop` closes) has no bounded cost; the script exits
+    non-zero rather than report a range."""
+    # The instructions a path can run, and the edges between them.
+    interior, todo, succ = {start}, [start], {}
+    while todo:
+        k = todo.pop()
+        succ[k] = cfg.succ(k)
+        for s, _, _ in succ[k]:
+            if not ends(s, stop, region) and s not in interior:
+                interior.add(s)
+                todo.append(s)
+    indeg = {k: 0 for k in interior}
+    for k in interior:
+        for s, _, _ in succ[k]:
+            if not ends(s, stop, region):
+                indeg[s] += 1
+    # Kahn's order: an instruction is ready once every edge into it is done.
+    ready = [k for k in interior if indeg[k] == 0]
+    best = {start: (0, 0, 1)}
+    out, done = {}, 0
+    while ready:
+        k = ready.pop()
+        done += 1
+        lo, hi, n = best[k]
+        for s, c, _ in succ[k]:
+            into = out if ends(s, stop, region) else best
+            v = (lo + c, hi + c, n)
+            if s in into:
+                a = into[s]
+                into[s] = (min(a[0], v[0]), max(a[1], v[1]), a[2] + n)
+            else:
+                into[s] = v
+            if into is best:
+                indeg[s] -= 1
+                if indeg[s] == 0:
+                    ready.append(s)
+    if done != len(interior):
+        # Every unfinished instruction has an unfinished predecessor; walking
+        # back through them must close a cycle.
+        left = {k for k in interior if indeg[k] > 0}
+        pred = {}
+        for k in interior:
+            for s, _, _ in succ[k]:
+                if s in left and k in left:
+                    pred.setdefault(s, k)
+        k, walked = next(iter(sorted(left))), set()
+        while k not in walked:
+            walked.add(k)
+            k = pred[k]
+        raise SystemExit(
+            f"embedded_object: {what}: the graph from {hex(cfg.insns[start].addr)} "
+            f"has a cycle through {hex(cfg.insns[k].addr)} (an inner loop); its cost is "
+            f"unbounded, so the cycle range would not be a bound")
+    return out
+
+
 def paths(cfg, start, stop, region=None, limit=4096, what="path"):
     """Every path from index `start` to a member of `stop` (or a return), as
     lists of (index, cycles, taken). Paths leaving `region` end there with
-    the leaving edge as their last step.
+    the leaving edge as their last step. The cycle bounds come from `bounds`;
+    only the wait-state estimate walks the paths themselves, because a
+    fetch's stall depends on the words before it on the same path.
 
     The enumeration is exhaustive or it fails: a path that comes back to an
     instruction it already ran (a loop other than the one `stop` closes)
     has no bounded cost, and past `limit` paths the set is not known to be
-    complete. Either way the range computed from it would not be a bound, so
+    complete. Either way the range computed from it would not hold, so
     the script exits non-zero instead of reporting one."""
     out, stack = [], [(start, [], frozenset({start}))]
     while stack:
@@ -192,57 +286,61 @@ def loop_report(insns, frames, wait):
     back = [(i.target, i.addr) for i in insns if i.target is not None and i.target <= i.addr]
     lo = min(t for t, _ in back); hi = max(a for _, a in back)
     inside = lambda k: k is not None and lo <= cfg.insns[k].addr <= hi
+    outside = lambda k: not inside(k)
     # The header: the loop block the prologue enters.
-    entry_paths = paths(cfg, 0, set(), region=lambda k: not inside(k), what="prologue")
-    heads = {s for p, s in entry_paths if s is not None and inside(s)}
+    entry = bounds(cfg, 0, set(), region=outside, what="prologue")
+    heads = {s for s in entry if s is not None and inside(s)}
     if len(heads) != 1:
         raise SystemExit(f"embedded_object: expected one loop entry, found {sorted(heads)}")
     head = heads.pop()
-    entry = [p for p, s in entry_paths if s == head]
-    around, leave = [], []
-    loop_paths = paths(cfg, head, {head}, region=inside, what="frame")
-    for p, s in loop_paths:
-        (around if s == head else leave).append((p, s))
-    around = [p for p, _ in around]
+    entry_lo, entry_hi, _ = entry[head]
+    loop = bounds(cfg, head, {head}, region=inside, what="frame")
+    around = loop.get(head)
+    leave = {s: b for s, b in loop.items() if s != head}
     if not around or not leave:
         raise SystemExit("embedded_object: the loop has no back path or no exit")
-    total = lambda p: sum(c for _, c, _ in p)
     # Epilogue: from the exit target to the return, its cheapest and its
     # dearest path.
     def epilogue(s):
         if s is None:
             return 0, 0
-        costs = [total(p) for p, _ in paths(cfg, s, set(), what="epilogue")]
-        return min(costs), max(costs)
-    frame = sorted(total(p) for p in around)
+        e_lo, e_hi, _ = bounds(cfg, s, set(), what="epilogue")[None]
+        return e_lo, e_hi
+    frame_lo, frame_hi, frame_paths = around
     exits_lo, exits_hi = [], []
-    for p, s in leave:
+    for s, (l_lo, l_hi, _) in leave.items():
         e_lo, e_hi = epilogue(s)
-        exits_lo.append(total(p) + e_lo)
-        exits_hi.append(total(p) + e_hi)
-    leave = [p for p, _ in leave]
-    entry_c = [total(p) for p in entry]
+        exits_lo.append(l_lo + e_lo)
+        exits_hi.append(l_hi + e_hi)
     # The exit cost is what the last frame adds over a frame on the same data
     # path: the exit branch taken instead of not (+1) and the epilogue.
-    exit_extra = min(exits_lo) - frame[0]
-    exit_extra_hi = max(exits_hi) - frame[-1]
-    lo_call = min(entry_c) + (frames - 1) * frame[0] + min(exits_lo)
-    hi_call = max(entry_c) + (frames - 1) * frame[-1] + max(exits_hi)
+    exit_extra = min(exits_lo) - frame_lo
+    exit_extra_hi = max(exits_hi) - frame_hi
+    lo_call = entry_lo + (frames - 1) * frame_lo + min(exits_lo)
+    hi_call = entry_hi + (frames - 1) * frame_hi + max(exits_hi)
     body = [i for i in insns if lo <= i.addr <= hi]
     rep = {"loop_range": [hex(lo), hex(hi)], "loop_head": hex(cfg.insns[head].addr),
            "loop_instructions": len(body),
            "muls_per_frame": sum(1 for i in body if i.mn.startswith("mul")),
            "calls_in_loop": sum(1 for i in body if i.mn == "bl"),
-           "frame_paths": len(around),
-           "entry_cycles": min(entry_c), "entry_cycles_upper": max(entry_c),
-           "frame_cycles_lower": frame[0],
-           "frame_cycles_upper": frame[-1], "exit_cycles": exit_extra,
+           "frame_paths": frame_paths,
+           "entry_cycles": entry_lo, "entry_cycles_upper": entry_hi,
+           "frame_cycles_lower": frame_lo,
+           "frame_cycles_upper": frame_hi, "exit_cycles": exit_extra,
            "exit_cycles_upper": exit_extra_hi,
            "frames": frames, "call_cycles_lower": lo_call, "call_cycles_upper": hi_call,
-           "timing_model": TIMING_MODEL}
+           "timing_model": TIMING_MODEL, "cycle_bounds": CYCLE_BOUNDS}
     if wait:
+        # The flash estimate is not additive over edges (a fetch's stall
+        # depends on the words before it on the path), so it walks the paths
+        # themselves and needs them all: past the limit it refuses.
+        what = "--wait-states {}"
+        entry_paths = paths(cfg, 0, set(), region=outside, what=what.format("prologue"))
+        loop_paths = paths(cfg, head, {head}, region=inside, what=what.format("frame"))
         rep["wait_states"] = wait
-        rep.update(wait_estimate(cfg, entry, around, leave, epilogue, frames, wait))
+        rep.update(wait_estimate(cfg, [p for p, s in entry_paths if s == head],
+                                 [p for p, s in loop_paths if s == head],
+                                 [p for p, s in loop_paths if s != head], epilogue, frames, wait))
     return rep
 
 
@@ -406,10 +504,13 @@ def main():
         man["object"]["sections"] = rep["sections"]
         if a.core == "m0plus":
             man["object"]["m0plus_cycles"] = {
-                "entry": rep["entry_cycles"], "frame_lower": rep["frame_cycles_lower"],
+                "entry": rep["entry_cycles"], "entry_upper": rep["entry_cycles_upper"],
+                "frame_lower": rep["frame_cycles_lower"],
                 "frame_upper": rep["frame_cycles_upper"], "exit": rep["exit_cycles"],
+                "exit_upper": rep["exit_cycles_upper"],
                 "call_lower": rep["call_cycles_lower"], "call_upper": rep["call_cycles_upper"],
-                "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL}
+                "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL,
+                "cycle_bounds": CYCLE_BOUNDS}
             man["object"]["float_abi"] = "soft (no FP instructions; Tag_FP_arch absent)"
         with open(mpath, "w") as f:
             json.dump(man, f, indent=2)

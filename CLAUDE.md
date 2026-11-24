@@ -291,7 +291,9 @@ cross-checks pin target refinements and the JIT's realization variants:
 - `tests/web/embedded_object.test.ts` and `tools/embedded_object.py` (in
   `make validate`) — `compile-object` for Cortex-M0+, Cortex-M4F at
   `--float f32`, host and wasm32: the manifests, no libcalls, and the
-  refusals by name.
+  refusals by name. `tools/test_embedded_object.py` holds the M0+ cycle
+  bounds (shortest/longest path over the loop-free CFG) to the path
+  enumeration they replaced, on the fixture objects and random graphs.
 - `tropicaltest` (`lean/Tropicaltest.lean`, run as the built binary) — byte-for-byte
   audio goldens (`tests/golden/`) plus realization-variant equivalences
   *within* the JIT (a reduce region ≡ its unrolling, the typed stage-0 hoist
