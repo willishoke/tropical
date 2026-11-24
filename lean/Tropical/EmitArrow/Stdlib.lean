@@ -605,17 +605,17 @@ def buildPeriodicCatmullRom8 (arena : Arena) (_resolved : Array (String × Progr
     Except String (Arena × ProgramIdx) :=
   splineProgram arena "PeriodicCatmullRom8" catmullRomBasis .wrap
 
-def buildOpenCatmullRom8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+def buildPhantomEndCatmullRom8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
-  splineProgram arena "OpenCatmullRom8" catmullRomBasis .clamp
+  splineProgram arena "PhantomEndCatmullRom8" catmullRomBasis .phantomEnd
 
 def buildPeriodicBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   splineProgram arena "PeriodicBSpline8" uniformBSplineBasis .wrap
 
-def buildOpenBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+def buildPhantomEndBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
-  splineProgram arena "OpenBSpline8" uniformBSplineBasis .clamp
+  splineProgram arena "PhantomEndBSpline8" uniformBSplineBasis .phantomEnd
 
 def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ClockPhasor", buildClockPhasor), ("FixedSin", buildFixedSin),
@@ -629,9 +629,9 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("SoftClip", buildSoftClip), ("FixedSinOscQ15", buildFixedSinOscQ15),
   ("SinOscQ15", buildSinOscQ15),
   ("PeriodicCatmullRom8", buildPeriodicCatmullRom8),
-  ("OpenCatmullRom8", buildOpenCatmullRom8),
+  ("PhantomEndCatmullRom8", buildPhantomEndCatmullRom8),
   ("PeriodicBSpline8", buildPeriodicBSpline8),
-  ("OpenBSpline8", buildOpenBSpline8)]
+  ("PhantomEndBSpline8", buildPhantomEndBSpline8)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}

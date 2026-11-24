@@ -271,7 +271,7 @@ async function expectBitIdentical(name: string, prog: ProgramFile, N: number,
 }
 
 // The registered splines (`lean/Tropical/EmitArrow/Spline.lean`): a periodic
-// Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times an open B-spline
+// Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times a phantom-end B-spline
 // envelope read by an 8 Hz one. The wave's control values are params, so a
 // written control is a param write into the same artifact.
 const SPLINE_WAVE = [0, 0.5, 0.6, 0.2, -0.1, -0.5, -0.4, -0.2]
@@ -290,7 +290,7 @@ function splineProgram(wave: number[]): ProgramFile {
       { op: 'instanceDecl', name: 'wave', program: 'PeriodicCatmullRom8', inputs: {
         phase: phaseOf('ph'), ...controls('w', wave) } },
       { op: 'instanceDecl', name: 'ev', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 8 } },
-      { op: 'instanceDecl', name: 'env', program: 'OpenBSpline8', inputs: {
+      { op: 'instanceDecl', name: 'env', program: 'PhantomEndBSpline8', inputs: {
         phase: phaseOf('ev'), ...controls(null, SPLINE_ENV) } },
       { op: 'instanceDecl', name: 'vca', program: 'VCA', inputs: {
         audio: { op: 'ref', instance: 'wave', output: 'out' },

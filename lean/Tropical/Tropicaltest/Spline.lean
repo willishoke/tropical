@@ -9,11 +9,13 @@ import Tropical.Tropicaltest.Spectral
 
 * **spline-oracle** — the JIT against an independent f64 reference, for both
   bases, both boundaries and K = 4, 7, 16, over 4096 hashed phases and 4096
-  grid phases each (the grid hits the knots, and in clamp mode phase 0, phase
-  1 and both clamped sides). The reference finds the segment by float `floor`
-  on `u·n` and weighs the window by the cardinal basis functions; in clamp
-  mode it evaluates phase 1 as segment `K − 2` at `t = 1`, where the kernel
-  reads segment `K − 1` at `t = 0`.
+  grid phases each. The grid steps by 2²⁴, so in wrap mode it lands on every
+  knot for K = 4 and 16 (not for K = 7); in phantom-end mode it lands on
+  phase 0, phase 1 and both sides outside them, but on no interior knot. The
+  reference finds the segment by float `floor` on `u·n` and weighs the window
+  by the cardinal basis functions; in phantom-end mode it evaluates phase 1 as
+  segment `K − 2` at `t = 1`, where the kernel reads segment `K − 1` at
+  `t = 0`.
 * **spline-seam** — wrap mode. (1) Rotating the control values by one moves
   the curve by one knot, bit for bit: the seam of the rotated spline renders
   exactly as an interior knot of the original (K = 8, both bases). (2) Value
@@ -60,7 +62,7 @@ def refControl (boundary : SplineBoundary) (cs : Array Float) (m : Int) : Float 
   let k := cs.size
   match boundary with
   | .wrap => cs[(m % (k : Int)).toNat]!
-  | .clamp =>
+  | .phantomEnd =>
     if m < 0 then 2.0 * cs[0]! - cs[1]!
     else if m ≥ k then 2.0 * cs[k - 1]! - cs[k - 2]!
     else cs[m.toNat]!
@@ -74,7 +76,7 @@ def refSegment (boundary : SplineBoundary) (k : Nat) (phase : Int) : Int × Floa
     let x := (Float.ofInt p / cycle) * k.toFloat
     let i := x.floor
     (Int.ofNat i.toUInt64.toNat, x - i)
-  | .clamp =>
+  | .phantomEnd =>
     let u := max 0.0 (min 1.0 (Float.ofInt phase / cycle))
     let n := (k - 1).toFloat
     let x := u * n
@@ -119,27 +121,28 @@ def hashMul : Nat := 2654435761
 
 /-- The phase laws over the sample index `n`, as kernel signals and as
     integers. `hashed` scatters phases over the cycle; `grid` steps by 2²⁴
-    (256 phases per cycle). In clamp mode both laws span `[−2³⁰, 2³² + 2³⁰)`
-    and `[−2³¹, 2³² + 2³¹)`, so both clamped sides are exercised. -/
+    (256 phases per cycle). In phantom-end mode the laws span
+    `[−2³⁰, 2³² + 2³⁰)` and `[−2³¹, 2³² + 2³¹)`, so the phase is clamped on
+    both sides. -/
 inductive PhaseLaw | hashed | grid
 deriving BEq, Inhabited
 
 def phaseInt (law : PhaseLaw) (boundary : SplineBoundary) (n : Nat) : Int :=
   match law, boundary with
   | .hashed, .wrap => Int.ofNat (n * hashMul)
-  | .hashed, .clamp => Int.ofNat ((n * hashMul) % 4294967296 * 3 / 2) - 1073741824
+  | .hashed, .phantomEnd => Int.ofNat ((n * hashMul) % 4294967296 * 3 / 2) - 1073741824
   | .grid, .wrap => Int.ofNat (n * 16777216)
-  | .grid, .clamp => Int.ofNat ((n * 16777216) % 8589934592) - 2147483648
+  | .grid, .phantomEnd => Int.ofNat ((n * 16777216) % 8589934592) - 2147483648
 
 def phaseSig (law : PhaseLaw) (boundary : SplineBoundary) : BuildM Sig := do
   let n ← sampleIndex
   match law, boundary with
   | .hashed, .wrap => mul n (← lit hashMul)
-  | .hashed, .clamp =>
+  | .hashed, .phantomEnd =>
     let p ← bitAnd (← mul n (← lit hashMul)) (← lit 4294967295)
     sub (← rshift (← mul p (← lit 3)) (← lit 1)) (← lit 1073741824)
   | .grid, .wrap => mul n (← lit 16777216)
-  | .grid, .clamp =>
+  | .grid, .phantomEnd =>
     sub (← bitAnd (← mul n (← lit 16777216)) (← lit 8589934591)) (← lit 2147483648)
 
 structure Config where
@@ -151,14 +154,14 @@ deriving Inhabited
 
 def Config.label (c : Config) : String :=
   let b := if c.basis.scale == 2 then "catmull-rom" else "b-spline"
-  let m := if c.boundary == .wrap then "wrap" else "clamp"
+  let m := if c.boundary == .wrap then "wrap" else "phantom-end"
   let l := if c.law == .hashed then "hashed" else "grid"
   s!"{b}/{m}/K={c.k}/{l}"
 
 def configs : Array Config := Id.run do
   let mut out := #[]
   for basis in #[catmullRomBasis, uniformBSplineBasis] do
-    for boundary in #[SplineBoundary.wrap, .clamp] do
+    for boundary in #[SplineBoundary.wrap, .phantomEnd] do
       for k in #[4, 7, 16] do
         for law in #[PhaseLaw.hashed, .grid] do
           out := out.push { basis, boundary, k, law }
@@ -187,7 +190,8 @@ def runOracle (arena : Arena) : IO Bool := do
     let cs := (controlsOf (seedOf c) c.k).map controlFloat
     let want := ns.map fun n => refEval c.basis c.boundary cs (phaseInt c.law c.boundary n)
     let err := maxAbsDiff got[ci]! want
-    if err > worst || worstLabel == "" then
+    -- A NaN error sticks: `≤` and `>` are false against NaN.
+    if !worst.isNaN && (err.isNaN || err > worst || worstLabel == "") then
       worst := err
       worstLabel := c.label
     if got[ci]!.size != samples || peakOf want == 0.0 then
@@ -225,6 +229,8 @@ def runSeam (arena : Arena) : IO Bool := do
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile rotation: {firstLine e}"
   let rot ← renderAt rotPlan 4 (range 0 width)
+  if rot.size != 4 || rot.any (·.size != width) then
+    return ← failGate label s!"rotation render: {rot.map (·.size)} samples per channel, want 4 × {width}"
   let rotDiff := bitDiffCount rot[0]! rot[1]! + bitDiffCount rot[2]! rot[3]!
   -- (2) One-sided differences across the seam, step h = 2¹⁸ phase units.
   let h := 262144
@@ -237,6 +243,10 @@ def runSeam (arena : Arena) : IO Bool := do
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile seam: {firstLine e}"
   let fd ← renderAt fdPlan fdConfigs.size (range 0 7)
+  if fd.size != fdConfigs.size || fd.any (·.size != 7) then
+    return ← failGate label s!"seam render: {fd.map (·.size)} samples per channel, want {fdConfigs.size} × 7"
+  if fd.any (·.any fun x => x.isNaN || x.isInf) then
+    return ← failGate label "seam render: a non-finite sample"
   let mut worstValue := 0.0
   let mut worstSlope := 0.0
   let mut slopeScale := 0.0

@@ -343,7 +343,7 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- 16 → 17 programs / 347 → 410 nodes: `SinOscQ15`, the Q15 LFO with typed
   -- fixed-point ports (`design/typed-kernel.md`, "Typed ports").
   -- 17 → 21 programs / 410 → 524 nodes: the four registered splines
-  -- (`EmitArrow/Spline.lean`), Catmull-Rom and B-spline, periodic and open.
+  -- (`EmitArrow/Spline.lean`), Catmull-Rom and B-spline, periodic and phantom-end.
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),

@@ -15,7 +15,7 @@
         } },
       { "op": "instanceDecl", "name": "ev", "program": "ClockPhasor",
         "inputs": { "clk": { "op": "clock" }, "freq": 8 } },
-      { "op": "instanceDecl", "name": "env", "program": "OpenBSpline8",
+      { "op": "instanceDecl", "name": "env", "program": "PhantomEndBSpline8",
         "inputs": {
           "phase": { "op": "toInt", "args": [
             { "op": "mul", "args": [{ "op": "ref", "instance": "ev", "output": "phase" }, 4294967296] }] },

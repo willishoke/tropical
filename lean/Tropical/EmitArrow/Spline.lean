@@ -26,10 +26,12 @@ With `n` segments over the cycle and `p` the phase in `[0, 2³²]`,
 
     i = s >> 32,   t = (s & (2³² − 1)) / 2³²
 
-are the segment and the local coordinate, both exact (`t` is a 32-bit integer
-over a power of two). When `n` is a power of two, `p · n` is a shift and `i`
-is the top bits of the phase. Any other `n` costs one integer multiply; the
-result is the same exact split.
+are the segment and the local coordinate. `i` is exact on every target; `t`
+is exact in f64 (a 32-bit integer over a power of two). When `n` is a power
+of two, `p · n` is a shift and `i` is the top bits of the phase. Any other `n`
+costs one integer multiply; the result is the same split. In an f32 artifact
+the 32-bit fraction rounds to 24 bits, so `t` can round up to 1.0, which is
+harmless: at `t = 1` a segment equals the next one at `t = 0`.
 
 ## The window
 
@@ -40,12 +42,13 @@ time, so the kernel does no index wrapping or clamping:
 * `wrap` (periodic): `T[j] = c[(j − 1) mod K]`. The control values on either
   side of the seam are the same signals as anywhere else, so phase 1 → 0 is an
   ordinary knot by construction. `n = K`.
-* `clamp` (open): the phase is clamped to `[0, 2³²]` and `n = K − 1`, so
+* `phantomEnd`: the phase is clamped to `[0, 2³²]` and `n = K − 1`, so
   `c[0]` sits at phase 0 and `c[K − 1]` at phase 1. The two end neighbours are
-  linear extrapolations, `2·c[0] − c[1]` and `2·c[K−1] − c[K−2]`, so both bases
-  pass through the end values (for the B-spline this is the natural end
-  condition, zero second derivative). The last entry is read only at phase
-  exactly 1, where its weight is zero.
+  phantom points, linear extrapolations `2·c[0] − c[1]` and
+  `2·c[K−1] − c[K−2]`, so both bases pass through the end values (for the
+  B-spline this is also the natural end condition, zero second derivative).
+  This is not the open-uniform (knot-multiplicity) B-spline. The last entry is
+  read only at phase exactly 1, where its weight is zero.
 
 `i ∈ [0, n]` holds for every phase by construction, so every table read is in
 range. The `index` node still carries its generic bounds check; this module
@@ -81,20 +84,20 @@ def uniformBSplineBasis : SplineBasis where
 inductive SplineBoundary where
   /-- Periodic: the phase wraps modulo one cycle and the curve is closed. -/
   | wrap
-  /-- Open: the phase clamps to `[0, 1]`; the curve runs from `c[0]` to
-      `c[K − 1]`. -/
-  | clamp
+  /-- Phantom-end: the phase clamps to `[0, 1]`; the curve runs from `c[0]`
+      to `c[K − 1]`, with linearly extrapolated phantom end points. -/
+  | phantomEnd
 deriving BEq, Repr, Inhabited
 
 /-- The segment count over one cycle for `k` control values. -/
 def SplineBoundary.segments : SplineBoundary → Nat → Nat
   | .wrap, k => k
-  | .clamp, k => k - 1
+  | .phantomEnd, k => k - 1
 
 /-- The fewest control values a boundary admits. -/
 def SplineBoundary.minControls : SplineBoundary → Nat
   | .wrap => 1
-  | .clamp => 2
+  | .phantomEnd => 2
 
 /-- The extended table `T` of `K + 3` signals (see the module doc). -/
 def splineTable (boundary : SplineBoundary) (controls : Array Sig) :
@@ -103,7 +106,7 @@ def splineTable (boundary : SplineBoundary) (controls : Array Sig) :
   match boundary with
   | .wrap =>
     pure ((Array.range (k + 3)).map fun j => controls[(j + k - 1) % k]!)
-  | .clamp =>
+  | .phantomEnd =>
     let first ← sub (← add controls[0]! controls[0]!) controls[1]!
     let last ← sub (← add controls[k - 1]! controls[k - 1]!) controls[k - 2]!
     pure (#[first] ++ controls ++ #[last, last])
@@ -142,7 +145,7 @@ def splineSig (basis : SplineBasis) (boundary : SplineBoundary)
   let mask ← lit 4294967295
   let p ← match boundary with
     | .wrap => bitAnd phaseQ mask
-    | .clamp => clamp phaseQ (← litI 0) (← litI 4294967296)
+    | .phantomEnd => clamp phaseQ (← litI 0) (← litI 4294967296)
   let s ← mul p (← lit segments)
   let i ← rshift s (← lit 32)
   let t ← div (← toFloatE (← bitAnd s mask)) (← lit 4294967296)
