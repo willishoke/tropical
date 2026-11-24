@@ -23,7 +23,9 @@ def main (args : List String) : IO UInt32 := do
     let ps := ws.drop 1
     let slots : Array (Semantics.Value Ir.CVal) := (List.range plan.slotCount).toArray.map fun i =>
       match paramSlots.idxOf? i with
-      | some k => .scalar (.i32 (Ir.wrap32 (ps[k]!)))
+      | some k =>
+        if ((plan.slotType? i).map (·.kind)) == some .int then .scalar (.i (Ir.wrap64 (ps[k]!)))
+        else .scalar (.i32 (Ir.wrap32 (ps[k]!)))
       | none => match plan.slotDefaults[i]? with
         | some (.num v) => .scalar (.f v.toFloat)
         | _ => .scalar (.f 0.0)
