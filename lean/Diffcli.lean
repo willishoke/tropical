@@ -16,6 +16,7 @@ import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
 import Tropical.CliArgs
+import Tropical.Semantics.Symbolic
 
 /-!
 The `diffcli` executable — build, inspection, render, and backend-qualification
@@ -627,6 +628,28 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
         IO.eprintln s!"compile-object: wrote {obj.size} bytes → {outPath}"
         return 0
 
+/-- `diffcli emit-spec <patch-or-graph.json> [--rate R] [--fixtures] [--graph]`
+    → SMT-LIB on stdout: one frame of the kernel as the Plan reference
+    semantics computes it over a symbolic carrier
+    (`Semantics.Symbolic.algebra`), with the `param:` slots and the clock
+    free. Experimental (translation validation): the plan is the one
+    `compile-object` emits from, read by the same `compileToSplit`. A plan
+    with a separate stage-0 coefficient plan is refused. -/
+def emitSpecVerb (args : List String) : IO UInt32 :=
+  runVerb "emit-spec" "<patch-or-graph.json> [--rate R] [--fixtures] [--graph]"
+    [valued "rate", switch "fixtures", switch "graph"] args
+    (fun a => a.rate?)
+    fun a rate? patch => do
+  match ← compileToSplit a rate? patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok split =>
+    if split.coeff?.isSome then
+      IO.eprintln "emit-spec: a split stage-0 coefficient plan is not modeled"; return 1
+    match Tropical.Semantics.Symbolic.specSmt split.audio
+        s!"emit-spec {patch}: Semantics.Plan over Semantics.Symbolic.algebra, one frame" with
+    | .error e => IO.eprintln s!"emit-spec: {e}"; return 1
+    | .ok text => IO.print text; return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
@@ -639,6 +662,7 @@ def main (args : List String) : IO UInt32 := do
   | "compile-kernel" :: rest => compileKernelVerb rest
   | "compile-object" :: rest => compileObjectVerb rest
   | "compile" :: rest => compileVerb rest
+  | "emit-spec" :: rest => emitSpecVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]\n       diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--frames N] [--rate R] [--float f64|f32] [--allow-libcalls] [--graph]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]\n       diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--frames N] [--rate R] [--float f64|f32] [--allow-libcalls] [--graph]\n       diffcli emit-spec <patch-or-graph.json> [--rate R] [--graph]"
     return 1
