@@ -122,6 +122,8 @@ structure Discipline where
   discipline : String
   glideDurSec : Option JsonNumber := none
   companions : Array String := #[]
+  /-- An anchor's clock: the velocity param its phasor's clock reads. -/
+  clock : Option String := none
 deriving Repr, Inhabited
 
 /-- One named, shaped, typed value at the port. `default` is the seed a host
@@ -198,7 +200,7 @@ def channelNames (plan : FlatPlan) : Array String := Id.run do
 private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :=
   (plan.paramDisciplines.find? (·.name == base)).map fun d =>
     { discipline := d.discipline, glideDurSec := d.glideDurSec,
-      companions := d.companions }
+      companions := d.companions, clock := d.clock }
 
 /-- The element type of a port of format `f`, with `float` realized at
     `float`. -/
@@ -316,6 +318,9 @@ def Discipline.toWire (d : Discipline) : Json :=
     | none => fields
   let fields := if d.companions.isEmpty then fields
     else fields.push ("companions", toJson d.companions)
+  let fields := match d.clock with
+    | some c => fields.push ("clock", Json.str c)
+    | none => fields
   Json.mkObj fields.toList
 
 def Port.toWire (p : Port) : Json :=
@@ -384,7 +389,10 @@ def Discipline.ofWire (j : Json) : Except String Discipline := do
   let glideDurSec := match j.getObjVal? "glide_dur_sec" with
     | .ok (.num n) => some n
     | _ => none
-  return { discipline, glideDurSec, companions := strArr j "companions" }
+  let clock := match j.getObjVal? "clock" with
+    | .ok (.str c) => some c
+    | _ => none
+  return { discipline, glideDurSec, companions := strArr j "companions", clock }
 
 def Port.ofWire (j : Json) : Except String Port := do
   let name ← reqStr "Kernel.Port" j "name"

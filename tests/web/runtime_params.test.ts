@@ -89,6 +89,32 @@ describe('ParamWriter', () => {
     expect(Math.abs(hz - 330)).toBeLessThan(0.01)
   })
 
+  test('anchor on the master clock: bit-exact at the write under tau_base, velocity and a negative frequency', async () => {
+    // The playground anchor declares `clock: master.velocity`: the phasor
+    // reads trunc(tau_base·rate·2¹⁶) + scaleClockQ(trunc(velocity·2³²), τ),
+    // not τ. A seamless write leaves the sample AT the write frame unchanged
+    // (the output there is a function of the phase alone) and changes the
+    // next one (the pitch moved). The clock slots are set raw: the player
+    // does not dispatch velocity writes, and the setup is not the subject.
+    const { k, manifest } = await load({ nodes: [{ id: 'osc', kind: 'sine', params: { freq: 440 } }], out: 'osc' })
+    const writer = new ParamWriter(manifest)
+    const names = kernelParams(manifest).map((p) => p.name)
+    const set = (name: string, v: number) => k.setParam(names.indexOf(name), v)
+    const at = (frame: number) => { k.seek(frame); return k.render(2) }
+    const now = 9_876_543
+    for (const [velocity, tauBase, f1] of [[1.5, 0.37, 660], [-1, 12.5, 523.25], [0.75, 3.1, -317.3]] as const) {
+      set('param:master.velocity', velocity)
+      set('param:master.tau_base', tauBase)
+      set('param:osc.freq', 440)
+      set('param:osc.freq#phase', 0)
+      const before = at(now)
+      writer.write(k, 'param:osc.freq', f1, now)
+      const after = at(now)
+      expect(Object.is(after[0], before[0])).toBe(true)
+      expect(after[1]).not.toBe(before[1])
+    }
+  })
+
   test('raw: the write is the value; companions and unimplemented disciplines are refused', async () => {
     const { k, manifest } = await load({ ...sineFamily, nodes: [...sineFamily.nodes,
       { id: 'g', kind: 'knob', params: { value: 0.5 } },

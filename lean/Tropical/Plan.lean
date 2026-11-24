@@ -549,12 +549,16 @@ theorem CompilationMode.ofWire_wire (m : CompilationMode) :
     re-anchoring math each discipline requires). `name` is the base param
     (slot `param:<name>`); `companions` are the discipline's implementation
     slots (`#v0/#v1/#t0` and exact-t0 limbs for glide, `#phase` for
-    anchor, the `tau_base` sibling for velocity). -/
+    anchor, the `tau_base` sibling for velocity). `clock`, on an anchor,
+    names the velocity param of the clock its phasor reads (that param's
+    velocity discipline names the origin); absent, the phasor reads the
+    sample clock. -/
 structure ParamDiscipline where
   name : String
   discipline : String
   glideDurSec : Option JsonNumber := none
   companions : Array String := #[]
+  clock : Option String := none
 deriving Repr, Inhabited
 
 def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
@@ -564,6 +568,9 @@ def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
     | none => fields
   let fields := if d.companions.isEmpty then fields
     else fields.push ("companions", toJson d.companions)
+  let fields := match d.clock with
+    | some c => fields.push ("clock", Json.str c)
+    | none => fields
   Json.mkObj fields.toList
 
 /-- The declared type of a port-facing slot: a `param:` slot whose value is

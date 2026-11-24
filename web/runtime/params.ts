@@ -7,10 +7,11 @@
  * implements the two disciplines a param port declares on itself:
  *
  *   - `raw` (or no discipline): write the value.
- *   - `anchor`: a frequency whose phase is `inc·τ + φ`. Changing `inc` alone
- *     jumps the phase by `Δinc·τ`; the write bumps the `#phase` companion by
- *     exactly that jump, in the phasor's own quantized increments, so the
- *     waveform stays continuous at any τ.
+ *   - `anchor`: a frequency whose phase is `inc·C + φ`, `C` the clock the
+ *     phasor reads (the frame clock, or the master clock the discipline's
+ *     `clock` names). Changing `inc` alone jumps the phase by `Δinc·C`; the
+ *     write bumps the `#phase` companion by exactly that jump, in the
+ *     kernel's own integer arithmetic, so the waveform stays continuous.
  *
  * Anything else is refused by name. An integer param (an `i32`/`i64` word with
  * `frac_bits`) is written raw only: `anchor` re-anchors in float arithmetic,
@@ -27,14 +28,42 @@ import type { KernelManifest, KernelPort } from './manifest.js'
 import { isWordPort, kernelParams, paramRangeError } from './manifest.js'
 import type { WasmKernel } from './kernel.js'
 
-type PortDiscipline = { discipline: string; companions?: string[] }
+type PortDiscipline = { discipline: string; companions?: string[]; clock?: string }
 
 const TWO_POW_32 = 4294967296
-const TWO_POW_32N = 4294967296n
+const MASK32 = 0xffffffffn
+
+/** The kernel's f64 → i64 conversion (`fptosi.sat`): truncate, saturate. */
+function truncI64(x: number): bigint {
+  if (Number.isNaN(x)) return 0n
+  if (x >= 9223372036854775808) return (1n << 63n) - 1n
+  if (x < -9223372036854775808) return -(1n << 63n)
+  return BigInt(Math.trunc(x))
+}
+
+/** The signed i64 representative of `x` mod 2⁶⁴. */
+function wrapI64(x: bigint): bigint {
+  return BigInt.asIntN(64, x)
+}
 
 /** The phasor increment the kernel computes: `trunc(f·2³²/rate)`. */
 function phaseIncrement(freq: number, rate: number): bigint {
-  return BigInt(Math.trunc((freq * TWO_POW_32) / rate))
+  return truncI64((freq * TWO_POW_32) / rate)
+}
+
+/** `⌊scale·clk/2³²⌋` mod 2⁶⁴, the kernel's `scaleClockQ` (BigInt `>>` is
+ *  arithmetic and `&` two's-complement, as the kernel's). */
+function scaleClockQ(scale: bigint, clk: bigint): bigint {
+  const hi = clk >> 32n
+  const lo = clk & MASK32
+  const pLoLo = (scale * (lo & 0xffffn)) >> 16n
+  const pLo = (scale * (lo >> 16n) + pLoLo) >> 16n
+  return wrapI64(scale * hi + pLo)
+}
+
+/** The phasor's phase on ℤ/2³² before its offset: `⌊inc·clk/2¹⁶⌋ mod 2³²`. */
+function phaseQ32(inc: bigint, clk: bigint): bigint {
+  return (inc * (clk >> 16n) + ((inc * (clk & 0xffffn)) >> 16n)) & MASK32
 }
 
 export class ParamWriter {
@@ -87,15 +116,36 @@ export class ParamWriter {
       const companion = d.companions?.[0]
       const k = companion === undefined ? undefined : this.index.get(`param:${companion}`)
       if (k !== undefined) {
-        // φ is a multiple of 2⁻³² in [0, 1): keep it on that grid, exactly.
-        const inc0 = phaseIncrement(kernel.getParam(j), this.manifest.rate)
-        const inc1 = phaseIncrement(value, this.manifest.rate)
-        const phase = BigInt(Math.round(kernel.getParam(k) * TWO_POW_32))
-        const bumped = (((phase + (inc0 - inc1) * BigInt(now)) % TWO_POW_32N) + TWO_POW_32N) % TWO_POW_32N
+        // off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C) on ℤ/2³², exactly; φ stays a
+        // multiple of 2⁻³² in [0, 1).
+        const rate = this.manifest.rate
+        const clk = this.clockAt(kernel, d.clock, now)
+        const inc0 = phaseIncrement(kernel.getParam(j), rate)
+        const inc1 = phaseIncrement(value, rate)
+        const phase = truncI64(kernel.getParam(k) * TWO_POW_32)
+        const bumped = (phase + phaseQ32(inc0, clk) - phaseQ32(inc1, clk)) & MASK32
         kernel.setParam(k, Number(bumped) / TWO_POW_32)
       }
       // A missing companion degrades to raw (host-param-dispatch.md, `anchor`).
     }
     kernel.setParam(j, value)
+  }
+
+  /** The Q48.16 clock an anchored phasor reads at frame `now`: the frame
+   *  clock, or the master clock `trunc(tau_base·rate·2¹⁶) +
+   *  scaleClockQ(trunc(velocity·2³²), now·2¹⁶)` when `clock` names the
+   *  velocity param (its velocity discipline names the origin). */
+  private clockAt(kernel: WasmKernel, clock: string | undefined, now: number): bigint {
+    const frame = wrapI64(BigInt(now) << 16n)
+    if (clock === undefined) return frame
+    const velocityName = `param:${clock}`
+    const vi = this.index.get(velocityName)
+    const origin = this.disciplines.get(velocityName)?.companions?.[0]
+    const ti = origin === undefined ? undefined : this.index.get(`param:${origin}`)
+    if (vi === undefined || ti === undefined)
+      throw new RangeError(`anchor clock '${clock}' has no velocity/origin param in this kernel`)
+    const originQ = truncI64(kernel.getParam(ti) * this.manifest.rate * 65536)
+    const velocityQ = truncI64(kernel.getParam(vi) * TWO_POW_32)
+    return wrapI64(originQ + scaleClockQ(velocityQ, frame))
   }
 }

@@ -6,8 +6,14 @@ runtime interpreter and no module boundary in the audio callback. Every
 kernel is closed-form: a pure function `f(τ, params)` of a time
 coordinate, with no per-sample state. Parameter edits write live slots;
 structural and topology edits hot-swap a fresh kernel at the current
-coordinate. Nothing clicks because there is no hidden DSP state to carry —
-oscillator phase is computed from the time coordinate, not latched.
+coordinate. There is no hidden DSP state to carry: oscillator phase is
+computed from the time coordinate, not latched. That does not make every
+edit click-free. Phase is `inc·C + φ` on the clock `C`, so a raw frequency
+write jumps it by `Δinc·C`; the `anchor` write discipline moves the
+`#phase` companion so the phase stays continuous
+(`design/host-param-dispatch.md`). A hot-swap starts every slot from the
+fresh plan's defaults, anchored offsets included, with no crossfade; and a
+warped tap steps by `Δinc·shift` on a re-tune, by design.
 
 ## Build
 

@@ -189,6 +189,7 @@ struct ParsedPlan7
     std::string              discipline;       // raw | glide | anchor | velocity
     double                   glide_dur_sec = 0.0;
     std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
+    std::string              clock;            // anchor: the velocity param of the phasor's clock (empty: the sample clock)
   };
   std::vector<ParamDiscipline> param_disciplines;
 
@@ -471,6 +472,7 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
       pd.name       = d.value("name", std::string{});
       pd.discipline = d.value("discipline", std::string{"raw"});
       pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
+      pd.clock = d.value("clock", std::string{});
       if (d.contains("companions"))
         for (const auto & c : d["companions"])
           pd.companions.push_back(c.get<std::string>());

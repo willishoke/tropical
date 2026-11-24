@@ -167,7 +167,10 @@ private def disciplineOfWire (j : JsonV) : Except String ParamDiscipline := do
   let glideDurSec := match j.getField? "glide_dur_sec" with
     | some (.num n) => some n
     | _ => none
-  pure { name, discipline, glideDurSec, companions := strArr j "companions" }
+  let clock := match j.getField? "clock" with
+    | some (.str c) => some c
+    | _ => none
+  pure { name, discipline, glideDurSec, companions := strArr j "companions", clock }
 
 /-- One `slot_types` entry (`SlotType.toWire`'s inverse). -/
 private def slotTypeOfWire (j : JsonV) : Except String SlotType := do
