@@ -1,5 +1,6 @@
 import Tropical.Semantics.Plan
 import Tropical.Semantics.Scalar
+import Tropical.Semantics.SymbolicLaws
 
 /-!
 # A symbolic carrier for the Plan reference semantics (experimental)
@@ -19,8 +20,9 @@ specification as a term: the plan's own meaning, not a transcription.
   shift by the amount modulo the width, truncated division with the total
   edges, signed comparison after sign extension, the low-word and
   sign-extending conversions) is the one per-op correspondence this carrier
-  adds to the trusted base (`design/` has no ledger entry: this is a
-  research carrier).
+  adds to the trusted base; `SymbolicLaws` proves it for the primitives
+  the stdlib integer kernels use and lists what remains (no ledger entry:
+  this is a research carrier).
 * Anything else with a symbolic argument (float arithmetic, transcendental
   ops, symbolic array indices, symbolic bank counts) is refused, by name.
 

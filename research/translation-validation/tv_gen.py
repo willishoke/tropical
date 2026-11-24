@@ -27,29 +27,37 @@ def main():
     ap.add_argument('--diffcli', default=os.path.join(HERE, '../../lean/.lake/build/bin/diffcli'))
     ap.add_argument('--out-dir', default=os.path.join(HERE, 'gen'))
     ap.add_argument('--compare-handspec', action='store_true')
-    ap.add_argument('--cuts', action='store_true', help='also try automatic cut points (autocut.py)')
+    ap.add_argument('--cuts', action='store_true', help='prove with automatic merges (autocut.py)')
+    ap.add_argument('--monolithic', action='store_true', help='with --cuts, also the one-query proof')
+    ap.add_argument('--spec-file', help='use this SMT-LIB spec instead of running emit-spec')
+    ap.add_argument('--obj', help='use this object (+ .manifest.json) instead of running compile-object')
     a = ap.parse_args()
     os.makedirs(a.out_dir, exist_ok=True)
     stem = os.path.join(a.out_dir, os.path.splitext(os.path.basename(a.patch))[0])
     env = dict(os.environ, TROPICAL_KERNEL_CACHE_ROOT=os.environ.get(
         'TROPICAL_KERNEL_CACHE_ROOT', os.path.join(HERE, '.cache')))
 
-    t = time.time()
-    r = subprocess.run([a.diffcli, 'emit-spec', a.patch, '--rate', a.rate],
-                       capture_output=True, text=True, env=env)
-    if r.returncode != 0:
-        sys.exit('emit-spec failed: ' + r.stderr.strip())
-    open(stem + '.spec.smt2', 'w').write(r.stdout)
-    print('emit-spec: %.2fs, %d lines -> %s' % (time.time() - t, r.stdout.count('\n'), stem + '.spec.smt2'))
-    r = subprocess.run([a.diffcli, 'compile-object', a.patch, '--out', stem + '.o', '--frames', '1',
-                        '--rate', a.rate, '--triple', a.triple, '--cpu', a.cpu, '--emit-ir'],
-                       capture_output=True, text=True, env=env)
-    if r.returncode != 0:
-        sys.exit('compile-object failed: ' + r.stderr.strip())
-    manifest = json.load(open(stem + '.o.manifest.json'))
+    spec_file, obj_file = a.spec_file, a.obj
+    if not spec_file:
+        t = time.time()
+        r = subprocess.run([a.diffcli, 'emit-spec', a.patch, '--rate', a.rate],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            sys.exit('emit-spec failed: ' + r.stderr.strip())
+        spec_file = stem + '.spec.smt2'
+        open(spec_file, 'w').write(r.stdout)
+        print('emit-spec: %.2fs, %d lines -> %s' % (time.time() - t, r.stdout.count('\n'), spec_file))
+    if not obj_file:
+        obj_file = stem + '.o'
+        r = subprocess.run([a.diffcli, 'compile-object', a.patch, '--out', obj_file, '--frames', '1',
+                            '--rate', a.rate, '--triple', a.triple, '--cpu', a.cpu, '--emit-ir'],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            sys.exit('compile-object failed: ' + r.stderr.strip())
+    manifest = json.load(open(obj_file + '.manifest.json'))
 
     spec = {}
-    for asrt in z3.parse_smt2_string(r_text := open(stem + '.spec.smt2').read()):
+    for asrt in z3.parse_smt2_string(open(spec_file).read()):
         lhs, rhs = asrt.arg(0), asrt.arg(1)
         spec[int(lhs.decl().name().split('.')[1])] = rhs
     print('spec outputs:', sorted(spec))
@@ -72,7 +80,7 @@ def main():
             loads[(base, 0)] = z3.BitVec(p['name'], 32)
         else:
             sys.exit('port %s: element %s not modeled' % (p['name'], p['elem']))
-    dis = subprocess.run([OBJDUMP, '-d', '--triple=' + a.triple, stem + '.o'],
+    dis = subprocess.run([OBJDUMP, '-d', '--triple=' + a.triple, obj_file],
                          capture_output=True, text=True).stdout
     t = time.time()
     res = thumbsym.run(dis, manifest['object']['symbol'], regs0, loads)
@@ -82,7 +90,7 @@ def main():
         if a.cuts:
             import autocut
             autocut.prove_with_cuts('channel %d: generated spec == object' % ch, term, obj)
-        else:
+        if not a.cuts or a.monolithic:
             prove('channel %d: generated spec == object' % ch, term == obj)
     prove('callee-saved r4-r7 restored on every path',
           z3.And([z3.And([R[r] == callee[r] for r in ('r4', 'r5', 'r6', 'r7')]) for _, _, R in res]))
