@@ -89,7 +89,7 @@ def evaluate(t, env, memo):
     memo[k] = v
     return v
 
-def prove_with_cuts(name, spec, obj, samples=48, cut_timeout_ms=3000, seed=1):
+def prove_with_cuts(name, spec, obj, samples=48, cut_timeout_ms=3000, seed=1, return_cuts=False):
     t0 = time.time()
     rng = random.Random(seed)
     allnodes = {}
@@ -139,4 +139,5 @@ def prove_with_cuts(name, spec, obj, samples=48, cut_timeout_ms=3000, seed=1):
     s_f = spec
     o_f = z3.substitute(obj, *subs) if subs else obj
     print('autocut: %d candidate pairs tried, %d merges proved, %.2fs' % (tried, proved, time.time() - t0))
-    return prove(name + ' [auto cuts]', s_f == o_f)
+    r = prove(name + ' [auto cuts]', s_f == o_f)
+    return (r, cuts) if return_cuts else r
