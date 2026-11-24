@@ -15,6 +15,8 @@ ap.add_argument('--spec', required=True); ap.add_argument('--obj', required=True
 ap.add_argument('--triple', default='thumbv6m-none-eabi')
 ap.add_argument('--cuts', action='store_true')
 ap.add_argument('--halves', action='store_true', help='autocut may merge into 32-bit words of 64-bit spec nodes')
+ap.add_argument('--cut-timeout', type=int, default=3000, help='ms per candidate merge')
+ap.add_argument('--channels', default='', help='comma-separated subset of channels')
 a = ap.parse_args()
 manifest = json.load(open(a.obj + '.manifest.json'))
 frames = manifest['object']['frames']
@@ -47,11 +49,12 @@ assert written == want
 tau = z3.BitVec('tau', 64)
 for k in range(frames):
     for ch, term in sorted(spec.items()):
+        if a.channels and ch not in [int(c) for c in a.channels.split(',')]: continue
         s_k = z3.substitute(term, (tau, taus[k]))
         o_k = st.mem[(out_base, 4 * (k * nch + ch))]
         if a.cuts:
             import autocut
-            autocut.prove_with_cuts('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k, o_k, halves=a.halves)
+            autocut.prove_with_cuts('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k, o_k, halves=a.halves, cut_timeout_ms=a.cut_timeout)
         else:
             prove('frame %d ch %d: spec(tau_%d) == object' % (k, ch, k), s_k == o_k)
 prove('r4-r7 restored, returns to lr',
