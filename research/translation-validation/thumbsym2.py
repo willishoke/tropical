@@ -78,7 +78,8 @@ def merge2(a, b):
         return x if x.eq(y) else z3.If(c, x, y)
     R = {k: m(a.R[k], b.R[k]) for k in a.R}
     mem = {k: m(a.mem[k], b.mem[k]) for k in a.mem}
-    flags = None if a.flags is None else tuple(z3.If(c, x, y) for x, y in zip(a.flags, b.flags))
+    flags = None if a.flags is None else tuple(None if x is None or y is None else z3.If(c, x, y)
+                                               for x, y in zip(a.flags, b.flags))
     return State(a.pc, R, mem, z3.simplify(z3.Or(a.cond, b.cond)), flags, a.back)
 
 def run(objdump_text, fn, regs0, loads, max_steps=200000):
@@ -129,6 +130,7 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 if is_ptr(x) or is_ptr(y): raise Unsupported('pointer + pointer at %x' % st.pc)
                 return x - y if sub else x + y
             branch = None
+            nzcv = None
             flagset = mn in ('movs', 'muls', 'adds', 'subs', 'asrs', 'lsls', 'lsrs', 'ands', 'orrs', 'eors', 'mvns', 'rsbs')
             if mn == 'push':
                 rs = re.findall(r'r\d+|lr', o[0])
@@ -173,6 +175,12 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 for i, r in enumerate(rs): R[r] = load((p[1], p[2] + 4 * i))
                 if o[0].endswith('!') and base not in rs:
                     R[base] = (p[0], p[1], p[2] + 4 * len(rs))
+            elif mn == 'stm':
+                base = o[0].rstrip('!'); rs = re.findall(r'r\d+', o[1])
+                p = R[base]
+                for i, r in enumerate(rs): store((p[1], p[2] + 4 * i), R[r])
+                if o[0].endswith('!'):
+                    R[base] = (p[0], p[1], p[2] + 4 * len(rs))
             elif mn == 'mov':
                 R[o[0]] = R[o[1]]
             elif mn == 'movs' and o[1].startswith('#'):
@@ -181,10 +189,19 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 R[o[0]] = g(o[1]) * g(o[2])
             elif mn in ('adds', 'subs'):
                 if len(o) == 2:            # Rdn, #imm8
-                    R[o[0]] = add_any(R[o[0]], bv(imm(o[1])), sub=(mn == 'subs'))
+                    x, y = R[o[0]], bv(imm(o[1]))
                 else:
-                    y = bv(imm(o[2])) if o[2].startswith('#') else R[o[2]]
-                    R[o[0]] = add_any(R[o[1]], y, sub=(mn == 'subs'))
+                    x, y = R[o[1]], (bv(imm(o[2])) if o[2].startswith('#') else R[o[2]])
+                R[o[0]] = add_any(x, y, sub=(mn == 'subs'))
+                if not is_ptr(x) and not is_ptr(y):
+                    res = R[o[0]]
+                    if mn == 'adds':
+                        C = z3.ULT(res, x)
+                        V = z3.Extract(31, 31, ~(x ^ y) & (x ^ res)) == 1
+                    else:
+                        C = z3.UGE(x, y)
+                        V = z3.Extract(31, 31, (x ^ y) & (x ^ res)) == 1
+                    nzcv = (C, V)
             elif mn in ('asrs', 'lsls', 'lsrs') and len(o) == 3 and o[2].startswith('#'):
                 a, n = g(o[1]), imm(o[2])
                 if not (0 <= n <= 31 or (mn != 'lsls' and n == 32)): raise Unsupported('shift %d' % n)
@@ -211,6 +228,10 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                     pending.append(st); break
                 if st.flags is None: raise Unsupported('branch without cmp at %x' % st.pc)
                 N, Z, C, V = st.flags
+                need = {'bgt': 'ZNV', 'blt': 'NV', 'bge': 'NV', 'ble': 'ZNV', 'beq': 'Z', 'bne': 'Z',
+                        'bhs': 'C', 'blo': 'C', 'bhi': 'CZ', 'bls': 'CZ'}[mn]
+                if ('C' in need and C is None) or ('V' in need and V is None):
+                    raise Unsupported('%s reads a flag this model does not set at %x' % (mn, st.pc))
                 c = {'bgt': z3.And(z3.Not(Z), N == V), 'blt': N != V, 'bge': N == V,
                      'ble': z3.Or(Z, N != V), 'beq': Z, 'bne': z3.Not(Z), 'bhs': C, 'blo': z3.Not(C),
                      'bhi': z3.And(C, z3.Not(Z)), 'bls': z3.Or(z3.Not(C), Z)}[mn]
@@ -226,7 +247,15 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 break
             else:
                 raise Unsupported('%x: %s %s' % (st.pc, mn, ops))
-            if flagset: st.flags = None
+            if flagset:
+                st.flags = None
+                d = R.get(o[0])
+                if d is not None and not is_ptr(d):
+                    N = z3.Extract(31, 31, d) == 1; Z = d == 0
+                    if mn in ('adds', 'subs') and nzcv is not None:
+                        st.flags = (N, Z) + nzcv
+                    else:
+                        st.flags = (N, Z, None, None)   # C, V not modeled for these
             st.pc = nxt
     # merge the returned states
     out = done[0]
