@@ -1,6 +1,7 @@
 """Translation validation with a GENERATED specification (phase 2).
 
-    spec   = `diffcli emit-spec <patch>`: the Plan reference semantics run over
+    spec   = `diffcli emit-spec <object>.manifest.json`: the object's own plan through
+             the Plan reference semantics run over
              the symbolic carrier Tropical.Semantics.Symbolic (no hand-written spec)
     object = the thumbv6m object from `diffcli compile-object --frames 1`,
              lifted by thumbsym.py, its arguments bound from the manifest's
@@ -38,15 +39,6 @@ def main():
         'TROPICAL_KERNEL_CACHE_ROOT', os.path.join(HERE, '.cache')))
 
     spec_file, obj_file = a.spec_file, a.obj
-    if not spec_file:
-        t = time.time()
-        r = subprocess.run([a.diffcli, 'emit-spec', a.patch, '--rate', a.rate],
-                           capture_output=True, text=True, env=env)
-        if r.returncode != 0:
-            sys.exit('emit-spec failed: ' + r.stderr.strip())
-        spec_file = stem + '.spec.smt2'
-        open(spec_file, 'w').write(r.stdout)
-        print('emit-spec: %.2fs, %d lines -> %s' % (time.time() - t, r.stdout.count('\n'), spec_file))
     if not obj_file:
         obj_file = stem + '.o'
         r = subprocess.run([a.diffcli, 'compile-object', a.patch, '--out', obj_file, '--frames', '1',
@@ -54,6 +46,18 @@ def main():
                            capture_output=True, text=True, env=env)
         if r.returncode != 0:
             sys.exit('compile-object failed: ' + r.stderr.strip())
+    if not spec_file:
+        # the spec of THIS object: the plan nested in its manifest, through
+        # the reference semantics over the symbolic carrier
+        t = time.time()
+        r = subprocess.run([a.diffcli, 'emit-spec', obj_file + '.manifest.json'],
+                           capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            sys.exit('emit-spec failed: ' + r.stderr.strip())
+        spec_file = stem + '.spec.smt2'
+        open(spec_file, 'w').write(r.stdout)
+        print('emit-spec (from the object manifest): %.2fs, %d lines -> %s' % (
+            time.time() - t, r.stdout.count('\n'), spec_file))
     manifest = json.load(open(obj_file + '.manifest.json'))
 
     spec = {}

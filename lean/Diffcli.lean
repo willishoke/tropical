@@ -628,25 +628,43 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
         IO.eprintln s!"compile-object: wrote {obj.size} bytes → {outPath}"
         return 0
 
-/-- `diffcli emit-spec <patch-or-graph.json> [--rate R] [--fixtures] [--graph]`
+/-- `diffcli emit-spec <patch-or-graph.json | kernel.manifest.json> [--rate R] [--fixtures] [--graph]`
     → SMT-LIB on stdout: one frame of the kernel as the Plan reference
     semantics computes it over a symbolic carrier
     (`Semantics.Symbolic.algebra`), with the `param:` slots and the clock
-    free. Experimental (translation validation): the plan is the one
-    `compile-object` emits from, read by the same `compileToSplit`. A plan
-    with a separate stage-0 coefficient plan is refused. -/
+    free. Experimental (translation validation). Given a patch, the plan is
+    the one `compile-object` emits from (the same `compileToSplit`); given a
+    `tropical_kernel_1` manifest (what `compile-object` writes beside the
+    object), it is the plan nested in it, so the spec is bound to that
+    artifact's own plan. A split stage-0 coefficient plan is refused. -/
 def emitSpecVerb (args : List String) : IO UInt32 :=
-  runVerb "emit-spec" "<patch-or-graph.json> [--rate R] [--fixtures] [--graph]"
+  runVerb "emit-spec" "<patch-or-graph.json | kernel.manifest.json> [--rate R] [--fixtures] [--graph]"
     [valued "rate", switch "fixtures", switch "graph"] args
     (fun a => a.rate?)
-    fun a rate? patch => do
-  match ← compileToSplit a rate? patch with
+    fun a rate? path => do
+  let fromManifest : Option (Except String Tropical.Plan.FlatPlan) :=
+    match Lean.Json.parse (← IO.FS.readFile path) with
+    | .ok j =>
+      if (j.getObjValAs? String "schema").toOption == some "tropical_kernel_1" then
+        some (match j.getObjVal? "plan" with
+          | .ok pj => Tropical.Plan.FlatPlan.ofWire pj
+          | .error e => .error s!"manifest has no plan: {e}")
+      else none
+    | .error _ => none
+  let plan? ← match fromManifest with
+    | some r => pure (r.map some)
+    | none => do
+      match ← compileToSplit a rate? path with
+      | .error e => pure (.error e)
+      | .ok split =>
+        if split.coeff?.isSome then pure (.error "emit-spec: a split stage-0 coefficient plan is not modeled")
+        else pure (.ok (some split.audio))
+  match plan? with
   | .error e => IO.eprintln e; return 1
-  | .ok split =>
-    if split.coeff?.isSome then
-      IO.eprintln "emit-spec: a split stage-0 coefficient plan is not modeled"; return 1
-    match Tropical.Semantics.Symbolic.specSmt split.audio
-        s!"emit-spec {patch}: Semantics.Plan over Semantics.Symbolic.algebra, one frame" with
+  | .ok none => IO.eprintln "emit-spec: no plan"; return 1
+  | .ok (some plan) =>
+    match Tropical.Semantics.Symbolic.specSmt plan
+        s!"emit-spec {path}: Semantics.Plan over Semantics.Symbolic.algebra, one frame" with
     | .error e => IO.eprintln s!"emit-spec: {e}"; return 1
     | .ok text => IO.print text; return 0
 
