@@ -38,8 +38,9 @@ The compiler is the Lean `frontend` binary — there is no TS compiler and no
 koffi FFI subprocess. `tropicaltest` (the built binary at
 `./lean/.lake/build/bin/tropicaltest`) drives the goldens and the native
 realization-variant equivalence directly through the engine. The bun suites
-are the cross-backend and runtime-contract suites (`tests/web`), which run
-the built `diffcli`, `tropicalc` and `frontend` binaries directly, and the MCP
+are the cross-backend and runtime-contract suites (`tests/web`), most of
+which run the built `diffcli`, `tropicalc` and `frontend` binaries directly
+(a few exercise the web runtime alone), and the MCP
 protocol tests (`mcp/`), which speak to `frontend --rpc` through
 `TROPICAL_ENGINE_CMD`.
 
@@ -126,8 +127,10 @@ resolved `Program` (lean/Tropical/Ir/Nodes.lean)
   │  ────────────────────────────────────────
   │   assertAcyclic    — confirms the caller honored the contract
   │   inlineInstances  — OPTIONAL (opts.inlineNested): inner bodies lifted
-  │                      in place; the fractal session path skips it and
-  │                      keeps instances as kernel boundaries  (InlineInstances.lean)
+  │                      in place; registration on the session path runs it,
+  │                      so each type's nested instances are inlined, and only
+  │                      the session root keeps its instances as kernel
+  │                      boundaries  (InlineInstances.lean)
   │   identityElim     — categorical identity-law peephole  (IdentityElim.lean)
   │   toResolved       — the reachability GC (Strata/EArena.lean): copy the
   │                      evaluator-reachable graph into a fresh arena of the
@@ -211,7 +214,7 @@ tropical_plan_7 / FlatPlan
   ├─ EmitLlvm → the same LLVM → wasm32 TargetMachine + lld → browser player
   ├─ EmitLlvm → the same LLVM → TargetMachine for a triple → relocatable object
   │             (`diffcli compile-object --triple`: host by default; thumbv6m,
-  │             thumbv7em-eabihf and wasm32 are gated)
+  │             thumbv7em-none-eabihf and wasm32 are gated)
   └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
 ```
 
@@ -386,14 +389,15 @@ tools/                layer, trust, artifact-parity, runtime-dep and embedded-ob
 tests/                Cross-cutting test surface
   web/                bun suites: WASM/Metal ≡ JIT, shipped artifacts, embedded objects, player + CLI contracts
   fixtures/           Shared fixtures (flat plans, embedded-object patches, spectral, rounding_f32.ll)
-  golden/             Audio goldens (top level, cf/, embedded/, migration/), frozen MSL text (msl/),
+  golden/             Audio goldens (cf/, embedded/, migration/), frozen MSL text (msl/),
                         and the per-program stdlib wire+port goldens (stdlib/)
 design/               Architecture and design notes (architecture.md is authoritative)
 ```
 
 Unit tests for the compiler live inside the Lean tree (the `tropicaltest` and
-`tropicaltest-core` binaries). The bun suites run the built Lean binaries:
-`tests/web` calls them directly, `mcp/` through `TROPICAL_ENGINE_CMD`.
+`tropicaltest-core` binaries). Most `tests/web` suites call the built Lean
+binaries directly (a few exercise the web runtime alone); `mcp/` reaches
+`frontend --rpc` through `TROPICAL_ENGINE_CMD`.
 
 ## Conventions
 

@@ -32,7 +32,7 @@ mode. `make test-lean-engine` runs them against
 
 ```bash
 make mcp-lean   # build C++ core + Lean front door, then launch the MCP server
-make lean       # build just the lean/ binaries (frontend: compiler + MCP server; diffcli, tropicalc, test runners)
+make lean       # build just the lean/ binaries: frontend (compiler + MCP server), diffcli, tropicalc, tropicaltest, tropicaltest-core, trustreport
 ```
 
 The server is also configured in `.mcp.json` for Claude Code — it
