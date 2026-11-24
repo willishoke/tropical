@@ -13,9 +13,9 @@ oscillator phase is computed from the time coordinate, not latched.
 
 ```bash
 make build          # C++ core, outputs build/libtropical.dylib
-make lean           # Lean frontend + diffcli (the production compiler + MCP server)
+make lean           # Lean binaries: frontend (compiler + MCP server), diffcli, tropicalc, tropicaltest, tropicaltest-core, trustreport
 make mcp-lean       # build C++ + Lean front door, then launch the MCP server
-make validate       # build + lean + tsc + tropicaltest + web build + bun test + ctest
+make validate       # build + lean + tools/ checks + tsc + tropicaltest(-core) + embedded objects + web build + bun test + ctest + metal_live smoke
 make clean          # remove build directories
 ```
 
@@ -30,7 +30,7 @@ it builds into its own library, `libtropical_wasm`, which only `diffcli` links.
 
 ```bash
 cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API, no audio device)
-./lean/.lake/build/bin/tropicaltest                 # audio goldens + native mode-equiv
+./lean/.lake/build/bin/tropicaltest                 # audio goldens + realization-variant equivalence
 TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡JIT + MCP behavioral
 ```
 
@@ -38,8 +38,9 @@ The compiler is the Lean `frontend` binary — there is no TS compiler and no
 koffi FFI subprocess. `tropicaltest` (the built binary at
 `./lean/.lake/build/bin/tropicaltest`) drives the goldens and the native
 realization-variant equivalence directly through the engine. The bun suites
-are the surviving cross-backend gate (`tests/web`, wasm vs. JIT) and the MCP
-protocol tests (`mcp/`), both run against the live Lean engine via
+are the cross-backend and runtime-contract suites (`tests/web`), which run
+the built `diffcli`, `tropicalc` and `frontend` binaries directly, and the MCP
+protocol tests (`mcp/`), which speak to `frontend --rpc` through
 `TROPICAL_ENGINE_CMD`.
 
 **Run these binaries directly — never via `lake exe`.** `libtropical_wasm`
@@ -60,12 +61,9 @@ won't help; it's the `lake exe` DYLD environment. Run the binary, not the
 wrapper.)
 
 **If equivalence tests fail unexpectedly, clear the JIT cache first.**
-`rm -rf ~/.cache/tropical/kernels` — the LLVM-IR cache is keyed by an MD5
-of the serialized plan plus the dylib's build-id, but a fix that changes
-*runtime* behavior without changing the emitted plan (e.g., the engine
-emits an existing instruction field that the parser previously ignored)
-can leave stale kernels in place. Clearing the cache is cheap; chasing
-a phantom regression is not.
+`rm -rf ~/.cache/tropical/kernels` — the compiled-object cache is keyed by an
+MD5 of the emitted LLVM IR text, in a directory named for libtropical's
+build-id. Clearing the cache is cheap; chasing a phantom regression is not.
 
 ## Ideological backbone
 
@@ -107,7 +105,7 @@ arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  �
   │  resolved-IR DAG (EmitArrow.Sig → Nodes). The JSON front door is a
   │  PATCH BAY: `normalizeProgramFile` (lean/Tropical/Parse/Raise.lean,
   │  schema check + node/metadata split) → the session ingest
-  │  (Engine/ProgramIO.lean) walks the node directly — instances +
+  │  (Session/Ingest.lean) walks the node directly — instances +
   │  wiring + params of REGISTERED types. Ingest is the refusal site:
   │  a programDecl (a program body over the wire) dies with the
   │  retirement message; wire expressions are a TYPED inductive
@@ -115,7 +113,7 @@ arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  �
   │  combinator/binder/state-op spellings exist) —
   │  the grammar you can spell is the language that compiles.
   ▼
-ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
+resolved `Program` (lean/Tropical/Ir/Nodes.lean)
   DAG-shaped graph IR — cycles are not representable in a valid
   resolved program (they're rejected at every constructing boundary
   via Ir/Cycles.lean). There is no state primitive: kernels
@@ -143,7 +141,7 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   │                      assemble time); only structure a backend wants
   │                      AS DATA earns an IR node, the way `bankSum` did.
   ▼
-ResolvedProgram (lowered)
+resolved `Program` (lowered)
   scalar-only · monomorphic · acyclic · non-nested (inline path) ·
   DECISION-FREE: no combinator exists except `bankSum`, the bounded
   reduction that is itself the normal form for uniform indexed families
@@ -165,23 +163,27 @@ ResolvedProgram (lowered)
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the
 per-program pipeline at the instance level — each instance type is
-lowered once at load — and build the whole session
-**directly into one synthetic root `ResolvedProgram`**
-(`sessionToResolvedRoot`, no ParsedProgram round-trip), lowered
-through the same fractal path:
+lowered once, at registration — and build the whole session
+**directly into one synthetic root `Program`**
+(`sessionToResolvedRoot`, no ParsedProgram round-trip). The root does not
+run the inline or identityElim rewrites; it goes straight to the
+`toResolved` type boundary (`checkResolvedArena`), keeping instances as
+kernel boundaries:
 
 ```
-SessionState  (instances + wiring + dac.out + params)
+SessionSt  (instances + wiring + graph outputs + params)
   │
-  │  compileSession (engine-side: lean/Tropical/{Engine,Compile,Lowering,Wiring}.lean)
-  │     each instance is already a lowered ResolvedProgram;
-  │     liftWiresToInstances normalizes the wiring;
-  │     then the slotted root-program lowering:
+  │  Session.compileStaged (lean/Tropical/Session/Compile.lean, with
+  │  Lowering.lean and Compile.lean):
+  │     each instance type was lowered once, at registration;
+  │     liftIfNeeded lifts array-literal wires into anonymous `__wire_N` instances;
+  │     assertSessionAcyclic, then the slotted root-program lowering:
   │       sessionToResolvedRoot: the session graph is already
   │         post-elaborate-shaped, so the resolved root `Program` is
   │         built DIRECTLY — instances → InstanceDecls linking each
-  │         instance's already-resolved type snapshot, wires → Ir.Expr
-  │       → partitionKernel → tropical_plan_7
+  │         instance's already-resolved type snapshot, wires → `ENode`
+  │         expressions (`wireExprToResolved`)
+  │       → checkResolvedArena → partitionKernel → tropical_plan_7
   ▼
 tropical_plan_7  (instance_functions[] + sinks[] + sources[])
 ```
@@ -189,8 +191,9 @@ tropical_plan_7  (instance_functions[] + sinks[] + sources[])
 **The IR is acyclic by construction.** There is no register to break a
 cycle through, so every boundary that constructs a graph rejects them
 (`Ir/Cycles.lean`): the session-acyclicity check
-(`lean/Tropical/{Engine,Lowering}.lean`) is a plain "no cycles at all"
-rule, run as an invariant at compileSession's entry, and
+(`Lowering.assertSessionAcyclic`) is a plain "no cycles at all" rule, run in
+the session-compile prologue (`Session/Compile.lean`, `buildSessionInput`)
+before the root is built, and
 `export_program`'s direct construction enforces the same contract. Nothing breaks cycles for you — there are no
 per-wire delays, so wires add no latency, and a back-edge (in MCP
 mutations or hand-written JSON) is a compile error, not a one-sample
@@ -199,19 +202,23 @@ island, deferred to a future stateful sister runtime.
 
 ## What sits below the waist
 
-Three execution targets consume the same typed `FlatPlan`; they are target
+Four targets consume the same typed `FlatPlan`; they are target
 interpretations, not more source-language stages.
 
 ```
 tropical_plan_7 / FlatPlan
   ├─ EmitLlvm → textual LLVM → OrcJitEngine::compile_ir_text → FlatRuntime
   ├─ EmitLlvm → the same LLVM → wasm32 TargetMachine + lld → browser player
+  ├─ EmitLlvm → the same LLVM → TargetMachine for a triple → relocatable object
+  │             (`diffcli compile-object --triple`: host by default; thumbv6m,
+  │             thumbv7em-eabihf and wasm32 are gated)
   └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
 ```
 
-The JIT uses f64 values plus exact integer rails, `int` (i64) and `int32`
-(i32, two's complement, wrapping), and is the native reference and scope
-path. WebAssembly shares the LLVM f64/i64/i32 semantics. Metal uses an f32
+The JIT uses f64 values (binary32 in an artifact compiled at `--float f32`,
+below) plus exact integer rails, `int` (i64) and `int32` (i32, two's
+complement, wrapping), and is the native reference and scope path.
+WebAssembly and the relocatable objects share the LLVM semantics. Metal uses an f32
 value path plus the same exact `int` and `int32` kinds; on Metal sessions the
 JIT remains dual-loaded for `render_window` and reference comparisons.
 Integer widths are meaning and hold on every target. Every integer op is
@@ -262,16 +269,35 @@ diff against — a differential proves *agreement*, not correctness.
 Correctness is anchored by **frozen audio goldens**; the surviving
 cross-checks pin target refinements and the JIT's realization variants:
 
-- `tests/web/wasm_vs_jit.test.ts` — WASM and JIT agree sample-for-sample,
-  run against the live Lean engine via `TROPICAL_ENGINE_CMD`.
-- `tests/web/web_plans_vs_jit.test.ts` — every precompiled plan in
+- `tests/web/wasm_vs_jit.test.ts` — WASM and JIT agree sample-for-sample
+  (`diffcli compile-wasm` vs. `diffcli render-bytes`), f64, integer and f32
+  cases.
+- `tests/web/web_plans_vs_jit.test.ts` — every precompiled artifact in
   `web/dist/patches/` matches the JIT output.
 - `tests/web/metal_vs_jit.test.ts` — Metal meets the documented f32
   tolerance/SNR boundary against the f64 JIT.
+- `tests/web/graph_wasm_vs_jit.test.ts` — playground PatchGraphs through
+  `compile-wasm` vs. `render-graph` (the JIT), every output channel, plus
+  the unsplit (`TROPICAL_STAGE0=0`) kernel against the stage-0 split one.
+- `tests/web/param_dispatch_conformance.test.ts` — the same param-write
+  sequence through the C++ socket data plane and through the Lean engine's
+  `set_param` renders byte-identical output, with the companion slots
+  pinned to their closed forms.
+- `tests/web/render_ahead.test.ts` — with no knob moving, the browser
+  player's render-ahead output equals the direct render, sample for sample.
+- `tests/web/embedded_object.test.ts` and `tools/embedded_object.py` (in
+  `make validate`) — `compile-object` for Cortex-M0+, Cortex-M4F at
+  `--float f32`, host and wasm32: the manifests, no libcalls, and the
+  refusals by name.
 - `tropicaltest` (`lean/Tropicaltest.lean`, run as the built binary) — byte-for-byte
-  audio goldens (`tests/golden/`) plus the native realization-variant
-  equivalence *within* the JIT (fused vs. per-instance microkernel,
-  flat vs. nested), driven directly through the engine.
+  audio goldens (`tests/golden/`) plus realization-variant equivalences
+  *within* the JIT (a reduce region ≡ its unrolling, the typed stage-0 hoist
+  ≡ the flow hoist), driven directly through the engine. `tropicaltest-core`
+  runs the runtime-free subset with no libtropical linked.
+
+The other `tests/web` suites pin single contracts: CLI flags, graph
+compiles, the web runtime's params, typed ports, multichannel layout and
+memory import, and the engine's compile handshake.
 
 Any disagreement is a lowering or backend bug, but agreement alone does not
 prove source semantics; see `design/trust-boundary.md`. The former
@@ -280,17 +306,18 @@ TS implementation; there are no longer differential gates.
 
 ## Schema versions
 
-Two distinct JSON schemas; do not confuse them.
+Three distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
+| `tropical_program_2` | read by `lean/Tropical/Parse/Raise.lean` + `Session/Ingest.lean`; written by `Engine/ProgramIO/Export.lean` | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
 | `tropical_plan_7`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
 | `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with element type, `frac_bits` for an integer word, defaults and disciplines) and its output (element type, shape and channel names), rate, realization, with the `tropical_plan_7` plan nested for the gates. `tropicalc`, `diffcli compile-kernel` and `diffcli compile-object` write it; the C++ runtime and the web player read it. |
 
 Going from the first to the second without losing meaning is exactly
-what the session compile does (ingest → sessionToResolvedRoot →
-inline → identityElim → toResolved → partitionKernel). A
+what the session compile does (ingest → liftIfNeeded →
+assertSessionAcyclic → sessionToResolvedRoot → checkResolvedArena →
+partitionKernel). A
 `tropical_program_2` file that carries a program body (`programDecl`)
 or spells a retired construct in a wire (`fold`/`scan`/…, generics,
 state ops) does not load: ingest refuses it with the retirement
@@ -305,43 +332,68 @@ whole stack — compiler + session + runtime FFI + MCP server, one binary.
 ```
 lean/                 Lean 4: the production compiler + MCP server (one binary)
   Main.lean           the MCP front door → the `frontend` binary
-  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / compile-object / render / emit-ir / emit-msl)
+  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / compile-kernel / compile-object /
+                        render-bytes / render-graph / render-sweep / render-metal / emit-ir / emit-msl)
+  Tropicalc.lean      `tropicalc`: the compiler with no runtime linked (patch → plan, manifest, artifacts)
   Tropicaltest.lean   golden + native realization-variant equivalence runner
-  ffi/                C shim to libtropical (shim.c, built by `make lean`)
+  TropicaltestCore.lean  `tropicaltest-core`: the gates that need no runtime
+  ffi/                C shims: shim.c to libtropical, shim_wasm.c to libtropical_wasm (built by `make lean`)
   Tropical/
     Parse/            JSON ingest: Raise (normalizeProgramFile — the patch-bay
                         front door), Nodes (ScalarKind), OrderedJson (JsonV)
                         (the surface parser AND the elaborator are retired)
-    Stdlib.lean       the stdlib as 17 arrow-combinator builders — the boot chain
+    Stdlib.lean       re-exports EmitArrow/Stdlib.lean
     EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Spectral, Patch, Modal, Gong)
+      Stdlib.lean       the stdlib as 17 arrow-combinator builders (`stdlibBuilders`) — the boot chain
     Ir/               lower → emit (authoring assembles directly; no elaborate)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
-      Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram
-    Engine, Session, Compile, Lowering, Wiring   engine-side session compile
+      Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram, ConstFold
+      Stage0 (binding-time split: audio + coefficient kernel), EmitLlvm, EmitMsl
+    Session/          the session as a pure state transformer (`SessionM`): Registry,
+                        Ingest (the patch-bay walk), Compile (the session compile)
+    Session.lean      `SessionSt`, the session state
+    Lowering, Compile, Wiring   slot allocation + acyclicity, partition + plan assembly, port types
+    Engine/           the engine's stateful shell: tool handlers, syncCompile + publish,
+                        ProgramIO (save / export / load / merge)
+    Playground/       PatchGraph vocabulary, decoder and graph → plan compiler (`--graph`)
     Plan.lean         tropical_plan_7 schema
-    Ffi.lean          FFI bridge to libtropical (Runtime, DAC, Param)
-    Tools, Rpc, Relay, Resources, Frontend, …    MCP tool surface + RPC
+    Kernel.lean       tropical_kernel_1: the typed kernel at the port
+    PortFormat.lean   a port value's scalar kind and fixed-point format (`frac_bits`)
+    Toolchain/        Wasm.lean: bindings over libtropical_wasm (IR → wasm module or object)
+    Ffi.lean          FFI bridge to libtropical (Runtime, DAC)
+    Tools, Rpc, Serve, Resources, Frontend, …    MCP tool surface + RPC
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output
   c_api/              Stable C API — the boundary between Lean and C++
   jit/                LLVM ORC JIT engine
   runtime/            FlatRuntime (plan loading, kernel execution)
+  metal/              MetalKernel (the MSL backend's host)
+  toolchain/          libtropical_wasm: IR → wasm32 module or relocatable object
   dac/                Audio output (RtAudio)
 mcp/                  MCP behavioral tests (errors.test.ts, wire_dac.test.ts) + docs (CLAUDE.md, ERRORS.md)
 web/                  WASM/browser backend (precompiled-patch player)
-  runtime/            extractable runtime package: KernelManifest + layout + WasmKernel
-  patches/            curated source patches; build_patches.ts → .wasm + manifest via `diffcli compile-wasm`
-  dist/patches/       precompiled <slug>.wasm + <slug>.manifest.json
+  runtime/            extractable runtime package: KernelManifest + layout + WasmKernel + ParamWriter
+  host/               main thread: AudioContext, worklet node, renderer Worker
+  worker/             render-ahead thread (owns the kernel)
+  worklet/            audio thread: copies queued chunks out, underrun concealment
+  site/               browser UI
+  patches/            curated source patches; build_patches.ts → .wasm via `diffcli compile-wasm`,
+                        manifest via `diffcli compile-kernel`
+  dist/patches/       precompiled <slug>.wasm + <slug>.manifest.json (build output, not checked in)
 patches/              Example patches (tropical_program_2 JSON)
+playground/           Electron demo over `frontend --serve`
+reversible/           Swift/macOS control surface over the served engine
+tools/                layer, trust, artifact-parity, runtime-dep and embedded-object checks (`make validate`)
 tests/                Cross-cutting test surface
-  web/                WASM≡JIT + precompiled-plan equivalence (run vs. the Lean engine)
-  fixtures/           Shared fixtures (flat_plan JSONs)
-  golden/             Audio golden hashes + the per-program stdlib wire+port goldens (golden/stdlib/)
+  web/                bun suites: WASM/Metal ≡ JIT, shipped artifacts, embedded objects, player + CLI contracts
+  fixtures/           Shared fixtures (flat plans, embedded-object patches, spectral, rounding_f32.ll)
+  golden/             Audio goldens (top level, cf/, embedded/, migration/), frozen MSL text (msl/),
+                        and the per-program stdlib wire+port goldens (stdlib/)
 design/               Architecture and design notes (architecture.md is authoritative)
 ```
 
-Unit tests for the compiler live inside the Lean tree (the `tropicaltest` binary).
-The behavioral bun suites (`tests/web`, `mcp/`) run against the live Lean
-engine via `TROPICAL_ENGINE_CMD`.
+Unit tests for the compiler live inside the Lean tree (the `tropicaltest` and
+`tropicaltest-core` binaries). The bun suites run the built Lean binaries:
+`tests/web` calls them directly, `mcp/` through `TROPICAL_ENGINE_CMD`.
 
 ## Conventions
 

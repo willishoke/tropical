@@ -15,16 +15,21 @@ Per patch, the build emits two artifacts the browser fetches:
 
 - `<slug>.wasm` — a complete wasm32 module exporting `tropical_kernel` (the
   port: one pointer per input — `tau`, then the params — and one for the
-  output, over a static 128-frame block) + `__heap_base`, importing
+  output, over a static 128-frame block), `__heap_base` and
+  `tropical_kernel_float_bits` (the module's float format), importing
   `env.memory` and `env.round`. Produced by `diffcli compile-wasm --frames
   128` (engine LLVM + lld, in-process — no `wasm-ld` on PATH, no toolchain).
 - `<slug>.manifest.json` — the kernel's type, `tropical_kernel_1`
-  (`design/typed-kernel.md`): `tau:i64q16[128]`, one `f64` param per knob
-  with its default, and `out:f64[128, C]`. Produced by `diffcli
+  (`design/typed-kernel.md`): `tau:i64q16[128]`, one scalar param per
+  `param:` slot with its default and write discipline (`f64` unless it
+  declares an integer word, `f32` in a `--float f32` artifact), and
+  `out:f64[128, C]` (`i32` for an `int32` program output, `f32` at
+  `--float f32`). Produced by `diffcli
   compile-kernel --frames 128` (`--rate R` or `--rate=R`, on both verbs,
   compiles for another rate; the default is 44.1 kHz; an unknown flag or a
   bad value is an error). The compiler's plan is nested inside for its own
-  gates; the runtime never reads it.
+  gates; the runtime reads only its `param_disciplines`, to refuse a
+  binary32 artifact that pairs `f32` with a non-raw discipline.
 
 ## Layout
 
@@ -33,12 +38,12 @@ web/
   runtime/             The extractable runtime package (→ @tropical/runtime-wasm)
     manifest.ts          KernelManifest — the consumption contract
     layout.ts            computeLayout: KernelManifest → linear-memory regions
-    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade)
+    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade) + setParam/getParam
     params.ts            ParamWriter: live param writes under raw/anchor disciplines
     index.ts             public surface
   patches/             Source demo patches (tropical_program_2 JSON or PatchGraph) + manifest.json
-  build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm + a trimmed
-                       <slug>.manifest.json → web/dist/patches/ + index.json
+  build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm, diffcli compile-kernel
+                       → <slug>.manifest.json, into web/dist/patches/ + index.json
   build.ts             Full demo bundle: build patches, bundle worklet + worker + app, copy html
   dev.ts               Plain static server (no COOP/COEP — there's no SharedArrayBuffer)
   host/                Main thread
@@ -119,13 +124,15 @@ else lives inside the function. The host owns one imported
 ```
 __heap_base
   tau       i64[frames]              — the Q48.16 clock of each frame
-  params    f64 × (one cell per param input, port order)
-  output    f64[frames * channels]   — frame-major
+  params    one 8-byte cell per param input, port order (an f64, or an f32,
+            i32 or i64 word at its low address)
+  output    f64, f32 or i32 [frames * channels]   — frame-major
 ```
 
 `WasmKernel.render(n)` fills tau and calls the kernel once per static block,
 chunking a longer window over the same closed form, and returns a copy of
-the raw f64 output (what the WASM≡JIT gate compares); `process(out, n)`
+the output as f64, an `f32` or `i32` output widened exactly (what the
+WASM≡JIT gate compares); `process(out, n)`
 applies the fade and downcasts to the f32 worklet buffer.
 
 ## Render-ahead and underrun concealment
@@ -192,11 +199,13 @@ containing a `WebAssembly.Module`.)
 
 ## Equivalence gates
 
-Two suites in `tests/web/` lock the wasm path to the JIT (both compare the
-kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
+The `tests/web/` suites for the wasm path and the player. The first three
+compare the kernel's output against the JIT (`WasmKernel.render` vs
+`diffcli render-bytes` or `render-graph`):
 
 - `wasm_vs_jit.test.ts` — current closed-form oscillator, nonlinear, and
-  operation-coverage patches compiled by `diffcli compile-wasm` vs the JIT.
+  operation-coverage patches, with `int32`, typed-param and `--float f32`
+  cases, compiled by `diffcli compile-wasm` vs the JIT.
   The former array/writeback-shaped program is now a refusal case proving
   `programDecl` cannot reintroduce retired state. The executable cases are the
   *same IR* through two LLVM targets, so agreement mainly guards target-specific
@@ -226,6 +235,9 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
 - `runtime_params.test.ts` — `ParamWriter`: an anchored re-pitch ten hours in
   is continuous and plays the new pitch (a raw one jumps); companions and
   unimplemented disciplines are refused.
+- `runtime_typed_ports.test.ts` — the manifest reader and `ParamWriter` on
+  `i32`/`i64` params and an `i32` output, and the refusals of what the
+  reader cannot bind.
 - `graph_clock.test.ts` — closed-form clock properties of the playground
   generators and the signal-time `delay` at arbitrary τ (`seek`): exact
   phasor periodicity, a negative freq playing the saw and pulse backward bit
