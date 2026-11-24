@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # EXPERIMENTAL. Reproduce the translation-validation spike (SinOscQ15, 1 frame, 48 kHz, thumbv6m).
 # Needs: python3 venv with z3-solver (requirements.txt), llvm@22 (llvm-objdump), Lean via elan.
 #   PY=path/to/venv/bin/python DIFFCLI=path/to/diffcli ./reproduce.sh
@@ -22,3 +22,20 @@ $PY inc_lia.py
 $PY tolean.py && CUTS=1 $PY tolean.py
 lean/run_lean.sh Check2.lean   # cut-point proof, composed in Lean (cuts time out at 600 s)
 lean/run_lean.sh Check.lean    # monolithic attempt (did not finish)
+
+# ---- phase 2: the spec GENERATED from the Plan reference semantics ----
+mkdir -p gen
+# (diffcli emit-spec = Semantics.Plan over Semantics.Symbolic.algebra)
+$DIFFCLI emit-spec lfo_knob2.json --rate 48000 > gen_lfo_knob2.spec.smt2
+diff <(grep -v '^;' gen_lfo_knob2.spec.smt2) <(grep -v '^;' lfo_knob2.spec.smt2) && echo "spec matches the committed one"
+# generated spec vs the thumbv6m object, automatic merges, and vs the hand spec
+$PY tv_gen.py lfo_knob2.json --diffcli $DIFFCLI --cuts --compare-handspec
+# a second kernel with no kernel-specific code
+$PY tv_gen.py ../../tests/fixtures/embedded_lfo.json --diffcli $DIFFCLI --cuts
+# the frame loop: a 128-frame object, every frame
+$DIFFCLI compile-object lfo_knob2.json --out gen/lfo_knob2-f128.o --frames 128 --rate 48000 \
+  --triple thumbv6m-none-eabi --cpu cortex-m0plus
+$PY tv_frames.py --spec lfo_knob2.spec.smt2 --obj gen/lfo_knob2-f128.o --cuts
+# differential check of the symbolic carrier against the concrete reference (bounded)
+#   lake env lean --run tools/RefOfPlanJson.lean <plan.json> <vectors> > ref_out.txt
+#   $PY diff_ref.py lfo_knob2.spec.smt2 <vectors> ref_out.txt param:freq param:phase

@@ -26,13 +26,16 @@ class Unsupported(Exception):
 def bv(n): return z3.BitVecVal(n & 0xFFFFFFFF, 32)
 
 def parse(objdump_text, fn):
-    insts, words, on = {}, {}, False
+    insts, words, relocs, on = {}, {}, {}, False
     for l in objdump_text.split('\n'):
         if re.match(r'^[0-9a-f]+ <%s>:$' % re.escape(fn), l):
             on = True; continue
         if on and (re.match(r'^[0-9a-f]+ <', l) or l.startswith('Disassembly')):
             break
         if not on: continue
+        m = re.match(r'^\s+([0-9a-f]+):\s+R_ARM_\S+\s+(\S+)', l)
+        if m:
+            relocs[int(m.group(1), 16)] = m.group(2); continue
         m = re.match(r'^\s+([0-9a-f]+):\s+((?:[0-9a-f]{2} ){4})\s*\.word\s+0x([0-9a-f]+)', l)
         if m:
             words[int(m.group(1), 16)] = int(m.group(3), 16); continue
@@ -40,7 +43,22 @@ def parse(objdump_text, fn):
         if m:
             size = 4 if m.group(3) else 2
             insts[int(m.group(1), 16)] = (m.group(4), m.group(5).split('@')[0].strip(), size)
-    return insts, words
+    return insts, words, relocs
+
+def w64(lo, hi): return z3.Concat(hi, lo)
+
+# Run-time ABI helpers (AEABI, ARM IHI 0043) a call may reach, by their
+# specified effect on r0-r3. Their implementations are TRUSTED to meet this.
+def aeabi(sym, R):
+    a = w64(R['r0'], R['r1'])
+    if sym == '__aeabi_lmul':
+        r = a * w64(R['r2'], R['r3'])
+    elif sym in ('__aeabi_llsl', '__aeabi_llsr', '__aeabi_lasr'):
+        n = z3.ZeroExt(32, R['r2'] & 0xFF)      # shift count in r2 (low byte); >= 64 is unspecified
+        r = a << n if sym == '__aeabi_llsl' else z3.LShR(a, n) if sym == '__aeabi_llsr' else a >> n
+    else:
+        raise Unsupported('call to %s: no contract modeled' % sym)
+    return z3.Extract(31, 0, r), z3.Extract(63, 32, r)
 
 def imm(t): return int(t.strip().lstrip('#'), 0)
 
@@ -71,8 +89,22 @@ def mergeable(a, b):
         if is_ptr(a.mem[k]) != is_ptr(b.mem[k]) or is_ptr(a.mem[k]) and a.mem[k] != b.mem[k]: return False
     return True
 
+def _complementary(x, y):
+    return z3.eq(y, z3.Not(x)) or z3.eq(x, z3.Not(y))
+
 def merge2(a, b):
-    c = a.cond
+    """Merge two states at the same pc. Path conditions are tuples of
+    conjuncts; the If uses only the conjuncts past the common prefix, and
+    two sides of one fork merge back to the prefix, so conditions do not
+    grow from frame to frame."""
+    n = 0
+    while n < min(len(a.cond), len(b.cond)) and z3.eq(a.cond[n], b.cond[n]): n += 1
+    ra, rb = a.cond[n:], b.cond[n:]
+    c = z3.And(*ra) if ra else z3.BoolVal(True)
+    if len(ra) == 1 and len(rb) == 1 and _complementary(ra[0], rb[0]):
+        cond = a.cond[:n]
+    else:
+        cond = a.cond[:n] + (z3.Or(c, z3.And(*rb) if rb else z3.BoolVal(True)),)
     def m(x, y):
         if is_ptr(x): return x
         return x if x.eq(y) else z3.If(c, x, y)
@@ -80,14 +112,14 @@ def merge2(a, b):
     mem = {k: m(a.mem[k], b.mem[k]) for k in a.mem}
     flags = None if a.flags is None else tuple(None if x is None or y is None else z3.If(c, x, y)
                                                for x, y in zip(a.flags, b.flags))
-    return State(a.pc, R, mem, z3.simplify(z3.Or(a.cond, b.cond)), flags, a.back)
+    return State(a.pc, R, mem, cond, flags, a.back)
 
 def run(objdump_text, fn, regs0, loads, max_steps=200000):
     """regs0: initial registers ('sp' is set here); loads: {(base, off): BV32}
     for the read-only input regions.  Returns the merged final state(s)."""
-    insts, words = parse(objdump_text, fn)
+    insts, words, relocs = parse(objdump_text, fn)
     R = dict(regs0); R['sp'] = ('ptr', 'sp', 0)
-    pending = [State(0, R, {}, z3.BoolVal(True), None, 0)]
+    pending = [State(0, R, {}, (), None, 0)]
     done, steps = [], 0
     while pending:
         pending.sort(key=lambda s: (s.back, s.pc))
@@ -181,6 +213,15 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 for i, r in enumerate(rs): store((p[1], p[2] + 4 * i), R[r])
                 if o[0].endswith('!'):
                     R[base] = (p[0], p[1], p[2] + 4 * len(rs))
+            elif mn == 'bl':
+                sym = relocs.get(st.pc)
+                if sym is None: raise Unsupported('bl without a relocation at %x' % st.pc)
+                lo, hi = aeabi(sym, R)
+                st.calls = getattr(st, 'calls', set()) | {sym}
+                R['r0'], R['r1'] = lo, hi
+                for r in ('r2', 'r3', 'r12', 'lr'):  # caller-saved and the link register: clobbered
+                    R[r] = z3.FreshConst(z3.BitVecSort(32), 'clobber_' + r)
+                st.flags = None
             elif mn == 'mov':
                 R[o[0]] = R[o[1]]
             elif mn == 'movs' and o[1].startswith('#'):
@@ -242,7 +283,7 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
                 if z3.is_true(cs): pending.append(taken)
                 elif z3.is_false(cs): pending.append(fall)
                 else:
-                    taken.cond = z3.And(st.cond, c); fall.cond = z3.And(st.cond, z3.Not(c))
+                    taken.cond = st.cond + (c,); fall.cond = st.cond + (z3.Not(c),)
                     pending.extend([taken, fall])
                 break
             else:
@@ -261,9 +302,9 @@ def run(objdump_text, fn, regs0, loads, max_steps=200000):
     out = done[0]
     for d in done[1:]:
         if set(d.mem) != set(out.mem): raise Unsupported('paths stored different addresses')
-        c = d.cond
+        c = z3.And(*d.cond) if d.cond else z3.BoolVal(True)
         out = State(out.pc, {k: (v if is_ptr(v) else (v if v.eq(d.R[k]) else z3.If(c, d.R[k], v)))
                              for k, v in out.R.items()},
                     {k: (v if is_ptr(v) else (v if v.eq(d.mem[k]) else z3.If(c, d.mem[k], v)))
-                     for k, v in out.mem.items()}, z3.BoolVal(True), None, 0)
+                     for k, v in out.mem.items()}, (), None, 0)
     return out, len(done), steps

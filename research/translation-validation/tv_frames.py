@@ -34,7 +34,7 @@ for i, p in enumerate(ports):
     elif p['name'] == 'out': out_base = base
     elif p['elem'] == 'i32': loads[(base, 0)] = z3.BitVec(p['name'], 32)
     else: raise SystemExit('port %s: %s not modeled' % (p['name'], p['elem']))
-dis = subprocess.run([OBJDUMP, '-d', '--triple=' + a.triple, a.obj], capture_output=True, text=True).stdout
+dis = subprocess.run([OBJDUMP, '-dr', '--triple=' + a.triple, a.obj], capture_output=True, text=True).stdout
 t = time.time()
 st, npaths, steps = thumbsym2.run(dis, manifest['object']['symbol'], regs0, loads)
 print('thumb lift (%d frames): %.2fs, %d returning state(s), %d steps' % (frames, time.time() - t, npaths, steps))
