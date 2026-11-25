@@ -68,12 +68,12 @@ def splitSizeSuffix (name : String) : Option (String × String) :=
   else some (String.ofList (chars.take (chars.length - digits.length)), String.ofList digits)
 
 /-- The value of a decimal digit string, when it can be at most `sizeMax`:
-    leading zeros are skipped, and a string with more significant digits than
-    `sizeMax` is `none` without being converted. -/
+    leading zeros are skipped (all zeros is 0), and a string with more
+    significant digits than `sizeMax` is `none` without being converted. -/
 def TypeFamily.sizeOf? (f : TypeFamily) (digits : String) : Option Nat :=
   let significant := String.ofList (digits.toList.dropWhile (· == '0'))
   if significant.length > (toString f.sizeMax).length then none
-  else some significant.toNat!
+  else some (significant.toNat?.getD 0)
 
 /-- What a type name means with respect to a set of families. -/
 inductive FamilyLookup where

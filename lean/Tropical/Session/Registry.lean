@@ -130,6 +130,13 @@ def registerFamilyMember (f : TypeFamily) (size : Nat) : SessionM Unit := do
   let (arena', rawIdx) ← match f.build name size st.arena chain with
     | .error e => internalError s!"type family '{f.name}' at size {size}: {e}"
     | .ok r => pure r
+  -- The family's declared port count is what the budget was checked
+  -- against at boot; a member that disagrees is refused before it registers.
+  let ports := match arena'.program? rawIdx with
+    | some p => some (p.inputs.size + p.outputs.size)
+    | none => none
+  if ports != some (f.portsAt size) then
+    internalError s!"type family '{f.name}' at size {size}: the member has {ports.getD 0} ports, the family declares {f.portsAt size}"
   let _ ← registerResolved name arena' rawIdx
 
 /-- A fresh session holding the registered stdlib and nothing else: the

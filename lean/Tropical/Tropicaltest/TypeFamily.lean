@@ -231,10 +231,12 @@ structure Refusal where
   code : String
   predicate : Bool := false
   suggestion : Option String := none
+  /-- Don't check the suggestion (the nearest name is the matcher's choice). -/
+  anySuggestion : Bool := false
 
 def refusals : Array Refusal := #[
   { name := "PeriodicHermite12", fragment := "Unknown program type 'PeriodicHermite12'",
-    code := "unknown_program", suggestion := some "PeriodicBSpline12" },
+    code := "unknown_program", anySuggestion := true },
   { name := "PeriodicCatmullRom", fragment := "is a type family and needs a size",
     code := "invalid_value" },
   { name := "PeriodicBSpline0",
@@ -246,6 +248,8 @@ def refusals : Array Refusal := #[
     code := "invalid_value", predicate := true },
   { name := "PeriodicCatmullRom00", fragment := "size 0 is out of range",
     code := "invalid_value", predicate := true },
+  { name := "NonExistent0", fragment := "Unknown program type 'NonExistent0'",
+    code := "unknown_program", anySuggestion := true },
   { name := "PeriodicCatmullRom012",
     fragment := "write the size without leading zeros, 'PeriodicCatmullRom12'", code := "invalid_value" },
   { name := "VCA3", fragment := "'VCA' is not a type family and takes no size",
@@ -298,8 +302,9 @@ def runRefusals : IO Bool := do
       let message := (j.getObjValAs? String "message").toOption.getD ""
       -- The tool message carries the same reason (the ingest-only
       -- "Unknown program type" wording aside).
-      let reasonShown := r.fragment.startsWith "Unknown program type" || has message r.fragment
-      if got != r.code || (r.predicate && kind != "predicate") || suggestion != r.suggestion
+      let reasonShown := (r.fragment.startsWith "Unknown program type" || has message r.fragment)
+        && (r.code != "unknown_program" || has message "Type families")
+      if got != r.code || (r.predicate && kind != "predicate") || (!r.anySuggestion && suggestion != r.suggestion)
           || !reasonShown then
         return ← failGate label s!"add_instance of '{shown}': {(j.compress.take 400).toString} (want {r.code}{if r.predicate then ", a predicate" else ""}, suggestion {r.suggestion})"
       if st'.catalogOrder.size != st0.catalogOrder.size then

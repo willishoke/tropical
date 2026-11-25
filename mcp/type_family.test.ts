@@ -31,6 +31,7 @@ class Client {
   private buf = ''
   private pending = new Map<number, (v: unknown) => void>()
   private nextId = 1
+  stderr = ''
 
   constructor() {
     // Engine under test: defaults to the TS ir_service; set
@@ -44,6 +45,7 @@ class Client {
       cwd: resolve(import.meta.dir, '..'),
     })
     this.proc.stdout!.on('data', (chunk: Buffer) => this.onData(chunk.toString()))
+    this.proc.stderr!.on('data', (chunk: Buffer) => { this.stderr += chunk.toString() })
   }
 
   private onData(s: string) {
@@ -231,6 +233,15 @@ describe('type families — refusals', () => {
     expect(env.valid?.got).toBe(1025)
     const programs = (await client.callOk('list_programs')) as Array<Record<string, any>>
     expect(programs.some((p) => p.program_name === 'PeriodicBSpline1025')).toBe(false)
+  })
+
+  test('all-zero sizes and names ending in 0 are refused without a panic', async () => {
+    for (const program of ['PeriodicBSpline0', 'PeriodicCatmullRom00', 'NonExistent0']) {
+      const env = await client.callError('add_instance', { program, instance_name: unique('x') })
+      expect(env.code).toBe(program === 'NonExistent0' ? 'unknown_program' : 'invalid_value')
+    }
+    await client.callOk('list_params')
+    expect(client.stderr).not.toContain('PANIC')
   })
 
   test('a size on a type that is not a family: unknown_program, says why, suggests the type', async () => {
