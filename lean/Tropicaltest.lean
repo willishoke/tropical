@@ -42,6 +42,7 @@ import Tropical.Tropicaltest.Spectral
 import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.TypeFamily
 import Tropical.Tropicaltest.PhaseClip
+import Tropical.Tropicaltest.SplineSpectrum
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -130,6 +131,14 @@ def main (args : List String) : IO UInt32 := do
         let (_, familyBad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
         let (_, badClip) ← Tropical.Tropicaltest.PhaseClip.runPhaseClip arena
         return if bad + familyBad + badClip == 0 then 0 else 1
+  if args.contains "--spline-spectrum-only" then
+    match Tropical.Playground.stdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, _) =>
+        let (_, bad) ← Tropical.Tropicaltest.SplineSpectrum.runSplineSpectrum arena
+        return if bad == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
@@ -396,6 +405,18 @@ def main (args : List String) : IO UInt32 := do
   let (n, bad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
   total := total + n
   failed := failed + bad
+
+  -- ── (g‴) The periodic spline as its harmonics below Nyquist (EmitArrow/SplineSpectrum.lean) ──
+  IO.println "spline spectrum (closed form, oracle, envelope, family, vs cubic, alias, live control):"
+  match Tropical.Playground.stdlib with
+  | .error error =>
+      total := total + 7
+      failed := failed + 7
+      IO.println s!"  FAIL  spline-spectrum  stdlib: {error}"
+  | .ok (arena, _) =>
+      let (n, bad) ← Tropical.Tropicaltest.SplineSpectrum.runSplineSpectrum arena
+      total := total + n
+      failed := failed + bad
 
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"

@@ -130,17 +130,24 @@ With `p = phase mod 2³²`:
 
 Per sample, per spline:
 
-- the table pack: `K + 3` stores;
 - four `index` reads;
 - about 12 multiply-adds;
-- one divide.
+- one divide;
+- the table pack, `K + 3` stores, only when a control varies within a
+  kernel call. When the controls are `param:` slots, the pack is stage 0 and
+  runs once per call, in the port kernel's prologue (checked with
+  `TROPICAL_STAGE0_DUMP` on the `spline-live` patch, 2026-11-25).
 
 `index` keeps its generic bounds check: two compares and a select per read.
 The check never fires, since `i ∈ [0, K)` and `i + 3 ≤ K + 2` hold by
 construction. Whether LLVM removes it depends on its range analysis of
-`(p · n) >> 32`; nothing here relies on that. The table pack runs per
-sample even when the controls are knobs, because arrays are not hoisted
-into the coefficient kernel in v1 (`Ir/Stage0.lean`).
+`(p · n) >> 32`; nothing here relies on that.
+
+## The band-limited realization
+
+A periodic spline also renders as its Fourier series cut at Nyquist, a
+partial family with complex weights: `design/spline-spectrum.md`
+(`EmitArrow/SplineSpectrum.lean`).
 
 ## Not built
 
@@ -154,7 +161,6 @@ into the coefficient kernel in v1 (`Ir/Stage0.lean`).
   onset and a flat finish). Every spline is now periodic, so an envelope
   starts and ends at the same value with the same slope.
 - Sample playback, table ports.
-- Fourier resynthesis of the spline.
 - Editors.
 - A playground node kind. Playground port tables are static per kind
   (`Playground/VocabularyMetadata.lean`), so a node whose knob count is the

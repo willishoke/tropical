@@ -94,6 +94,15 @@ inductive PartialWeights where
       `k` as an integer (`n`) and as a float (`kf`). -/
   | closedForm (columns : Array (Array Sig)) (inputs : Array Sig)
       (weight : Array Sig → Array Sig → Sig → Sig → BuildM Sig)
+  /-- A COMPLEX weight `a_k + i·b_k`, so a partial carries its own phase. The
+      partial is the family's projection of `(a_k + i·b_k)·G·e^{iθ_k}`.
+      `tables` may have any length; each is materialized once per sample,
+      before the partial loop (entries may be live signals). `weight tables k
+      n kf` gets the tables (to `index` anywhere, e.g. at `k` or at `k mod L`),
+      the 0-based partial index `k`, the partial number `n = k + 1` and `n` as
+      a float, and returns `(a_k, b_k)`. -/
+  | complex (tables : Array (Array Sig))
+      (weight : Array Sig → Sig → Sig → Sig → BuildM (Sig × Sig))
 
 /-- One soft edge. `standard` is 20 Hz at DC and the top 10% below Nyquist;
     `width` is an explicit width in Hz; `off` disables the edge. -/
@@ -123,6 +132,10 @@ structure PartialFamily where
   weights : PartialWeights
   wave : PartialWave := .sine
   edges : SoftEdges := {}
+  /-- The 0 Hz partial's (real) weight `a_0`, added once outside the partial
+      loop as `a_0·Re G(0)`. Only a `cosine` family has one (a sine is zero at
+      0 Hz), and only with the DC edge `off` (the edge would fade it to 0). -/
+  dc : Option Sig := none
 
 /-- A complex spectral envelope `G(f, τ)` as a closed form. `prepare` turns the
     envelope's control signals and the family's (signed) fundamental into the
@@ -208,11 +221,39 @@ private def smoothEdge (v : Sig) : BuildM Sig := do
   let shaped ← sub (← lit 3) (← mul (← lit 2) t)
   mul (← mul t t) shaped
 
+/-- The 0 Hz partial `a_0·Re G(0)`, given each envelope law with its prepared
+    scalars. -/
+private def zeroHzTerm (a0 : Sig) (laws : Array (EnvelopeLaw × Array Sig)) :
+    BuildM Sig := do
+  let zero ← lit 0
+  let mut g0? : Option (Sig × Sig) := none
+  for (law, prepared) in laws do
+    let gi ← law.gain prepared zero zero
+    g0? := some (← match g0? with
+      | some acc => cmulPair acc gi
+      | none => pure gi)
+  match g0? with
+  | some (gre, _) => mul a0 gre
+  | none => pure a0
+
 /-- The family's region, given its (already warped) clock and the envelopes
     applied to it, each with its control signals already emitted. -/
 def familySig (f : PartialFamily) (clock : Clock)
     (envelopes : Array (EnvelopeLaw × Array Sig)) : BuildM Sig := do
-  if f.count == 0 then return ← lit 0
+  if f.dc.isSome then
+    unless f.wave == .cosine do
+      throw s!"partial family '{f.name}': a 0 Hz term needs the cosine projection (a sine is zero at 0 Hz)"
+    unless f.edges.dc matches .off do
+      throw s!"partial family '{f.name}': a 0 Hz term with a DC edge; the edge would fade it to zero, so set the DC edge off"
+  if f.count == 0 then
+    -- No partials; the 0 Hz term, if any, still plays (as it does at a live
+    -- count of 0).
+    return ← match f.dc with
+      | none => lit 0
+      | some a0 => do
+          let laws ← envelopes.mapM fun (law, controls) => do
+            pure (law, ← law.prepare controls f.freq)
+          zeroHzTerm a0 laws
   if f.count > familyCapacity then
     throw s!"partial family '{f.name}': {f.count} partials exceed the phase rail's capacity of {familyCapacity}"
   unless ← sigIsUniform f.freq do
@@ -225,12 +266,16 @@ def familySig (f : PartialFamily) (clock : Clock)
         if ws.size != f.count then
           throw s!"partial family '{f.name}': {ws.size} weights for {f.count} partials"
         pure (some (← arr ws))
-    | .law _ | .closedForm .. => pure none
+    | .law _ | .closedForm .. | .complex .. => pure none
   let columnTables ← match f.weights with
     | .closedForm columns _ _ => columns.mapM fun column => do
         if column.size != f.count then
           throw s!"partial family '{f.name}': a weight column of {column.size} entries for {f.count} partials"
         arr column
+    | .complex tables _ => tables.mapM fun table => do
+        if table.isEmpty then
+          throw s!"partial family '{f.name}': an empty weight table"
+        arr table
     | _ => pure #[]
   -- ── uniforms and per-sample scalars (computed before the region) ──
   let twoPow32 ← lit 4294967296
@@ -287,9 +332,11 @@ def familySig (f : PartialFamily) (clock : Clock)
   if let some inv := nyquistInv? then invariants := invariants.push nyquist |>.push inv
   if let some inv := dcInv? then invariants := invariants.push inv
   let mut envSlots : Array (EnvelopeLaw × Nat × Nat) := #[]
+  let mut envPrepared : Array (Array Sig) := #[]
   for (law, controls) in envelopes do
     let prepared ← law.prepare controls f.freq
     envSlots := envSlots.push (law, invariants.size, prepared.size)
+    envPrepared := envPrepared.push prepared
     invariants := invariants ++ prepared
   let weightInputStart := invariants.size
   let weightInputs := match f.weights with
@@ -308,12 +355,15 @@ def familySig (f : PartialFamily) (clock : Clock)
   let pRead ← toIntE invReads[0]!
   let phaseK ← bitAnd (← rshift (← mul n pRead) fracBits) mask32
   let q30 ← lit 1073741824
-  let weight ← match f.weights, weightTable? with
-    | .table _, some table => index table k
-    | .law w, _ => w kf
+  let (weight, weightIm?) ← match f.weights, weightTable? with
+    | .table _, some table => pure (← index table k, none)
+    | .law w, _ => pure (← w kf, none)
     | .closedForm _ _ w, _ => do
         let colReads ← columnTables.mapM fun table => index table k
-        w colReads (invReads.extract weightInputStart (weightInputStart + weightInputs.size)) n kf
+        pure (← w colReads (invReads.extract weightInputStart (weightInputStart + weightInputs.size)) n kf, none)
+    | .complex _ w, _ => do
+        let (re, im) ← w columnTables k n kf
+        pure (re, some im)
     | .table _, none => throw "partial family: unreachable (table without a column)"
   let fk ← mul kf invReads[2]!
   let fkAbs ← mul kf invReads[1]!
@@ -329,7 +379,7 @@ def familySig (f : PartialFamily) (clock : Clock)
     edge? := some (← match edge? with
       | some e => mul e dcEdge
       | none => pure dcEdge)
-  let projected ← if envelopes.isEmpty then
+  let projected ← if envelopes.isEmpty && weightIm?.isNone then
       match f.wave with
       | .sine => div (← toFloatE (← fixedSinCycSig phaseK)) q30
       | .cosine => div (← toFloatE (← fixedCosCycSig phaseK)) q30
@@ -340,6 +390,11 @@ def familySig (f : PartialFamily) (clock : Clock)
         g? := some (← match g? with
           | some acc => cmulPair acc gi
           | none => pure gi)
+      -- A complex weight is one more complex factor of the partial.
+      if let some wim := weightIm? then
+        g? := some (← match g? with
+          | some acc => cmulPair (weight, wim) acc
+          | none => pure (weight, wim))
       let (gre, gim) := g?.getD (zero, zero)
       let s ← div (← toFloatE (← fixedSinCycSig phaseK)) q30
       let c ← div (← toFloatE (← fixedCosCycSig phaseK)) q30
@@ -349,9 +404,14 @@ def familySig (f : PartialFamily) (clock : Clock)
   let shaped ← match edge? with
     | some e => mul e projected
     | none => pure projected
-  let contribution ← mul weight shaped
+  let contribution ← if weightIm?.isSome then pure shaped else mul weight shaped
   let tables := (weightTable?.map (#[·])).getD #[] ++ columnTables ++ invTables
-  bankSum f.count tables contribution liveCount? familyBinderId
+  let region ← bankSum f.count tables contribution liveCount? familyBinderId
+  match f.dc with
+  | none => pure region
+  | some a0 =>
+    -- The 0 Hz partial, per sample, outside the region.
+    add region (← zeroHzTerm a0 ((envelopes.zip envPrepared).map fun (e, p) => (e.1, p)))
 
 /-- The saw's weights `1/k`, `k = 1..count`, as an exact coefficient table. -/
 def sawWeights (count : Nat) : BuildM PartialWeights := do
