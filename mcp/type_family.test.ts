@@ -260,7 +260,7 @@ describe('type families — refusals', () => {
   test('an unregistered name: unknown_program, and the message lists the families', async () => {
     const env = await client.callError('add_instance', { program: 'PeriodicHermite12', instance_name: unique('x') })
     expect(env.code).toBe('unknown_program')
-    expect(env.message).toContain('PeriodicCatmullRom (1 to 1024 control points)')
+    expect(env.message).toContain('Type families (a member is <family><size>): PeriodicCatmullRom, PeriodicBSpline')
   })
 
   test('load of a refused spelling: internal_error with the reason', async () => {

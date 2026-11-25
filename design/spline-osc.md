@@ -130,9 +130,11 @@ complex weight). The cubic costs about 2 ns, so evaluating it above the band
 is a few percent at most; skipping it would need a branch the kernel does
 not have.
 
-The bank is per call cheaper than in `SplineSpectrum*8`, which carries 256
-partials: 44 for Catmull-Rom at K = 8. Its per-sample work still includes
-the literal `φ̂` column pack (44 stores; `design/spline-spectrum.md`).
+The capacity is 44 partials for Catmull-Rom at K = 8, not the 256 of the
+`SplineSpectrum*8` fixtures, and the bank never needs more: below the band
+the cubic plays. The 2 ns below the band is everything the kernel does per
+sample there, including whatever remains of the literal `φ̂` column
+(`design/spline-spectrum.md`, "Stage 0").
 
 ## Phase
 

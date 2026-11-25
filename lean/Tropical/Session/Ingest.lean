@@ -35,12 +35,13 @@ def InstanceResolution.toInstanceInfo
   resolvedIdx := resolved.resolvedIdx? }
 
 /-- The type families, for an unknown-type message: empty when there are
-    none. -/
+    none. Names only, so the message stays within the envelope's 200
+    characters as families are added; `list_programs` carries each range. -/
 private def familiesHint (st : SessionSt) : String :=
   if st.families.isEmpty then ""
   else
-    let names := st.families.map fun f => s!"{f.name} ({f.rangeText})"
-    s!". Type families (name a member as <family><size>): {String.intercalate ", " names.toList}"
+    let names := st.families.map (·.name)
+    s!". Type families (a member is <family><size>): {String.intercalate ", " names.toList}"
 
 /-- A type-family spelling that names no member (bare family name, size out
     of range, leading zeros), already classified: its refusal, in the ingest
