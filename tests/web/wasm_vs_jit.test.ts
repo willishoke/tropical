@@ -353,6 +353,35 @@ function splineProgram(wave: number[], width = SPLINE_WIDTH): ProgramFile {
   }
 }
 
+// Rational clocks read by splines: two `RatioClock`s at n/d of one int32
+// Q16.16 master frequency, each phase (`int`, Q0.32) wired bare into a periodic
+// spline's `phase`; a `VCA` multiplies the two splines. The ratios are params,
+// so a written ratio is a param write.
+function ratioSplineProgram(n0: number, d0: number, n1: number, d1: number): ProgramFile {
+  const controls = Object.fromEntries(SPLINE_WAVE.map((v, j) => [`c${j}`, v]))
+  const clock = (name: string, n: string, d: string) => ({
+    op: 'instanceDecl', name, program: 'RatioClock', inputs: {
+      freq: { op: 'param', name: 'freq' }, n: { op: 'param', name: n }, d: { op: 'param', name: d } } })
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_ratio_spline',
+    body: { op: 'block', decls: [
+      { op: 'paramDecl', name: 'freq', type: 'int32', frac_bits: 16, value: 220.5 },
+      ...([['n0', n0], ['d0', d0], ['n1', n1], ['d1', d1]] as const).map(([name, value]) =>
+        ({ op: 'paramDecl', name, type: 'int32', value })),
+      clock('a', 'n0', 'd0'),
+      clock('b', 'n1', 'd1'),
+      { op: 'instanceDecl', name: 'sa', program: 'PeriodicCatmullRom8', inputs: {
+        phase: { op: 'ref', instance: 'a', output: 'phase' }, ...controls } },
+      { op: 'instanceDecl', name: 'sb', program: 'PeriodicBSpline8', inputs: {
+        phase: { op: 'ref', instance: 'b', output: 'phase' }, ...controls } },
+      { op: 'instanceDecl', name: 'vca', program: 'VCA', inputs: {
+        audio: { op: 'ref', instance: 'sa', output: 'out' },
+        cv: { op: 'ref', instance: 'sb', output: 'out' } } },
+    ], assigns: [dacOut('vca', 'out')] },
+  }
+}
+
 // A float param into SoftClip after a sine: an f32 param cell in a binary32
 // artifact, seeded from its binary32 default or written by the host.
 function drivePatch(drive: number): ProgramFile {
@@ -520,6 +549,19 @@ describe('wasm vs native JIT', () => {
   test('spline wave × clock → PhaseClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
     // 6000 samples: one 8 Hz cycle, past the gate's fall at width 0.4.
     await expectBitIdentical('spline', splineProgram(SPLINE_WAVE), 6000)
+  })
+
+  test('RatioClock 3/2 and 5/4 read by splines (int32 ratio params) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('ratio spline', ratioSplineProgram(3, 2, 5, 4), 2048)
+  })
+
+  test('RatioClock: a written ratio ≡ the JIT compiled at that value', async () => {
+    const nat = runNative(compileViaLean(ratioSplineProgram(3, 2, 7, 6)), 2048)
+    expectAudible('ratio spline written', nat)
+    const wasm = await runWasm(ratioSplineProgram(3, 2, 5, 4), '', 2048,
+      [['param:n1', 7], ['param:d1', 6]])
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
   test('spline: a written control value ≡ the JIT compiled at that value', async () => {

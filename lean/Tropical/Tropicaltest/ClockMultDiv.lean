@@ -318,10 +318,166 @@ def runRecurrence : IO Bool := do
       passGate s!"{label}-recurrence" s!"freq word {f} (I = {inc}, v₂ = {v}): every phase word repeats after 2^{64 - v} samples, and every output sits at its offset at τ = 0 and τ = 2^{64 - v} samples (Ψ ≡ 0), 20 knob settings"
     else failGate s!"{label}-recurrence" (String.intercalate "; " (bad.toList.take 5))
 
+/-! ## `RatioClock` read by splines
+
+Two `RatioClock`s on one master frequency, each read by a registered periodic
+spline through the patch bay (`phase` → `phase`, a bare `int` wire). The
+channels are both phase words (through a gain-1 `VCA`, exact below 2³²) and
+both spline outputs. The gate checks, at random clocks and live writes:
+
+* each phase word equals the model's top word of `m·Ψ + o·2³²` (so the pair
+  holds `ClockMultDivLaws.lock`, which is proved over the model);
+* each spline output is bit for bit the same spline read at that word by a
+  reference patch (phase `τ >> 16`, rendered at `τ = word · 2¹⁶`), so the
+  wire adds nothing;
+* recurrence: at a master frequency with `v₂(I) ≥ 18`, all four channels repeat
+  bit for bit after `2^(64−v)` samples, and the phases sit at their offsets at
+  `τ = 0` and there. -/
+
+/-- Spline control values, exact binary fractions. -/
+private def splineControls : List (String × Lean.Json) :=
+  let cs : List Lean.JsonNumber :=
+    [0, ⟨5, 1⟩, ⟨625, 3⟩, ⟨25, 2⟩, ⟨-125, 3⟩, ⟨-5, 1⟩, ⟨-375, 3⟩, ⟨-25, 2⟩]
+  (cs.zip (List.range cs.length)).map fun (c, k) => (s!"c{k}", Lean.Json.num c)
+
+private def splineTypes : List String := ["PeriodicCatmullRom8", "PeriodicBSpline8"]
+
+private def obj (kvs : List (String × Lean.Json)) : Lean.Json := Lean.Json.mkObj kvs
+
+private def paramRef (name : String) : Lean.Json := obj [("op", "param"), ("name", Lean.Json.str name)]
+
+private def outRef (inst out : String) : Lean.Json :=
+  obj [("op", "ref"), ("instance", Lean.Json.str inst), ("output", Lean.Json.str out)]
+
+private def dac (expr : Lean.Json) (ch : Nat) : Lean.Json :=
+  obj [("op", "outputAssign"), ("name", "dac.out"), ("expr", expr), ("channel", j ch)]
+
+private def programJson (name : String) (decls assigns : List Lean.Json) : String :=
+  (obj [("schema", "tropical_program_2"), ("name", Lean.Json.str name),
+    ("body", obj [("op", "block"), ("decls", Lean.Json.arr decls.toArray),
+      ("assigns", Lean.Json.arr assigns.toArray)])]).compress
+
+/-- Two `RatioClock`s (`a`, `b`) with the first two knob sets of `k`, each read
+    by a spline; channels: phase a, phase b, spline a, spline b. -/
+def ratioSplinePatch (k : Knobs) : String :=
+  let decl (name : String) (word : Int) (fracBits : Nat) : Lean.Json :=
+    obj [("op", "paramDecl"), ("name", Lean.Json.str name),
+      ("type", "int32"), ("frac_bits", j fracBits), ("value", exactJson word fracBits)]
+  let clocks := ["a", "b"]
+  let decls := [decl "freq" k.freq 16] ++ (List.range 2).flatMap (fun i =>
+      [decl s!"n{i}" k.n[i]! 0, decl s!"d{i}" k.d[i]! 0, decl s!"offset{i}" k.offset[i]! 32])
+  let insts := (clocks.zip (List.range 2)).flatMap fun (c, i) =>
+    [obj [("op", "instanceDecl"), ("name", Lean.Json.str c), ("program", "RatioClock"),
+      ("inputs", obj [("freq", paramRef "freq"), ("n", paramRef s!"n{i}"),
+        ("d", paramRef s!"d{i}"), ("offset", paramRef s!"offset{i}")])],
+     obj [("op", "instanceDecl"), ("name", Lean.Json.str s!"s{c}"),
+      ("program", Lean.Json.str splineTypes[i]!),
+      ("inputs", obj ([("phase", outRef c "phase")] ++ splineControls))]]
+  -- a `dac.out` wire is a bare ref, so each phase word is observed through a
+  -- `VCA` at gain 1 (`toFloat` is exact below 2³², and so is `x · 1.0`)
+  let toFloat (e : Lean.Json) := obj [("op", "toFloat"), ("args", Lean.Json.arr #[e])]
+  let probes := clocks.map fun c =>
+    obj [("op", "instanceDecl"), ("name", Lean.Json.str s!"p{c}"), ("program", "VCA"),
+      ("inputs", obj [("audio", toFloat (outRef c "phase")), ("cv", j 1)])]
+  programJson "ratio_spline" (decls ++ insts ++ probes)
+    [dac (outRef "pa" "out") 0, dac (outRef "pb" "out") 1,
+     dac (outRef "sa" "out") 2, dac (outRef "sb" "out") 3]
+
+/-- The same two splines, each read at the phase `τ >> 16` (a computing wire on
+    the clock): rendered at `τ = w · 2¹⁶`, channel `i` is spline `i` at the
+    phase word `w`. -/
+def splineReferencePatch : String :=
+  let phase := obj [("op", "rshift"), ("args", Lean.Json.arr #[obj [("op", "clock")], j 16])]
+  let decls := (List.range 2).map fun i =>
+    obj [("op", "instanceDecl"), ("name", Lean.Json.str s!"s{i}"),
+      ("program", Lean.Json.str splineTypes[i]!),
+      ("inputs", obj ([("phase", phase)] ++ splineControls))]
+  programJson "spline_reference" decls [dac (outRef "s0" "out") 0, dac (outRef "s1" "out") 1]
+
+private def writePair (rt : Ffi.Runtime) (k : Knobs) : IO Unit := do
+  let set (name : String) (v : Float) : IO Unit := do
+    match ← rt.setParam name v with
+    | some _ => pure ()
+    | none => throw <| IO.userError s!"set_param {name}: unknown"
+  set "freq" (Float.ofInt k.freq / 65536.0)
+  for i in [0:2] do
+    set s!"n{i}" (Float.ofInt k.n[i]!)
+    set s!"d{i}" (Float.ofInt k.d[i]!)
+    set s!"offset{i}" (Float.ofInt k.offset[i]! / 4294967296.0)
+
+/-- `result[c][k]`: channel `c` at `taus[k]`, as f64. -/
+private def renderF64 (rt : Ffi.Runtime) (taus : Array Int) (channels : Nat) :
+    IO (Array (Array Float)) := do
+  let xs := decodeF64LE (← rt.renderTau (taus.map tauBits)
+    ((Array.range channels).map UInt32.ofNat))
+  pure <| (Array.range channels).map fun c =>
+    (Array.range taus.size).map fun k => xs[c * taus.size + k]!
+
+private def sameBits (a b : Array (Array Float)) : Bool :=
+  a.size == b.size && (a.zip b).all fun (x, y) =>
+    x.size == y.size && (x.zip y).all fun (u, v) => u.toBits == v.toBits
+
+def runRatioSpline : IO Bool := do
+  let gate := s!"{label}-ratio-spline"
+  let mut bad : Array String := #[]
+  match compile (ratioSplinePatch defaultKnobs), compile splineReferencePatch with
+  | .error e, _ => return ← failGate gate s!"compile: {e}"
+  | _, .error e => return ← failGate gate s!"reference compile: {e}"
+  | .ok (plan, blocks), .ok (refPlan, refBlocks) =>
+    let rate ← IO.ofExcept (rateOf plan)
+    let rt ← load plan blocks
+    let ref ← load refPlan refBlocks
+    let mut g : Rng := ⟨0x5911e⟩
+    let mut checked := 0
+    for _ in [0:40] do
+      let (k, g1) := randomKnobs g
+      let (taus, g2) := randomTaus g1 24
+      g := g2
+      writePair rt k
+      let out ← renderF64 rt taus 4
+      let words := out.extract 0 2
+      let refs ← (Array.range 2).mapM fun i => do
+        let r ← renderF64 ref (words[i]!.map fun w => ((w.toUInt64.toNat * 65536 : Nat) : Int)) 2
+        pure r[i]!
+      for t in [0:taus.size] do
+        for i in [0:2] do
+          let want := modelPhase rate k i taus[t]! / 2 ^ 32
+          let got := out[i]![t]!
+          if got != Float.ofNat want then
+            bad := bad.push s!"phase {i} at τ={taus[t]!} (freq={k.freq}, n={k.n[i]!}, d={k.d[i]!}): kernel {got} ≠ model {want}"
+          if refs[i]![t]!.toBits != out[2 + i]![t]!.toBits then
+            bad := bad.push s!"spline {i} at τ={taus[t]!}: {out[2 + i]![t]!} ≠ the spline at phase {got}: {refs[i]![t]!}"
+        checked := checked + 1
+      if bad.size > 4 then break
+    -- recurrence at a master frequency with v₂(I) ≥ 18
+    let mut f : Int := 3 * 65536
+    while v2 (increment rate f) < 18 do f := f + 1
+    let v := v2 (increment rate f)
+    let delta : Int := (2 : Int) ^ (80 - v)
+    for _ in [0:8] do
+      let (k0, g1) := randomKnobs g
+      let (taus, g2) := randomTaus g1 24
+      g := g2
+      let k := { k0 with freq := f }
+      writePair rt k
+      let base := taus.filter fun t => t.natAbs < (2 : Int) ^ 61
+      let a ← renderF64 rt base 4
+      let b ← renderF64 rt (base.map (· + delta)) 4
+      if !sameBits a b then bad := bad.push s!"freq {f}: the channels at τ and τ + 2^{80 - v} differ"
+      let z ← renderF64 rt #[0, delta] 2
+      for i in [0:2] do
+        let want := Float.ofNat ((Int.emod k.offset[i]! (2 ^ 32)).toNat)
+        if z[i]![0]! != want || z[i]![1]! != want then
+          bad := bad.push s!"phase {i} at Ψ ≡ 0: {z[i]![0]!}, {z[i]![1]!} ≠ offset {want}"
+    if bad.isEmpty then
+      passGate gate s!"RatioClock → PeriodicCatmullRom8 / PeriodicBSpline8 through the patch bay: {checked} clocks × 2 phase words ≡ the ring model and every spline output ≡ the spline at that word, bit for bit, over 40 live writes; at freq word {f} (v₂ = {v}) all four channels repeat after 2^{64 - v} samples and the phases sit at their offsets at Ψ ≡ 0"
+    else failGate gate (String.intercalate "; " (bad.toList.take 5))
+
 def runAll : IO Bool := do
   let a ← runPhase
   let b ← runGateSine
   let c ← runRecurrence
-  pure (a && b && c)
+  let d ← runRatioSpline
+  pure (a && b && c && d)
 
 end Tropical.Tropicaltest.ClockMultDiv

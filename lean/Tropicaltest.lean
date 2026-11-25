@@ -360,13 +360,15 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine) then failed := failed + 1
 
   -- ── (f⁗ᵃ) ClockMultDivQ15: the 64-bit ring against its big-integer model ──
-  IO.println "clock mult/div (ClockMultDivQ15 ≡ the ring model):"
+  IO.println "ratio clock (ClockMultDivQ15, RatioClock ≡ the ring model; RatioClock read by splines):"
   total := total + 1
   if !(← Tropical.Tropicaltest.ClockMultDiv.runPhase) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.ClockMultDiv.runGateSine) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.ClockMultDiv.runRecurrence) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ClockMultDiv.runRatioSpline) then failed := failed + 1
 
   -- ── (f⁗′) The binary32 value lane (`--float f32`) ────────────────────────
   IO.println "binary32 value lane (--float f32):"

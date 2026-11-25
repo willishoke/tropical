@@ -346,13 +346,14 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- (`EmitArrow/Spline.lean`), Catmull-Rom and B-spline, periodic and phantom-end.
   -- 21 → 20 programs / 524 → 484 nodes: the two phantom-end splines retired
   -- (every spline is periodic) and `PhaseClip`, the pulse-width phase warp, added.
-  -- 20 → 21 programs: `ClockMultDivQ15`, four outputs on the 64-bit ring
-  -- with every product spelled in 32-bit limbs.
+  -- 20 → 22 programs / 484 → 1381 nodes: `ClockMultDivQ15`, four outputs on
+  -- the 64-bit ring with every product spelled in 32-bit limbs, and
+  -- `RatioClock`, one of its ratios on the `int` phase rail.
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),
-    ("stdlib programs",         nativeStdlib.programs.size,    21),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 484),
+    ("stdlib programs",         nativeStdlib.programs.size,    22),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 1381),
     ("carrier instances",       nativeProgram.decls.size,      3),
     ("reachable carrier nodes", nativeExprs.nodes.size,        174),
     ("carrier wire bytes",      nativeWire.length,             28835)]
