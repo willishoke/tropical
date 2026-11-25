@@ -92,7 +92,7 @@ def patchOf (ms : Array Member) : String := Id.run do
 
 def reference (m : Member) (law : PhaseLaw) : Array Float :=
   let cs := m.controls.map controlFloat
-  (range 0 frames).map fun n => refEval m.basis .wrap cs (phaseInt law .wrap n)
+  (range 0 frames).map fun n => refEval m.basis cs (phaseInt law n)
 
 /-- Render `channels` channels of the session's compiled plan over
     `n ∈ [0, frames)`. -/

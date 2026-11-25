@@ -344,11 +344,13 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- fixed-point ports (`design/typed-kernel.md`, "Typed ports").
   -- 17 → 21 programs / 410 → 524 nodes: the four registered splines
   -- (`EmitArrow/Spline.lean`), Catmull-Rom and B-spline, periodic and phantom-end.
+  -- 21 → 20 programs / 524 → 484 nodes: the two phantom-end splines retired
+  -- (every spline is periodic) and `PdClip`, the pulse-width phase warp, added.
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),
-    ("stdlib programs",         nativeStdlib.programs.size,    21),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 524),
+    ("stdlib programs",         nativeStdlib.programs.size,    20),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 484),
     ("carrier instances",       nativeProgram.decls.size,      3),
     ("reachable carrier nodes", nativeExprs.nodes.size,        174),
     ("carrier wire bytes",      nativeWire.length,             28835)]

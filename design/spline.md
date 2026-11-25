@@ -1,13 +1,16 @@
 # Uniform cubic spline read by a phase
 
-Date: 2026-11-24. Code: `lean/Tropical/EmitArrow/Spline.lean`. Gates:
-`lean/Tropical/Tropicaltest/Spline.lean` and, for the families,
+Date: 2026-11-24, envelopes 2026-11-25. Code:
+`lean/Tropical/EmitArrow/Spline.lean`, `lean/Tropical/EmitArrow/PdClip.lean`.
+Gates: `lean/Tropical/Tropicaltest/Spline.lean`,
+`lean/Tropical/Tropicaltest/PdClip.lean` and, for the families,
 `Tropicaltest/TypeFamily.lean` (`tropicaltest --spline-only`).
 
 A spline is a shape read by a phase. It is a function of one phase
-coordinate, not a parametric Bézier curve. At audio rate it is a
-single-cycle waveform, at a low rate an LFO, and with a clamped phase an
-envelope. The spline owns no clock: its phase is any integer phase signal.
+coordinate, not a parametric Bézier curve. Every spline is periodic. At
+audio rate it is a single-cycle waveform, at a low rate an LFO, and read by
+a clock that stops at the end of its cycle, an envelope. The spline owns no
+clock: its phase is any integer phase signal.
 
 ## Decisions
 
@@ -22,20 +25,10 @@ envelope. The spline owns no clock: its phase is any integer phase signal.
   multiply, with the same split. In an f32 artifact the 32-bit fraction
   rounds to 24 bits and `t` can reach 1.0; that is harmless, because the
   spline is continuous there.
-- **Boundary is structural.**
-  - `wrap` (periodic): `n = K`. The kernel reads a table of `K + 3`
-    signals extended at assemble time, `T[j] = c[(j − 1) mod K]`, so the
-    seam is an ordinary knot by construction. No runtime index wraps.
-  - `phantomEnd`: the phase clamps to `[0, 2³²]` and `n = K − 1`, so
-    `c[0]` is the value at phase 0 and `c[K − 1]` at phase 1. The end
-    neighbours are phantom points (the term for control points added
-    beyond the ends to set an end condition), here the linear
-    extrapolations `2c[0] − c[1]` and `2c[K−1] − c[K−2]`, so both bases
-    pass through the end values. For the B-spline this is also the natural
-    end condition (zero second derivative at the ends); for Catmull-Rom it
-    is not. Names avoid "open", "clamped" and "non-periodic": in the
-    B-spline literature those name the knot-multiplicity construction,
-    which this is not.
+- **Periodic only.** `n = K`. The kernel reads a table of `K + 3` signals
+  extended at assemble time, `T[j] = c[(j − 1) mod K]`, so the seam is an
+  ordinary knot by construction. No runtime index wraps. The phase is taken
+  modulo the cycle, so phase 1 (2³²) reads exactly what phase 0 reads.
 - **Basis is host data.** A basis is a 4×4 integer matrix and a divisor:
   Catmull-Rom (`/2`, interpolating, C¹) and the uniform cubic B-spline
   (`/6`, approximating, C²). The kernel evaluates
@@ -43,14 +36,80 @@ envelope. The spline owns no clock: its phase is any integer phase signal.
   at assemble time.
 - **No new IR node.** The spline is `arr` + `index` + integer and float
   arithmetic. No backend needs the spline as data.
-- **Registered set.** The periodic splines are type families over K
+- **Registered set.** The splines are type families over K
   (`design/type-family.md`): `PeriodicCatmullRom<K>` and
   `PeriodicBSpline<K>`, `1 ≤ K ≤ 1024`, e.g. `PeriodicCatmullRom12`.
   Each has inputs `phase` (int, Q0.32) and `c0 … c(K−1)` (float, live when
   wired from `param:` slots) and output `out`. The size-8 members are also
-  registered at boot. The phantom-end splines are registered at K = 8 only:
-  `PhantomEndCatmullRom8`, `PhantomEndBSpline8`. Other bases or boundaries
-  are one `splineSig` call in a builder.
+  registered at boot. Other bases are one `splineSig` call in a builder.
+
+## Envelopes: the pulse width is a phase warp
+
+There are no triggers. A gate is a clock with a pulse width `w ∈ (0, 1]`,
+and the pulse width is a warp of the clock's phase:
+
+    pdclip(p, w) = min(p / w, 1)      (p in cycles, reduced to [0, 1))
+
+The read sweeps one full cycle over the first `w` of the input cycle, then
+holds at phase 1. Read through a periodic spline, that is an envelope that
+always fits its gate: it starts at phase 0, reaches phase 1 exactly when
+the gate falls, and holds there; phase 1 is phase 0, so it ends where it
+started (at `c0` for Catmull-Rom, which interpolates; at the curve's
+phase-0 value `(c₇ + 4c₀ + c₁)/6` for the B-spline). The value is
+continuous at the hold point, and so is the slope when phase 0 is an
+extremum of the spline (`c1 = c7` for both bases); otherwise the slope
+jumps there. A closed C¹ curve leaves phase 0 with the slope it arrives at
+phase 1 with, so an envelope from rest whose start is not flat dips past
+its rest value just before the gate falls; `c1 = c7` makes the seam flat,
+which removes the dip and the slope jump together.
+
+- **Name.** This is the linear phase clip of phase-distortion synthesis
+  (Csound's `pdclip`, "useful for remapping phasors for phase distortion
+  synthesis"), with the unclipped window at the start of the cycle. The
+  registered type is `PdClip`; the builder is `pdClipSig`.
+- **Ports.** `PdClip` takes `phase` (int, Q0.32, any integer: it is
+  reduced to the cycle) and `width` (float, default 1). It outputs `phase`
+  (int, `[0, 2³²]`, wired straight into a spline's `phase`) and `gate`
+  (float, 1 for the first `w` of the cycle, else 0). The gate is the
+  comparison the clip makes anyway; there is no other gate mechanism.
+- **Width carrier.** The width is a float, so a knob is an ordinary
+  `param:` slot and a `set_param` moves it without a recompile. Inside, it
+  becomes an integer word `W`, the width in units of 2⁻³² of a cycle.
+- **Out of range.** `width`'s interval `(0, 1]` is declared on the port
+  (`InputDecl.interval?`). A bare literal outside it is refused at ingest,
+  the same crossing rule as a fixed-point format (`bareLiteralAtPort`). In a
+  builder, `PulseWidth.static` is refused at assemble time. A width that
+  moves (a param, an output, arithmetic) clamps: `W ∈ [1, 2³²]`, so a width
+  at or below 0 is the narrowest gate (one phase unit) and a width above 1
+  is the full cycle, where the clip is the identity.
+
+### Exactness
+
+With `p = phase mod 2³²`:
+
+    pdclip = ⌊p · 2³² / W⌋  if p < W,   2³²  otherwise;   gate = p < W
+
+- **Exact on the integer rail, given `W`.** `p · 2³²` overflows an `int`,
+  so the quotient is two steps of long division in base 2¹⁶: `q₁ =
+  ⌊p·2¹⁶ / W⌋`, `r₁ = p·2¹⁶ − q₁W`, `q₂ = ⌊r₁·2¹⁶ / W⌋`, result `q₁·2¹⁶ +
+  q₂`. Every operand is below 2⁴⁹ and every divide is of non-negative
+  integers, so the result is the exact floor on every target. The gate
+  edge `p < W` is exact. The held value 2³² is phase 1, read by the spline
+  as phase 0 bit for bit.
+- **Where it rounds: the width word.** A static width is `round(w · 2³²)`
+  in exact integer arithmetic at assemble time. A live width is
+  `clamp(toInt(round(w · 2³²)), 1, 2³²)` per sample; `w · 2³²` is exact in
+  f64 and f32 (a power-of-two scale) and `round` is half away from zero,
+  so `|W − w · 2³²| ≤ ½`. Hence the clip is exact for every width that is
+  a multiple of 2⁻³² (½, ¼, 0.375, any dyadic knob step), and otherwise
+  differs from the real `p / w` by less than `1 + 1/(2w)` phase units (the
+  floor plus the word's rounding): at `w = 0.001` about 2⁻²³ of a cycle.
+  In an f32 artifact the width is binary32, so `W` keeps 24 significant
+  bits; the integer path is unchanged.
+- **Cost.** Per sample: one mask, three shifts, two integer divides, a
+  multiply, a compare and two selects; for a live width also a multiply,
+  a round, a conversion and a clamp. A divide by a static `W` is a
+  constant divide, which LLVM strength-reduces.
 
 ## Cost
 
@@ -62,7 +121,7 @@ Per sample, per spline:
 - one divide.
 
 `index` keeps its generic bounds check: two compares and a select per read.
-The check never fires, since `i ∈ [0, n]` and `i + 3 ≤ K + 2` hold by
+The check never fires, since `i ∈ [0, K)` and `i + 3 ≤ K + 2` hold by
 construction. Whether LLVM removes it depends on its range analysis of
 `(p · n) >> 32`; nothing here relies on that. The table pack runs per
 sample even when the controls are knobs, because arrays are not hoisted
@@ -71,6 +130,14 @@ into the coefficient kernel in v1 (`Ir/Stage0.lean`).
 ## Not built
 
 - Spline integrals, speed-to-position warps.
+- Absolute-duration envelopes (`w = duration × frequency`, a width set in
+  seconds rather than as a fraction of the gate's cycle), and tails that
+  overlap the next cycle. Width here is relative only.
+- A spline whose two ends differ. The retired phantom-end boundary let
+  `c[0]` and `c[K − 1]` be the values at phase 0 and phase 1 (an envelope
+  from 1 down to 0), and also gave the two ends independent slopes (a steep
+  onset and a flat finish). Every spline is now periodic, so an envelope
+  starts and ends at the same value with the same slope.
 - Sample playback, table ports.
 - Fourier resynthesis of the spline.
 - Editors.

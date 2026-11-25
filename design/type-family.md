@@ -97,7 +97,7 @@ family cannot declare past it.
 
 Both periodic splines take `1 ≤ K ≤ 1024`:
 
-- The minimum is the boundary's (`SplineBoundary.wrap.minControls`), not the
+- The minimum is `splineSig`'s (every spline is periodic), not the
   basis's. One point is a constant curve. Two or three points wrap through
   the four-point window and are still a closed `C¹` (Catmull-Rom) or `C²`
   (B-spline) curve. The gates render `K = 1, 2, 3` against the reference.

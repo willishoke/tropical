@@ -179,9 +179,14 @@ decreasing_by
     other value the IR computes with. A literal whose word is not an integer,
     or lies outside the format, is refused. An input with no fraction bits
     keeps its literal as written (the word is the value), and float inputs
-    are untouched. -/
+    are untouched. A literal outside the input's declared interval
+    (`InputDecl.interval?`, the real value before any format) is refused
+    too. -/
 def bareLiteralAtPort (what : String) (decl : Tropical.Ir.InputDecl)
-    (expr : Tropical.WireExpr) : Except String Tropical.WireExpr :=
+    (expr : Tropical.WireExpr) : Except String Tropical.WireExpr := do
+  if let (.num n, some i) := (expr, decl.interval?) then
+    unless i.contains n do
+      throw s!"input {what}: literal {n} is outside the input's interval {i.label}"
   match expr, decl.type? with
   | .num n, some (.scalar k) =>
     if k.isInteger && decl.fracBits != 0 then

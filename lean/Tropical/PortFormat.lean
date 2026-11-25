@@ -142,4 +142,33 @@ def ofJson? (j : Json) : Except String PortFormat := do
   return f
 
 end PortFormat
+
+/-- The real interval an input's value is defined on, with open or closed
+    ends: `(0, 1]` for a pulse width. Like a format it is checked where a
+    literal crosses the port bare (`Session.bareLiteralAtPort`): a literal
+    outside it is refused there. A value that moves (a param, another
+    instance's output, arithmetic) is the program's to clamp. -/
+structure PortInterval where
+  lo : Lean.JsonNumber
+  loOpen : Bool
+  hi : Lean.JsonNumber
+  hiOpen : Bool
+deriving Repr, Inhabited
+
+namespace PortInterval
+
+/-- `a < b` and `a = b` on exact decimals, by cross-multiplying. -/
+private def scaled (a b : Lean.JsonNumber) : Int × Int :=
+  (a.mantissa * (10 : Int) ^ b.exponent, b.mantissa * (10 : Int) ^ a.exponent)
+
+def contains (i : PortInterval) (n : Lean.JsonNumber) : Bool :=
+  let (x, lo) := scaled n i.lo
+  let (x', hi) := scaled n i.hi
+  (if i.loOpen then lo < x else lo ≤ x) && (if i.hiOpen then x' < hi else x' ≤ hi)
+
+/-- `(0, 1]`. -/
+def label (i : PortInterval) : String :=
+  s!"{if i.loOpen then "(" else "["}{i.lo}, {i.hi}{if i.hiOpen then ")" else "]"}"
+
+end PortInterval
 end Tropical

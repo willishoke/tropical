@@ -40,6 +40,7 @@ import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
 import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.TypeFamily
+import Tropical.Tropicaltest.PdClip
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -124,7 +125,8 @@ def main (args : List String) : IO UInt32 := do
     | .ok (arena, _) =>
         let (_, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
         let (_, familyBad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
-        return if bad == 0 && familyBad == 0 then 0 else 1
+        let (_, badClip) ← Tropical.Tropicaltest.PdClip.runPdClip arena
+        return if bad + familyBad + badClip == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
@@ -371,16 +373,17 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + bad
 
   -- ── (g′) The uniform cubic spline read by a phase (EmitArrow/Spline.lean) ──
-  IO.println "spline (oracle, seam, live control):"
+  IO.println "spline (oracle, seam, live control; pdclip oracle, envelope, live width, refusal):"
   match Tropical.Playground.stdlib with
   | .error error =>
-      total := total + 3
-      failed := failed + 3
+      total := total + 7
+      failed := failed + 7
       IO.println s!"  FAIL  spline  stdlib: {error}"
   | .ok (arena, _) =>
       let (n, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
-      total := total + n
-      failed := failed + bad
+      let (nClip, badClip) ← Tropical.Tropicaltest.PdClip.runPdClip arena
+      total := total + n + nClip
+      failed := failed + bad + badClip
 
   -- ── (g″) Type families: a registered type at a size (Tropical/Family.lean) ──
   IO.println "type families (spline members at K = 1 … 100, refusals, save/load):"

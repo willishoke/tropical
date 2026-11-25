@@ -1,6 +1,7 @@
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spline
 import Tropical.Family
+import Tropical.EmitArrow.PdClip
 
 /-!
 # EmitArrow.Stdlib — ID-native standard-library authoring
@@ -586,15 +587,15 @@ def stdlibSplineControls : Nat := 8
 /-- A spline program (`splineSig`): an integer `phase` (Q0.32, one cycle is
     2³², the DDS phase rail; `toInt(phase · 2³²)` of a `ClockPhasor`) and
     `stdlibSplineControls` float control values `c0 …`, each live when wired
-    from a `param:` slot. Basis, boundary and K are fixed per program; the
-    periodic ones are also type families over K (below). -/
+    from a `param:` slot. Basis and K are fixed per program; the splines
+    are type families over K (below). -/
 def splineProgram (arena : Arena) (name : String) (basis : SplineBasis)
-    (boundary : SplineBoundary) (k : Nat := stdlibSplineControls) :
+    (k : Nat := stdlibSplineControls) :
     Except String (Arena × ProgramIdx) :=
   assemble arena name #[floatOut] #[] do
     let phase ← inputRef ⟨0⟩
     let controls ← (Array.range k).mapM fun j => inputRef ⟨j + 1⟩
-    let body ← splineSig basis boundary controls phase
+    let body ← splineSig basis controls phase
     let zero ← lit 0
     let phaseInput : AInputDecl :=
       { name := "phase", type? := some (.scalar .int), defaultSig := some zero }
@@ -604,12 +605,11 @@ def splineProgram (arena : Arena) (name : String) (basis : SplineBasis)
     }
 
 /-- The size range of a periodic spline family. The fewest control points is
-    the boundary's minimum (`SplineBoundary.wrap.minControls`, 1: one point is
-    a constant curve, two or more wrap through the window), the same for both
-    bases. The most is 1024: a member has `K + 2` ports, which must fit
+    1 (`splineSig`'s minimum: one point is a constant curve, two or more wrap
+    through the window), the same for both bases. The most is 1024: a member has `K + 2` ports, which must fit
     `memberPortBudget` (`design/type-family.md`); the index arithmetic alone
     would allow `2³¹ − 1`. -/
-def periodicSplineSizes : Nat × Nat := (SplineBoundary.wrap.minControls, 1024)
+def periodicSplineSizes : Nat × Nat := (1, 1024)
 
 private def periodicSplineFamily (name : String) (basis : SplineBasis) :
     TypeFamily where
@@ -619,7 +619,7 @@ private def periodicSplineFamily (name : String) (basis : SplineBasis) :
   sizeMeaning := "control points"
   ports := s!"inputs phase (int, Q0.32 phase) and c0 … c<size−1> (float control values, {basis.name} basis); output out (float)"
   portsAt := fun k => k + 2
-  build := fun member k arena _ => splineProgram arena member basis .wrap k
+  build := fun member k arena _ => splineProgram arena member basis k
 
 /-- `PeriodicCatmullRom<K>`: the periodic Catmull-Rom spline of `K` control
     points. -/
@@ -640,18 +640,31 @@ def buildPeriodicCatmullRom8 (arena : Arena) (resolved : Array (String × Progra
     Except String (Arena × ProgramIdx) :=
   periodicCatmullRomFamily.build "PeriodicCatmullRom8" stdlibSplineControls arena resolved
 
-def buildPhantomEndCatmullRom8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  splineProgram arena "PhantomEndCatmullRom8" catmullRomBasis .phantomEnd
-
 /-- The size-8 member, registered at boot by the family's own builder. -/
 def buildPeriodicBSpline8 (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   periodicBSplineFamily.build "PeriodicBSpline8" stdlibSplineControls arena resolved
 
-def buildPhantomEndBSpline8 (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+/-- `PdClip` (`pdClipSig`): an integer `phase` (Q0.32) and a float `width`
+    in `(0, 1]` (live when wired from a `param:` slot; a bare literal outside
+    the interval is refused at ingest, a moving value clamps), to the clipped
+    `phase` (int, `[0, 2³²]`, for a spline's `phase`) and the `gate` (float,
+    1 for the first `width` of the cycle, else 0). -/
+def buildPdClip (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
-  splineProgram arena "PhantomEndBSpline8" uniformBSplineBasis .phantomEnd
+  assemble arena "PdClip"
+      #[{ name := "phase", type? := some (.scalar .int) }, floatOut "gate"] #[] do
+    let phase ← inputRef ⟨0⟩
+    let width ← inputRef ⟨1⟩
+    let clipped ← pdClipSig phase (.live width)
+    let zero ← lit 0
+    let one ← lit 1
+    pure {
+      inputs := #[
+        { name := "phase", type? := some (.scalar .int), defaultSig := some zero },
+        { floatDecl "width" one with interval? := some pulseWidthInterval }]
+      assigns := #[(.port ⟨0⟩, clipped.phase), (.port ⟨1⟩, clipped.gate)]
+    }
 
 def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ClockPhasor", buildClockPhasor), ("FixedSin", buildFixedSin),
@@ -665,9 +678,8 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("SoftClip", buildSoftClip), ("FixedSinOscQ15", buildFixedSinOscQ15),
   ("SinOscQ15", buildSinOscQ15),
   ("PeriodicCatmullRom8", buildPeriodicCatmullRom8),
-  ("PhantomEndCatmullRom8", buildPhantomEndCatmullRom8),
   ("PeriodicBSpline8", buildPeriodicBSpline8),
-  ("PhantomEndBSpline8", buildPhantomEndBSpline8)]
+  ("PdClip", buildPdClip)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}
