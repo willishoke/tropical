@@ -475,9 +475,12 @@ private def runGlideClock (arena : Ir.Arena) (resolved : Array (String × Ir.Pro
 
 -- ── Refusal at decode ───────────────────────────────────────────────────────
 
-/-- An `anchor_clock` whose clock is dangling, or a discipline nobody knows,
-    is refused when the plan is read — by the Lean decoder and by the C++
-    host's loader — never resolved (or written raw) at write time. -/
+/-- An `anchor_clock` whose clock is dangling, a clock where none belongs, or
+    a discipline nobody knows, is refused when the plan is read — by the Lean
+    decoders and by the C++ host's loader — never resolved (or written raw)
+    at write time. The C++ loader is driven with the emitted manifest (which
+    must load) and with one edit of it per case, each refused for the stated
+    reason. -/
 private def runRefusals (arena : Ir.Arena) (resolved : Array (String × Ir.ProgramIdx)) :
     IO Bool := do
   let label := "anchor-continuity/refusals"
@@ -491,6 +494,8 @@ private def runRefusals (arena : Ir.Arena) (resolved : Array (String × Ir.Progr
     ("dangling clock", retarget fun d => { d with clock := some "master.gain" }),
     ("missing clock", retarget fun d => { d with clock := none }),
     ("clock on a plain anchor", retarget fun d => { d with discipline := "anchor" }),
+    ("empty clock", retarget fun d => { d with clock := some "" }),
+    ("empty clock on a plain anchor", retarget fun d => { d with discipline := "anchor", clock := some "" }),
     ("unknown discipline", retarget fun d => { d with discipline := "anchor_v2", clock := none })]
   let mut problems : Array String := #[]
   if c.plan.disciplineError?.isSome then problems := problems.push "the compiled plan is refused"
@@ -499,20 +504,55 @@ private def runRefusals (arena : Ir.Arena) (resolved : Array (String × Ir.Progr
     match plan.toWire >>= Plan.FlatPlan.ofWire with
     | .ok _ => problems := problems.push s!"{what}: PlanDecode accepts it"
     | .error _ => pure ()
-  -- The C++ loader, on a manifest whose clock was edited after emission.
+  -- The kernel manifest's port decoder, on the entry alone.
+  let port := fun (discipline : String) (clock : Option String) =>
+    Kernel.Discipline.ofWire (Kernel.Discipline.toWire
+      { discipline, companions := #["osc.freq#phase"], clock })
+  if (port "anchor_clock" (some "master.velocity")).toOption.isNone then
+    problems := problems.push "Kernel.Discipline.ofWire refuses a well-formed anchor_clock"
+  let portBad : List (String × String × Option String) :=
+    [("missing clock", "anchor_clock", none), ("clock on a plain anchor", "anchor", some ""),
+     ("unknown discipline", "anchor_v2", none)]
+  for (what, discipline, clock) in portBad do
+    if (port discipline clock).toOption.isSome then
+      problems := problems.push s!"{what}: Kernel.Discipline.ofWire accepts it"
+  -- The C++ loader, on a manifest edited after emission.
   match Artifact.emitJit (Artifact.split {} c.plan) 61 with
   | .error e => problems := problems.push s!"emit: {firstLine e}"
   | .ok parts =>
-    let edited := parts.manifest.replace "\"clock\":\"master.velocity\"" "\"clock\":\"master.gain\""
-    if edited == parts.manifest then
-      problems := problems.push "the emitted manifest carries no clock to edit"
-    else
+    let load := fun (manifest : String) => do
       let rt ← Ffi.Runtime.new 61
-      let refused ← try rt.load parts.ir parts.msl parts.stage0Ir edited; pure false
-        catch _ => pure true
-      if !refused then problems := problems.push "the C++ loader accepts a dangling clock"
+      try rt.load parts.ir parts.msl parts.stage0Ir manifest; pure (none : Option String)
+      catch e => pure (some (toString e))
+    if let some e ← load parts.manifest then
+      problems := problems.push s!"the C++ loader refuses the unedited manifest: {firstLine e}"
+    let clock := "\"clock\":\"master.velocity\""
+    let kind := "\"discipline\":\"anchor_clock\""
+    let edits : Array (String × Array (String × String) × String) := #[
+      ("dangling clock", #[(clock, "\"clock\":\"master.gain\"")], "is not a velocity param"),
+      ("missing clock", #[(clock ++ ",", "")], "must name its clock"),
+      ("clock on a plain anchor", #[(kind, "\"discipline\":\"anchor\"")],
+        "only an anchor_clock discipline declares a clock"),
+      ("empty clock", #[(clock, "\"clock\":\"\"")], "is not a velocity param"),
+      ("empty clock on a plain anchor",
+        #[(kind, "\"discipline\":\"anchor\""), (clock, "\"clock\":\"\"")],
+        "only an anchor_clock discipline declares a clock"),
+      ("unknown discipline", #[(kind, "\"discipline\":\"anchor_v2\""), (clock ++ ",", "")],
+        "unknown discipline")]
+    for (what, subs, reason) in edits do
+      let mut edited := parts.manifest
+      for (old, new) in subs do
+        let next := edited.replace old new
+        if next == edited then
+          problems := problems.push s!"{what}: the manifest has no {old} to edit"
+        edited := next
+      match ← load edited with
+      | none => problems := problems.push s!"{what}: the C++ loader accepts it"
+      | some e =>
+        if (e.splitOn reason).length < 2 then
+          problems := problems.push s!"{what}: the C++ loader fails for another reason: {firstLine e}"
   if problems.isEmpty then
-    passGate label "a dangling, missing or misplaced clock and an unknown discipline are refused by disciplineError?, PlanDecode and the C++ loader"
+    passGate label "a dangling, missing, empty or misplaced clock and an unknown discipline are refused by disciplineError?, PlanDecode, the kernel port decoder and the C++ loader, each for its own reason; the unedited manifest loads"
   else failGate label (String.intercalate "; " problems.toList)
 
 def runAnchorContinuity (arena : Ir.Arena) (resolved : Array (String × Ir.ProgramIdx)) :

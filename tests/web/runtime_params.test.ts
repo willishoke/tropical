@@ -124,6 +124,18 @@ describe('ParamWriter', () => {
     }
     expect(() => new ParamWriter(withClock(undefined))).toThrow(/exactly on an anchor_clock/)
     expect(() => new ParamWriter(withClock('master.gain'))).toThrow(/not a velocity param/)
+    expect(() => new ParamWriter(withClock(''))).toThrow(/not a velocity param/)
+    // So is a discipline the contract does not name, and a clock (the empty
+    // string included) on anything but an anchor_clock.
+    const withDiscipline = (discipline: string, clock: string | undefined) => {
+      const m = withClock(clock)
+      const port = m.inputs.find((p) => p.name === 'param:osc.freq') as { discipline?: { discipline: string } }
+      port.discipline!.discipline = discipline
+      return m
+    }
+    expect(() => new ParamWriter(withDiscipline('anchor_v2', undefined))).toThrow(/unknown discipline 'anchor_v2'/)
+    expect(() => new ParamWriter(withDiscipline('anchor', ''))).toThrow(/exactly on an anchor_clock/)
+    expect(() => new ParamWriter(withDiscipline('anchor', undefined))).not.toThrow()
   })
 
   test('raw: the write is the value; companions and unimplemented disciplines are refused', async () => {

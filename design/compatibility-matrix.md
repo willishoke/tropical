@@ -92,11 +92,14 @@ redefined source 0, so a Plan 6 document is refused).
 - `anchor_clock` discipline (2026-11-24). An anchored frequency on the
   master clock: `"clock"` names the velocity param, whose `velocity`
   discipline names the origin. Plain `anchor` keeps its sample-clock meaning.
-  The new readers refuse an unknown discipline, a `clock` on anything but an
-  `anchor_clock`, and an `anchor_clock` whose clock is missing, not a string,
-  or not a velocity param with an origin companion, at decode
-  (`FlatPlan.disciplineError?`, `PlanDecode`, `Kernel.Discipline.ofWire`,
-  the C++ plan parser, the web `ParamWriter`). An older web player refuses
+  At decode, `FlatPlan.disciplineError?` (`PlanDecode`, `Kernel.ofPlan`), the
+  C++ plan parser and the web `ParamWriter` constructor refuse an unknown
+  discipline, a `clock` on anything but an `anchor_clock` (an empty string
+  counts as a clock), and an `anchor_clock` whose clock is missing, not a
+  string, or not a velocity param with an origin companion.
+  `Kernel.Discipline.ofWire` reads one port entry: it refuses the unknown
+  discipline and the misplaced, missing or non-string clock, and leaves
+  resolving the clock to the nested plan's decode. An older web player refuses
   the write (it knows only `raw` and `anchor`). An older C++ host does not
   refuse: it treats any unknown discipline as `raw`, so it writes the
   frequency raw and the phase jumps. No spelling short of a schema bump makes

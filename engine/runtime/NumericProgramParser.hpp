@@ -186,10 +186,11 @@ struct ParsedPlan7
   struct ParamDiscipline
   {
     std::string              name;             // base param ("sf.depth"; slot "param:<name>")
-    std::string              discipline;       // raw | glide | anchor | velocity
+    std::string              discipline;       // raw | glide | anchor | anchor_clock | velocity
     double                   glide_dur_sec = 0.0;
     std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
-    std::string              clock;            // anchor: the velocity param of the phasor's clock (empty: the sample clock)
+    bool                     has_clock = false; // the entry carries a "clock" key (any string, the empty one included)
+    std::string              clock;            // anchor_clock: the velocity param of the phasor's clock
   };
   std::vector<ParamDiscipline> param_disciplines;
 
@@ -477,6 +478,7 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
         if (!d["clock"].is_string())
           throw std::runtime_error(
             "NumericProgramParser: param '" + pd.name + "': anchor clock must be a string");
+        pd.has_clock = true;
         pd.clock = d["clock"].get<std::string>();
       }
       if (d.contains("companions"))
@@ -485,9 +487,10 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
       result.param_disciplines.push_back(std::move(pd));
     }
   // A discipline this host does not know is refused, never written raw; a
-  // clock is declared exactly on an `anchor_clock`, and names a param that
-  // carries the velocity discipline, whose slot and origin companion's slot
-  // the plan has (host-param-dispatch.md, `anchor`).
+  // clock is declared exactly on an `anchor_clock` (the key's presence is
+  // what counts: an empty string is a clock, and names nothing), and names a
+  // param that carries the velocity discipline, whose slot and origin
+  // companion's slot the plan has (host-param-dispatch.md, `anchor`).
   for (const auto & pd : result.param_disciplines)
   {
     const std::string & k = pd.discipline;
@@ -495,7 +498,7 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
       throw std::runtime_error(
         "NumericProgramParser: param '" + pd.name + "' has the unknown discipline '" + k
         + "' (this host knows raw, glide, anchor, anchor_clock and velocity)");
-    if ((k == "anchor_clock") != !pd.clock.empty())
+    if ((k == "anchor_clock") != pd.has_clock)
       throw std::runtime_error(
         "NumericProgramParser: param '" + pd.name + "': "
         + (k == "anchor_clock" ? "an anchor_clock discipline must name its clock"

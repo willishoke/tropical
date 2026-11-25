@@ -1051,9 +1051,11 @@ private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarT
     | .moduleSlot idx => m.insert idx i.resultType
     | _ => m
 
+/-- The disciplines a host knows (`host-param-dispatch.md`). -/
+def knownDisciplines : Array String := #["raw", "glide", "anchor", "anchor_clock", "velocity"]
+
 /-- The discipline table's own well-formedness (`host-param-dispatch.md`):
-    every discipline is one a host knows (`raw`, `glide`, `anchor`,
-    `anchor_clock`, `velocity`); a `clock` is declared exactly on an
+    every discipline is one a host knows (`knownDisciplines`); a `clock` is declared exactly on an
     `anchor_clock`, and names a param carrying the `velocity` discipline
     whose slot and origin companion's slot the plan has. An unknown
     discipline or a dangling clock would otherwise be written as something
@@ -1061,7 +1063,7 @@ private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarT
 def FlatPlan.disciplineError? (p : FlatPlan) : Option String := Id.run do
   let hasSlot := fun (n : String) => p.slotNames.contains s!"param:{n}"
   for d in p.paramDisciplines do
-    unless #["raw", "glide", "anchor", "anchor_clock", "velocity"].contains d.discipline do
+    unless knownDisciplines.contains d.discipline do
       return some s!"param '{d.name}' has the unknown discipline '{d.discipline}'"
     match d.discipline, d.clock with
     | "anchor_clock", none =>

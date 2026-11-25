@@ -105,9 +105,12 @@ only envelope, to avoid start/stop clicks.
 a slider per knob; a move posts `{type:'param'}` to the renderer, which applies
 it at the next splice (see below) through `ParamWriter`
 (`runtime/params.ts`) under the discipline the kernel manifest declares
-(`design/host-param-dispatch.md`): `raw` writes the value, `anchor` bumps the
-`#phase` companion by `Δinc·now` so a re-pitch is continuous at any τ.
-Companions and other disciplines are refused by name. A glide's discipline
+(`design/host-param-dispatch.md`): `raw` writes the value; `anchor` and
+`anchor_clock` bump the `#phase` companion by the phase jump `Δinc·C` so a
+re-pitch is continuous at any τ (`C` is the frame clock for `anchor`, the
+master clock for `anchor_clock`, which playground knobs declare). Companions,
+`glide` and `velocity` are refused by name at the write; an unknown
+discipline or a bad `clock` is refused when the writer is built. A glide's discipline
 sits on a base name with no port, so the kernel type cannot carry it; a
 playable knob is therefore a `knob` node (raw, or anchor when it feeds a
 freq inlet). `build_patches.ts` fails the build on a knob that names no

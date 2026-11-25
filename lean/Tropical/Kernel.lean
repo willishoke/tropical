@@ -385,8 +385,14 @@ private def strArr (j : Json) (k : String) : Array String :=
   | .ok (.arr xs) => xs.filterMap fun x => match x with | .str s => some s | _ => none
   | _ => #[]
 
+/-- A port's discipline, checked as far as the entry alone allows: a known
+    discipline, and a `clock` exactly on an `anchor_clock`. That the clock
+    names a velocity param with an origin companion is a fact about the whole
+    table; the nested plan's decode checks it (`FlatPlan.disciplineError?`). -/
 def Discipline.ofWire (j : Json) : Except String Discipline := do
   let discipline ← reqStr "Kernel.Discipline" j "discipline"
+  unless Tropical.Plan.knownDisciplines.contains discipline do
+    throw s!"Kernel.Discipline: unknown discipline '{discipline}'"
   let glideDurSec := match j.getObjVal? "glide_dur_sec" with
     | .ok (.num n) => some n
     | _ => none

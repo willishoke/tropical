@@ -119,13 +119,22 @@ own integer arithmetic (truncating conversions, products wrapping modulo
 3. write `#phase := off₁ / 2³²` (a multiple of 2⁻³² in `[0, 1)`, exact in an
    f64 slot), then `param:<name> := target`.
 
-A `clock` appears exactly on an `anchor_clock`, and must name a param that
-carries the `velocity` discipline with an origin companion, both with slots
-in the plan. Every reader refuses a plan that breaks this at decode
-(`FlatPlan.disciplineError?`, the C++ plan parser, the web `ParamWriter`
-constructor), and refuses a discipline it does not know. The playground
-declares `anchor_clock` on every anchored knob; plain `anchor` keeps its
-sample-clock meaning.
+A `clock` appears exactly on an `anchor_clock` (an empty string is still a
+clock), and must name a param that carries the `velocity` discipline with an
+origin companion, both with slots in the plan. A discipline outside the five
+named here is not written as something else. What each reader refuses, when
+it reads the manifest and before any write:
+
+| Reader | Unknown discipline | Clock off an `anchor_clock`, or missing on one | Clock that is not a velocity param with an origin |
+|---|---|---|---|
+| `FlatPlan.disciplineError?` (`PlanDecode`, `Kernel.ofPlan`) | yes | yes | yes |
+| C++ plan parser (`NumericProgramParser`) | yes | yes | yes |
+| Web `ParamWriter` constructor (port disciplines) | yes | yes | yes |
+| `Kernel.Discipline.ofWire` (one port entry) | yes | yes | no: it sees one entry; the nested plan's decode checks the table |
+
+The web writer knows `glide` and `velocity` but does not write them: a write
+to such a param is refused by name. The playground declares `anchor_clock`
+on every anchored knob; plain `anchor` keeps its sample-clock meaning.
 
 On the f64 lanes (the JIT and wasm) the phase is then bit-exactly continuous
 at `now`: the oscillator continues from its pre-write phase with the new
@@ -153,9 +162,11 @@ oscillator retuned by anchored writes jumps at the next structural edit.
 
 ## `velocity` — master-clock re-base
 
-The master clock is `M(n) = tau_base·SR·2³² + velocity·2³²·n`; changing
-`velocity` alone jumps `M` by `Δv·n`. The write re-bases the origin so `M`
-stays value-continuous:
+The master clock is the Q48.16 value
+`M(n) = trunc(tau_base · SR · 2¹⁶) + scaleClockQ(trunc(velocity · 2³²), n · 2¹⁶)`
+(`Playground/Decode.lean`, `masterClock`): `tau_base·SR + velocity·n` samples,
+with 16 fraction bits. Changing `velocity` alone jumps `M` by `Δv·n` samples.
+The write re-bases the origin so `M` stays value-continuous:
 
 1. `tau_base += (v_current − target) · now / SR` (the companion slot);
 2. write `param:<name> := target`.

@@ -1161,8 +1161,8 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   const double now = static_cast<double>(sample_index);
 
   // An integer or binary32 param is written raw: every other discipline
-  // re-anchors in float arithmetic on f64 companions (sample counts among
-  // them), and the compiler refuses to attach one to a typed port, as its
+  // reads and writes f64 companions (sample counts and phases among them),
+  // and the compiler refuses to attach one to a typed port, as its
   // base or as a companion (`FlatPlan.portError?`), or to any param of a
   // binary32 artifact (`Kernel.ofPlan`; the web `ParamWriter` likewise).
   // Refuse here too, over every slot the discipline would touch: the base,
