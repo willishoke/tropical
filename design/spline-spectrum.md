@@ -27,7 +27,8 @@ and `f(x) = F_0 + Σ_{n≥1} Re(2F_n e^{2πinx})`.
   `sinc ξ = sin(πξ)/(πξ)`. The code does not use either formula. It
   computes `φ̂` at assemble time from the basis matrix (four cubic pieces,
   each integrated against the exponential in closed form), so any basis with
-  an even kernel works. A basis without an even kernel is refused, because its
+  an even kernel works. The computation runs in the exact carrier
+  (`Tropical.Exact`), not libm. A basis without an even kernel is refused, because its
   `φ̂` is complex. The gate checks the matrix route against both closed forms.
   Both kernels give `φ̂(m) = 0` for every nonzero integer `m`, because they
   reproduce constants, so harmonics `K, 2K, …` are exactly zero.

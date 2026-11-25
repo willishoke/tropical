@@ -1,6 +1,7 @@
 import Tropical.EmitArrow.Spline
 import Tropical.EmitArrow.Spectral
 import Tropical.EmitArrow.Term
+import Tropical.Exact
 
 /-!
 # EmitArrow.SplineSpectrum — a periodic spline as its harmonics below Nyquist
@@ -26,14 +27,14 @@ with `φ̂(ξ) = ∫ φ(u) e^{−2πiuξ} du`. So `f(x) = F_0 + Σ_{n≥1} Re(2F
 * the 0 Hz term is `F_0 = C[0]/K`, the mean of the controls (the family's
   `dc` term);
 * `φ̂` is computed at assemble time from the basis matrix itself, for any
-  basis with an even kernel (both provided bases are even).
+  basis with an even kernel (both provided bases are even), in the exact
+  carrier (`Tropical.Exact`), so no platform `libm` touches the column.
 -/
 
 namespace Tropical.EmitArrow
 
 open Tropical.Ir
-
-private def piF : Float := 3.141592653589793
+open Tropical.Exact
 
 /-- The basis kernel on its four unit pieces: `φ(t + 1 − w) = p_w(t)` for
     `t ∈ [0, 1)` and window position `w = 0..3`. Entry `[w][k]` is the
@@ -59,56 +60,61 @@ def SplineBasis.kernelIsEven (basis : SplineBasis) : Bool :=
   let p := basis.pieces
   (Array.range 4).all fun w => p[w]! == reflect p[3 - w]!
 
-/-- `∫₀¹ tᵏ e^{−iat} dt` for `k = 0..3`, as `(re, im)` pairs. Small `|a|`: the
-    Taylor series `Σ_r (−ia)^r / (r!·(k + r + 1))`; otherwise the recursion
-    `I_k = (k·I_{k−1} − e^{−ia}) / (ia)`, which is stable for `|a| > k`. -/
-private def momentIntegrals (a : Float) : Array (Float × Float) := Id.run do
-  if a.abs < 4.0 then
+/-- `∫₀¹ tᵏ e^{−iat} dt` for `k = 0..3`, as `(re, im)` enclosures. Small `|a|`:
+    the Taylor series `Σ_r (−ia)^r / (r!·(k + r + 1))` (60 terms; at `|a| < 4`
+    the tail is below `4⁶⁰/60! < 10⁻⁴⁵`); otherwise the recursion
+    `I_k = (k·I_{k−1} − e^{−ia}) / (ia)`, stable for `|a| > k`. -/
+private def momentIntegrals (a : DyadicI) : Array (DyadicI × DyadicI) := Id.run do
+  if a.toFloat.abs < 4.0 then
     let mut out := #[]
     for k in [0:4] do
-      let mut re := 0.0
-      let mut im := 0.0
-      let mut term := 1.0 -- a^r / r!
+      let mut re := DyadicI.zero
+      let mut im := DyadicI.zero
+      let mut term := DyadicI.one -- a^r / r!
       for r in [0:60] do
-        let v := term / (k + r + 1).toFloat
+        let v := DyadicI.div term (DyadicI.ofNat (k + r + 1))
         match r % 4 with
-        | 0 => re := re + v
-        | 1 => im := im - v
-        | 2 => re := re - v
-        | _ => im := im + v
-        term := term * a / (r + 1).toFloat
+        | 0 => re := DyadicI.add re v
+        | 1 => im := DyadicI.sub im v
+        | 2 => re := DyadicI.sub re v
+        | _ => im := DyadicI.add im v
+        term := DyadicI.div (DyadicI.mul term a) (DyadicI.ofNat (r + 1))
       out := out.push (re, im)
     return out
   else
-    let er := Float.cos a
-    let ei := -Float.sin a
+    let er := DyadicI.cos a
+    let ei := DyadicI.neg (DyadicI.sin a)
     -- (x + iy) / (ia) = (y − ix) / a
-    let divIa := fun (x y : Float) => (y / a, -x / a)
-    let mut out := #[divIa (1.0 - er) (-ei)]
+    let divIa := fun (x y : DyadicI) => (DyadicI.div y a, DyadicI.neg (DyadicI.div x a))
+    let mut out := #[divIa (DyadicI.sub DyadicI.one er) (DyadicI.neg ei)]
     for k in [1:4] do
       let (pr, pi) := out[k - 1]!
-      out := out.push (divIa (k.toFloat * pr - er) (k.toFloat * pi - ei))
+      let kk := DyadicI.ofNat k
+      out := out.push (divIa (DyadicI.sub (DyadicI.mul kk pr) er)
+        (DyadicI.sub (DyadicI.mul kk pi) ei))
     return out
 
-/-- `φ̂(ξ) = ∫ φ(u) e^{−2πiuξ} du` of the basis kernel, from its matrix:
-    `Σ_w e^{−ia(1−w)} Σ_k p_w[k]·I_k(a)` with `a = 2πξ`. Real for an even
-    kernel (the imaginary part is rounding and is dropped). -/
-def SplineBasis.kernelTransform (basis : SplineBasis) (xi : Float) : Float := Id.run do
-  let a := 2.0 * piF * xi
+/-- `φ̂(ξ) = ∫ φ(u) e^{−2πiuξ} du` of the basis kernel at `ξ = num/den`, from
+    its matrix: `Σ_w e^{−ia(1−w)} Σ_k p_w[k]·I_k(a)` with `a = 2πξ`, in the
+    exact carrier (`Tropical.Exact`). Real for an even kernel (the imaginary
+    part is dropped). -/
+def SplineBasis.kernelTransform (basis : SplineBasis) (num den : Nat) : Float := Id.run do
+  let a := DyadicI.div (DyadicI.mul twoPiI (DyadicI.ofNat num)) (DyadicI.ofNat den)
   let moments := momentIntegrals a
   let p := basis.pieces
-  let mut re := 0.0
+  let mut re := DyadicI.zero
   for w in [0:4] do
-    let mut sr := 0.0
-    let mut si := 0.0
+    let mut sr := DyadicI.zero
+    let mut si := DyadicI.zero
     for k in [0:4] do
-      let c := Float.ofInt p[w]![k]!
-      sr := sr + c * moments[k]!.1
-      si := si + c * moments[k]!.2
+      let c := DyadicI.ofInt p[w]![k]!
+      sr := DyadicI.add sr (DyadicI.mul c moments[k]!.1)
+      si := DyadicI.add si (DyadicI.mul c moments[k]!.2)
     -- × e^{−ia(1−w)}: keep the real part
-    let angle := a * (1.0 - w.toFloat)
-    re := re + sr * Float.cos angle + si * Float.sin angle
-  return re / basis.scale.toFloat
+    let angle := DyadicI.mul a (DyadicI.ofInt (1 - (w : Int)))
+    re := DyadicI.add re (DyadicI.add (DyadicI.mul sr (DyadicI.cos angle))
+      (DyadicI.mul si (DyadicI.sin angle)))
+  return (DyadicI.div re (DyadicI.ofNat basis.scale)).toFloat
 
 /-- `cos` and `sin` of `2π·r/K` for an integer `r`, exact at quarter turns. -/
 private def unitRoot (r k : Nat) : Float × Float :=
@@ -117,8 +123,8 @@ private def unitRoot (r k : Nat) : Float × Float :=
     match 4 * r / k with
     | 0 => (1.0, 0.0) | 1 => (0.0, 1.0) | 2 => (-1.0, 0.0) | _ => (0.0, -1.0)
   else
-    let angle := 2.0 * piF * r.toFloat / k.toFloat
-    (Float.cos angle, Float.sin angle)
+    let angle := DyadicI.div (DyadicI.mul twoPiI (DyadicI.ofNat r)) (DyadicI.ofNat k)
+    ((DyadicI.cos angle).toFloat, (DyadicI.sin angle).toFloat)
 
 /-- `Σ_j m_j · x_j` for build-time coefficients, skipping zeros and
     multiplying by no ±1. -/
@@ -170,7 +176,7 @@ def splineSpectrumFamily (basis : SplineBasis) (controls : Array Sig) (freq : Si
     throw s!"spline spectrum: the {basis.name} basis has no even kernel, so its harmonics need a complex φ̂; only even kernels are supported"
   let (cre, cim) ← controlDft controls
   let column ← (Array.range count).mapM fun i =>
-    litExact (2.0 / k.toFloat * basis.kernelTransform ((i + 1).toFloat / k.toFloat))
+    litExact (2.0 / k.toFloat * basis.kernelTransform (i + 1) k)
   let dc ← div cre[0]! (← lit k)
   let modK ← lit k
   let weight := fun (tables : Array Sig) (idx n _kf : Sig) => do

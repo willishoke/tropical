@@ -138,7 +138,7 @@ def runClosedForm : IO Bool := do
       return ← failGate label s!"{basisLabel basis}: kernel not recognised as even"
     for i in [0:4001] do
       let xi := i.toFloat / 100.0
-      let d := (basis.kernelTransform xi - closedTransform basis xi).abs
+      let d := (basis.kernelTransform i 100 - closedTransform basis xi).abs
       if d.isNaN then return ← failGate label s!"{basisLabel basis}: NaN at ξ = {xi}"
       worstT := max worstT d
   -- (b) F_n vs the brute-force integral
@@ -154,7 +154,7 @@ def runClosedForm : IO Bool := do
         (r.push a, i.push b)) (#[], #[])
       for n in [0:4 * k + 1] do
         -- the build's φ̂ (from the matrix), not the closed form
-        let s := basis.kernelTransform (n.toFloat / k.toFloat) / k.toFloat
+        let s := basis.kernelTransform n k / k.toFloat
         let got := (cre[n % k]! * s, cim[n % k]! * s)
         let want := bruteHarmonic basis cs n nodes
         let d := max (got.1 - want.1).abs (got.2 - want.2).abs
