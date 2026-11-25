@@ -282,7 +282,7 @@ a refinement obligation; it is not by itself a proof of source semantics.
 
 | Edit | Compiler work | Publication behavior |
 |---|---|---|
-| Parameter value | No relower. The host applies `raw`, `glide`, `anchor`, or `velocity` discipline and writes slots; stage-0 work reruns when present. | JIT publishes the captured generation at a callback boundary. Metal prepares a new render epoch off the callback and activates it at its reported exact `E`. |
+| Parameter value | No relower. The host applies the `raw`, `glide`, `anchor`, `anchor_clock`, or `velocity` discipline and writes slots; stage-0 work reruns when present. | JIT publishes the captured generation at a callback boundary. Metal prepares a new render epoch off the callback and activates it at its reported exact `E`. |
 | Structural selector | Decode/lower/partition/emit again. Examples include a voice kind or a baked realization choice. | Publish a fresh kernel at the current coordinate. |
 | Topology | Rebuild the synthetic root, lower, partition, emit, and load. | Publish a fresh kernel at the current coordinate. |
 | Kernel publication | No semantic state migration. `FlatRuntime` carries only `sample_index`; fresh storage comes from the new manifest. Current parameter values are supplied by the control/session layer. | Atomic inactive-state build and flip; optional fade remains a device policy. |

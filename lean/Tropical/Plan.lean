@@ -549,12 +549,16 @@ theorem CompilationMode.ofWire_wire (m : CompilationMode) :
     re-anchoring math each discipline requires). `name` is the base param
     (slot `param:<name>`); `companions` are the discipline's implementation
     slots (`#v0/#v1/#t0` and exact-t0 limbs for glide, `#phase` for
-    anchor, the `tau_base` sibling for velocity). -/
+    anchor, the `tau_base` sibling for velocity). `clock`, on an anchor,
+    names the velocity param of the clock its phasor reads (that param's
+    velocity discipline names the origin); absent, the phasor reads the
+    sample clock. -/
 structure ParamDiscipline where
   name : String
   discipline : String
   glideDurSec : Option JsonNumber := none
   companions : Array String := #[]
+  clock : Option String := none
 deriving Repr, Inhabited
 
 def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
@@ -564,6 +568,9 @@ def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
     | none => fields
   let fields := if d.companions.isEmpty then fields
     else fields.push ("companions", toJson d.companions)
+  let fields := match d.clock with
+    | some c => fields.push ("clock", Json.str c)
+    | none => fields
   Json.mkObj fields.toList
 
 /-- The declared type of a port-facing slot: a `param:` slot whose value is
@@ -1043,6 +1050,35 @@ private def FlatPlan.lastSlotWriteKinds (p : FlatPlan) : Std.HashMap Nat ScalarT
     match i.dst with
     | .moduleSlot idx => m.insert idx i.resultType
     | _ => m
+
+/-- The disciplines a host knows (`host-param-dispatch.md`). -/
+def knownDisciplines : Array String := #["raw", "glide", "anchor", "anchor_clock", "velocity"]
+
+/-- The discipline table's own well-formedness (`host-param-dispatch.md`):
+    every discipline is one a host knows (`knownDisciplines`); a `clock` is declared exactly on an
+    `anchor_clock`, and names a param carrying the `velocity` discipline
+    whose slot and origin companion's slot the plan has. An unknown
+    discipline or a dangling clock would otherwise be written as something
+    else, silently. -/
+def FlatPlan.disciplineError? (p : FlatPlan) : Option String := Id.run do
+  let hasSlot := fun (n : String) => p.slotNames.contains s!"param:{n}"
+  for d in p.paramDisciplines do
+    unless knownDisciplines.contains d.discipline do
+      return some s!"param '{d.name}' has the unknown discipline '{d.discipline}'"
+    match d.discipline, d.clock with
+    | "anchor_clock", none =>
+      return some s!"param '{d.name}': an anchor_clock discipline must name its clock"
+    | "anchor_clock", some c =>
+      let ok := match p.paramDisciplines.find? (·.name == c) with
+        | some v => v.discipline == "velocity" && hasSlot v.name &&
+            (match v.companions[0]? with | some o => hasSlot o | none => false)
+        | none => false
+      unless ok do
+        return some s!"param '{d.name}': anchor clock '{c}' is not a velocity param with an origin companion in this plan"
+    | _, some _ =>
+      return some s!"param '{d.name}': only an anchor_clock discipline declares a clock"
+    | _, none => pure ()
+  return none
 
 /-- The plan's port-typing error, if any (`slot_types`, `SlotType`):
 

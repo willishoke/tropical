@@ -367,10 +367,13 @@ describe('param dispatch conformance (socket route ≡ engine route ≡ closed f
       // anchor: phase is corrected at the same nonzero boundary, then the
       // base frequency is written.
       expect(v['param:src.freq']).toBe(driveValues['src.freq'])
-      const inc0 = Math.floor(220 * 4294967296 / 44100)
-      const inc1 = Math.floor(440 * 4294967296 / 44100)
-      const expectedPhase = ((0.7 + (inc0 - inc1) * 512 / 4294967296) % 1 + 1) % 1
-      expect(Math.abs(v['param:src.freq#phase'] - expectedPhase)).toBeLessThanOrEqual(1e-12)
+      // Exact on ℤ/2³² (velocity 1, tau_base 0 at this write, so the master
+      // clock at 512 is 512·2¹⁶ and Φ(inc, C) = inc·512 mod 2³²).
+      const inc0 = BigInt(Math.trunc(220 * 4294967296 / 44100))
+      const inc1 = BigInt(Math.trunc(440 * 4294967296 / 44100))
+      const off0 = BigInt(Math.trunc(0.7 * 4294967296))
+      const off1 = (off0 + (inc0 - inc1) * 512n) & 0xffffffffn
+      expect(v['param:src.freq#phase']).toBe(Number(off1) / 4294967296)
       // velocity: tau_base += (v0 − target)·now/SR.
       expect(v['param:master.velocity']).toBe(driveValues['master.velocity'])
       const expectedTauBase = (1 - driveValues['master.velocity']) * 512 / 44100

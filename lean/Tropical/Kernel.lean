@@ -122,6 +122,8 @@ structure Discipline where
   discipline : String
   glideDurSec : Option JsonNumber := none
   companions : Array String := #[]
+  /-- An anchor's clock: the velocity param its phasor's clock reads. -/
+  clock : Option String := none
 deriving Repr, Inhabited
 
 /-- One named, shaped, typed value at the port. `default` is the seed a host
@@ -198,7 +200,7 @@ def channelNames (plan : FlatPlan) : Array String := Id.run do
 private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :=
   (plan.paramDisciplines.find? (·.name == base)).map fun d =>
     { discipline := d.discipline, glideDurSec := d.glideDurSec,
-      companions := d.companions }
+      companions := d.companions, clock := d.clock }
 
 /-- The element type of a port of format `f`, with `float` realized at
     `float`. -/
@@ -271,6 +273,7 @@ def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
 def ofPlan (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
     Except String KernelType := do
   if let some e := plan.portError? then throw s!"Kernel: {e}"
+  if let some e := plan.disciplineError? then throw s!"Kernel: {e}"
   if float == .f32 then
     if let some e := binary32DisciplineError? plan then throw s!"Kernel: {e}"
   let tau : Port :=
@@ -316,6 +319,9 @@ def Discipline.toWire (d : Discipline) : Json :=
     | none => fields
   let fields := if d.companions.isEmpty then fields
     else fields.push ("companions", toJson d.companions)
+  let fields := match d.clock with
+    | some c => fields.push ("clock", Json.str c)
+    | none => fields
   Json.mkObj fields.toList
 
 def Port.toWire (p : Port) : Json :=
@@ -379,12 +385,24 @@ private def strArr (j : Json) (k : String) : Array String :=
   | .ok (.arr xs) => xs.filterMap fun x => match x with | .str s => some s | _ => none
   | _ => #[]
 
+/-- A port's discipline, checked as far as the entry alone allows: a known
+    discipline, and a `clock` exactly on an `anchor_clock`. That the clock
+    names a velocity param with an origin companion is a fact about the whole
+    table; the nested plan's decode checks it (`FlatPlan.disciplineError?`). -/
 def Discipline.ofWire (j : Json) : Except String Discipline := do
   let discipline ← reqStr "Kernel.Discipline" j "discipline"
+  unless Tropical.Plan.knownDisciplines.contains discipline do
+    throw s!"Kernel.Discipline: unknown discipline '{discipline}'"
   let glideDurSec := match j.getObjVal? "glide_dur_sec" with
     | .ok (.num n) => some n
     | _ => none
-  return { discipline, glideDurSec, companions := strArr j "companions" }
+  let clock ← match j.getObjVal? "clock" with
+    | .ok (.str c) => pure (some c)
+    | .error _ => pure none
+    | .ok _ => throw "Kernel.Discipline: clock must be a string"
+  if (discipline == "anchor_clock") != clock.isSome then
+    throw "Kernel.Discipline: a clock is declared exactly on an anchor_clock discipline"
+  return { discipline, glideDurSec, companions := strArr j "companions", clock }
 
 def Port.ofWire (j : Json) : Except String Port := do
   let name ← reqStr "Kernel.Port" j "name"

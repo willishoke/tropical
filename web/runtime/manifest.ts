@@ -36,7 +36,7 @@ export type KernelPort = {
   default?: number
   /** How a host writes this param (`host-param-dispatch.md`): `raw`,
    *  `anchor` (with its `#phase` companion), … Absent means `raw`. */
-  discipline?: { discipline: string; glide_dur_sec?: number; companions?: string[] }
+  discipline?: { discipline: string; glide_dur_sec?: number; companions?: string[]; clock?: string }
   /** Output channel source names (outputs of shape [frames, C]). */
   channels?: string[]
   /** An integer port's fraction bits: word `w` means `w · 2^-frac_bits`. A

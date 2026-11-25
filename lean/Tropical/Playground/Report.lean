@@ -44,7 +44,9 @@ def paramDisciplinesOf (raws : Array Raw) :
                 s!"{base}#t0#u0", s!"{base}#t0#u1",
                 s!"{base}#t0#u2", s!"{base}#t0#u3"] }
           | .anchor =>
-            { name := base, discipline := "anchor", companions := #[s!"{base}#phase"] }
+            -- Every playground generator reads the master clock.
+            { name := base, discipline := "anchor_clock", companions := #[s!"{base}#phase"],
+              clock := some masterVelocityParam }
           | .raw =>
             { name := base, discipline := "raw" }
         unless out.any (fun existing => existing.name == base) do

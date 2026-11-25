@@ -86,8 +86,8 @@ for (const { slug, title, description, knobs } of manifest) {
     const port = kernelType.inputs.find((p) => p.name === `param:${knob.param}`)
     if (!port) throw new Error(`${slug}: knob '${knob.label}' names param '${knob.param}', which the kernel does not have`)
     const d = port.discipline?.discipline ?? 'raw'
-    if (d !== 'raw' && d !== 'anchor')
-      throw new Error(`${slug}: knob '${knob.label}' (${knob.param}) has discipline '${d}'; the player writes raw and anchor params only`)
+    if (d !== 'raw' && d !== 'anchor' && d !== 'anchor_clock')
+      throw new Error(`${slug}: knob '${knob.label}' (${knob.param}) has discipline '${d}'; the player writes raw, anchor and anchor_clock params only`)
     if (!(knob.min < knob.max) || (knob.log && knob.min <= 0))
       throw new Error(`${slug}: knob '${knob.label}' has a bad range [${knob.min}, ${knob.max}]`)
   }

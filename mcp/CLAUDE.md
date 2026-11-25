@@ -101,7 +101,7 @@ tools read and mutate:
 - `paramTypes` — the declared format of each typed param (`int32` or `int`
   with `frac_bits`); a param not listed is `float`.
 
-The `raw`, `glide`, `anchor`, or `velocity` dispatch metadata is not session
+The `raw`, `glide`, `anchor`, `anchor_clock`, or `velocity` dispatch metadata is not session
 state: the loaded plan carries it (`param_disciplines`).
 
 The engine environment also owns the native runtime handle and a DAC created
@@ -176,8 +176,8 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
 
 ### Control parameters
 
-- `set_param` — apply the loaded plan's declared `raw`, `glide`, `anchor`, or
-  `velocity` host discipline, then update the corresponding runtime slots
+- `set_param` — apply the loaded plan's declared `raw`, `glide`, `anchor`,
+  `anchor_clock`, or `velocity` host discipline, then update the corresponding runtime slots
   without relowering. Glide ramps and anchor/velocity rebasing are explicit
   closed-form companion-slot writes, not hidden per-sample state. This is the
   only public parameter-write method; discipline-specific method aliases are

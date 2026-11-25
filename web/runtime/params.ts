@@ -7,15 +7,20 @@
  * implements the two disciplines a param port declares on itself:
  *
  *   - `raw` (or no discipline): write the value.
- *   - `anchor`: a frequency whose phase is `inc·τ + φ`. Changing `inc` alone
- *     jumps the phase by `Δinc·τ`; the write bumps the `#phase` companion by
- *     exactly that jump, in the phasor's own quantized increments, so the
- *     waveform stays continuous at any τ.
+ *   - `anchor` / `anchor_clock`: a frequency whose phase is `inc·C + φ`, `C`
+ *     the clock the phasor reads (`anchor`: the frame clock; `anchor_clock`:
+ *     the master clock its `clock` names, refused at construction unless
+ *     that names a velocity param with an origin companion). Changing `inc`
+ *     alone jumps the phase by `Δinc·C`; the write bumps the `#phase`
+ *     companion by exactly that jump, in the kernel's own integer
+ *     arithmetic, so the waveform stays continuous.
  *
- * Anything else is refused by name. An integer param (an `i32`/`i64` word with
- * `frac_bits`) is written raw only: `anchor` re-anchors in float arithmetic,
- * and the compiler never attaches it to an integer port; a manifest that did
- * is refused here rather than written wrong, and so is a value outside an
+ * `glide` and `velocity` are known but not written here: a write to one is
+ * refused by name. A discipline outside the five is refused when the writer
+ * is built. An integer param (an `i32`/`i64` word with `frac_bits`) is
+ * written raw only: an anchor's `#phase` companion is an f64 slot, and the
+ * compiler never attaches the discipline to an integer port; a manifest
+ * that did is refused here rather than written wrong, and so is a value outside an
  * integer param's format (its word would saturate). An `f32` param (a
  * binary32 artifact) is likewise written raw only, and a value past the
  * binary32 range is refused rather than written as an infinity. A glide's discipline is declared on a base
@@ -27,14 +32,48 @@ import type { KernelManifest, KernelPort } from './manifest.js'
 import { isWordPort, kernelParams, paramRangeError } from './manifest.js'
 import type { WasmKernel } from './kernel.js'
 
-type PortDiscipline = { discipline: string; companions?: string[] }
+type PortDiscipline = { discipline: string; companions?: string[]; clock?: string }
+
+const KNOWN_DISCIPLINES = ['raw', 'glide', 'anchor', 'anchor_clock', 'velocity']
 
 const TWO_POW_32 = 4294967296
-const TWO_POW_32N = 4294967296n
+const MASK32 = 0xffffffffn
+
+/** The kernel's f64 → i64 conversion (`fptosi.sat`): truncate, saturate. */
+function truncI64(x: number): bigint {
+  if (Number.isNaN(x)) return 0n
+  if (x >= 9223372036854775808) return (1n << 63n) - 1n
+  if (x < -9223372036854775808) return -(1n << 63n)
+  return BigInt(Math.trunc(x))
+}
+
+/** The signed i64 representative of `x` mod 2⁶⁴. */
+function wrapI64(x: bigint): bigint {
+  return BigInt.asIntN(64, x)
+}
 
 /** The phasor increment the kernel computes: `trunc(f·2³²/rate)`. */
 function phaseIncrement(freq: number, rate: number): bigint {
-  return BigInt(Math.trunc((freq * TWO_POW_32) / rate))
+  return truncI64((freq * TWO_POW_32) / rate)
+}
+
+/** `⌊scale·clk/2³²⌋` mod 2⁶⁴, the kernel's `scaleClockQ`. The kernel wraps
+ *  each product to 64 bits before it shifts; these BigInt products are
+ *  unbounded and only the sum is wrapped. `clk` here is a frame clock: its
+ *  low 16 bits are zero, so `pLoLo` is zero, and the two forms differ by at
+ *  most a multiple of 2⁴⁸ (a 2⁶⁴ wrap of `scale·(lo >> 16)`, shifted by 16).
+ *  The phase reads the clock mod 2⁴⁸ (`phaseQ32`), so the bump is the same. */
+function scaleClockQ(scale: bigint, clk: bigint): bigint {
+  const hi = clk >> 32n
+  const lo = clk & MASK32
+  const pLoLo = (scale * (lo & 0xffffn)) >> 16n
+  const pLo = (scale * (lo >> 16n) + pLoLo) >> 16n
+  return wrapI64(scale * hi + pLo)
+}
+
+/** The phasor's phase on ℤ/2³² before its offset: `⌊inc·clk/2¹⁶⌋ mod 2³²`. */
+function phaseQ32(inc: bigint, clk: bigint): bigint {
+  return (inc * (clk >> 16n) + ((inc * (clk & 0xffffn)) >> 16n)) & MASK32
 }
 
 export class ParamWriter {
@@ -53,6 +92,18 @@ export class ParamWriter {
       const d = (port as { discipline?: PortDiscipline }).discipline
       if (d) this.disciplines.set(port.name, d)
     })
+    for (const [name, d] of this.disciplines) {
+      if (!KNOWN_DISCIPLINES.includes(d.discipline))
+        throw new RangeError(`param '${name}' has the unknown discipline '${d.discipline}'`)
+      if ((d.discipline === 'anchor_clock') !== (d.clock !== undefined))
+        throw new RangeError(`param '${name}': a clock is declared exactly on an anchor_clock discipline`)
+      if (d.discipline !== 'anchor_clock') continue
+      const v = typeof d.clock === 'string' ? this.disciplines.get(`param:${d.clock}`) : undefined
+      const origin = v?.companions?.[0]
+      if (v?.discipline !== 'velocity' || !this.index.has(`param:${d.clock}`)
+          || origin === undefined || !this.index.has(`param:${origin}`))
+        throw new RangeError(`param '${name}': anchor clock '${d.clock}' is not a velocity param with an origin companion in this kernel`)
+    }
   }
 
   /** The disciplines this writer can apply to `name` (a `param:` slot name),
@@ -67,9 +118,10 @@ export class ParamWriter {
     if (d !== 'raw' && this.binary32.has(name))
       return `param '${name}' is f32; discipline '${d}' is not defined on it (a binary32 artifact's params are written raw)`
     const companion = this.disciplines.get(name)?.companions?.[0]
-    if (d === 'anchor' && companion !== undefined && this.words.has(`param:${companion}`))
+    const anchored = d === 'anchor' || d === 'anchor_clock'
+    if (anchored && companion !== undefined && this.words.has(`param:${companion}`))
       return `param '${name}': its anchor companion is an integer word; anchor is not defined on it`
-    if (d !== 'raw' && d !== 'anchor')
+    if (d !== 'raw' && !anchored)
       return `param '${name}' has discipline '${d}'; the player writes raw and anchor params only`
     return null
   }
@@ -83,19 +135,38 @@ export class ParamWriter {
     const range = paramRangeError(this.ports[j]!, value)
     if (range) throw new RangeError(`param '${name}': ${range}`)
     const d = this.disciplines.get(name)
-    if (d?.discipline === 'anchor') {
+    if (d?.discipline === 'anchor' || d?.discipline === 'anchor_clock') {
       const companion = d.companions?.[0]
       const k = companion === undefined ? undefined : this.index.get(`param:${companion}`)
       if (k !== undefined) {
-        // φ is a multiple of 2⁻³² in [0, 1): keep it on that grid, exactly.
-        const inc0 = phaseIncrement(kernel.getParam(j), this.manifest.rate)
-        const inc1 = phaseIncrement(value, this.manifest.rate)
-        const phase = BigInt(Math.round(kernel.getParam(k) * TWO_POW_32))
-        const bumped = (((phase + (inc0 - inc1) * BigInt(now)) % TWO_POW_32N) + TWO_POW_32N) % TWO_POW_32N
+        // off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C) on ℤ/2³², exactly; φ stays a
+        // multiple of 2⁻³² in [0, 1).
+        const rate = this.manifest.rate
+        const clk = this.clockAt(kernel, d.discipline === 'anchor_clock' ? d.clock : undefined, now)
+        const inc0 = phaseIncrement(kernel.getParam(j), rate)
+        const inc1 = phaseIncrement(value, rate)
+        const phase = truncI64(kernel.getParam(k) * TWO_POW_32)
+        const bumped = (phase + phaseQ32(inc0, clk) - phaseQ32(inc1, clk)) & MASK32
         kernel.setParam(k, Number(bumped) / TWO_POW_32)
       }
       // A missing companion degrades to raw (host-param-dispatch.md, `anchor`).
     }
     kernel.setParam(j, value)
+  }
+
+  /** The Q48.16 clock an anchored phasor reads at frame `now`: the frame
+   *  clock, or the master clock `trunc(tau_base·rate·2¹⁶) +
+   *  scaleClockQ(trunc(velocity·2³²), now·2¹⁶)` when `clock` names the
+   *  velocity param (its velocity discipline names the origin). */
+  private clockAt(kernel: WasmKernel, clock: string | undefined, now: number): bigint {
+    const frame = wrapI64(BigInt(now) << 16n)
+    if (clock === undefined) return frame
+    // Resolved at construction: a velocity param with an origin companion.
+    const velocityName = `param:${clock}`
+    const vi = this.index.get(velocityName)!
+    const ti = this.index.get(`param:${this.disciplines.get(velocityName)!.companions![0]}`)!
+    const originQ = truncI64(kernel.getParam(ti) * this.manifest.rate * 65536)
+    const velocityQ = truncI64(kernel.getParam(vi) * TWO_POW_32)
+    return wrapI64(originQ + scaleClockQ(velocityQ, frame))
   }
 }

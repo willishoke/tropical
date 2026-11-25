@@ -258,13 +258,15 @@ Options parse_options(int argc, char ** argv)
     throw std::runtime_error(
       "--dac writes require --write-stop-at before the final checkpoint");
   const std::array<std::string, 4> required_disciplines = {
-    "raw", "glide", "anchor", "velocity"
+    "raw", "glide", "anchor_clock", "velocity"
   };
+  // Plain `anchor` (the sample clock) is as legal as `anchor_clock`.
   for (const auto & event : o.param_events)
-    if (std::find(required_disciplines.begin(), required_disciplines.end(),
-                  event.discipline) == required_disciplines.end())
+    if (event.discipline != "anchor"
+        && std::find(required_disciplines.begin(), required_disciplines.end(),
+                     event.discipline) == required_disciplines.end())
       throw std::runtime_error(
-        "--param-event discipline must be raw/glide/anchor/velocity");
+        "--param-event discipline must be raw/glide/anchor/anchor_clock/velocity");
   if (o.dac)
   {
     if (!o.reference_slot || o.write_every == 0 || !o.write_stop_at
@@ -274,16 +276,18 @@ Options parse_options(int argc, char ** argv)
         "--write-stop-at, --jump-at, and --reload-at");
     if (o.param_events.size() != required_disciplines.size())
       throw std::runtime_error(
-        "--dac qualification requires exactly one raw, glide, anchor, "
-        "and velocity --param-event");
+        "--dac qualification requires exactly one raw, glide, anchor or "
+        "anchor_clock, and velocity --param-event");
     for (const auto & required : required_disciplines)
       if (std::count_if(
             o.param_events.begin(), o.param_events.end(),
             [&](const ParamEvent & event) {
-              return event.discipline == required;
+              return event.discipline == required
+                || (required == "anchor_clock" && event.discipline == "anchor");
             }) != 1)
         throw std::runtime_error(
-          "--dac qualification requires exactly one " + required
+          "--dac qualification requires exactly one "
+          + (required == "anchor_clock" ? std::string{"anchor or anchor_clock"} : required)
           + " --param-event");
     const uint64_t expected_blocks = std::max<uint64_t>(
       1, static_cast<uint64_t>(o.duration_seconds * o.rate / o.buffer));

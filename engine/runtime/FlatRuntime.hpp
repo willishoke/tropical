@@ -53,6 +53,7 @@ struct ParamDiscipline
   std::string              discipline;       // raw | glide | anchor | velocity
   double                   glide_dur_sec = 0.0;
   std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
+  std::string              clock;            // anchor: the velocity param of the phasor's clock (empty: the sample clock)
 };
 
 struct ParamDispatchResult

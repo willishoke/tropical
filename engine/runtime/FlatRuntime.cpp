@@ -76,6 +76,56 @@ double signed_sample_delta(uint64_t now, uint64_t then)
     : -static_cast<double>(then - now);
 }
 
+// The kernel's f64 → i64 conversion (`llvm.fptosi.sat.i64.f64`): truncate
+// toward zero, saturate, NaN → 0.
+int64_t trunc_sat_i64(double x)
+{
+  if (std::isnan(x)) return 0;
+  if (x >= 9223372036854775808.0) return std::numeric_limits<int64_t>::max();
+  if (x < -9223372036854775808.0) return std::numeric_limits<int64_t>::min();
+  return static_cast<int64_t>(x);
+}
+
+// The kernel's i64 multiply: it wraps modulo 2⁶⁴ (the emitted `mul` carries
+// no `nsw`). Signed overflow is undefined in C++, so the product is taken on
+// unsigned words and read back as the two's-complement i64 (defined since
+// C++20).
+int64_t wrapping_mul(int64_t a, int64_t b)
+{
+  return static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
+}
+
+int64_t wrapping_add(int64_t a, int64_t b)
+{
+  return static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b));
+}
+
+// `⌊scale · clk / 2³²⌋` mod 2⁶⁴, op for op as the kernel's `scaleClockQ`
+// (lean/Tropical/EmitArrow/Numerics.lean): the clock split at bit 32 and
+// its low word at bit 16, every product wrapping, every `>>` arithmetic.
+int64_t scale_clock_q(int64_t scale, int64_t clk)
+{
+  const int64_t hi = clk >> 32;
+  const int64_t lo = clk & INT64_C(0xffffffff);
+  const int64_t lo_hi = lo >> 16;
+  const int64_t lo_lo = lo & INT64_C(0xffff);
+  const int64_t p_hi = wrapping_mul(scale, hi);
+  const int64_t p_lo_lo = wrapping_mul(scale, lo_lo) >> 16;
+  const int64_t p_lo = wrapping_add(wrapping_mul(scale, lo_hi), p_lo_lo) >> 16;
+  return wrapping_add(p_hi, p_lo);
+}
+
+// The phasor's phase on ℤ/2³² before its offset, `⌊inc · clk / 2¹⁶⌋ mod
+// 2³²`, op for op as the oscillators compute it (`FixedSinOsc`,
+// `phasorPhaseSig`): both products wrap, the fraction's is shifted
+// arithmetically, the sum is masked to its low word.
+uint64_t phasor_phase_q32(int64_t inc, int64_t clk)
+{
+  const int64_t whole = wrapping_mul(inc, clk >> 16);
+  const int64_t frac = wrapping_mul(inc, clk & INT64_C(0xffff)) >> 16;
+  return static_cast<uint64_t>(wrapping_add(whole, frac)) & UINT64_C(0xffffffff);
+}
+
 std::shared_ptr<const ObservationProgramImage>
 make_observation_program_image(
   const KernelState & state, uint64_t program_version)
@@ -433,7 +483,7 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
   new_state.param_disciplines.reserve(parsed.param_disciplines.size());
   for (const auto & d : parsed.param_disciplines)
     new_state.param_disciplines.push_back(
-      { d.name, d.discipline, d.glide_dur_sec, d.companions });
+      { d.name, d.discipline, d.glide_dur_sec, d.companions, d.clock });
 
   // Host-side scratch exists only for the Metal pre-pass; the JIT kernel
   // allocates its own. Sized anyway: it is tiny and keeps the load path
@@ -1111,8 +1161,8 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   const double now = static_cast<double>(sample_index);
 
   // An integer or binary32 param is written raw: every other discipline
-  // re-anchors in float arithmetic on f64 companions (sample counts among
-  // them), and the compiler refuses to attach one to a typed port, as its
+  // reads and writes f64 companions (sample counts and phases among them),
+  // and the compiler refuses to attach one to a typed port, as its
   // base or as a companion (`FlatPlan.portError?`), or to any param of a
   // binary32 artifact (`Kernel.ofPlan`; the web `ParamWriter` likewise).
   // Refuse here too, over every slot the discipline would touch: the base,
@@ -1125,7 +1175,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
       touched.insert(touched.end(), pd->companions.begin(), pd->companions.end());
     if (discipline == "glide")
       for (const char * suffix : {"#v0", "#v1", "#t0"}) touched.push_back(name + suffix);
-    else if (discipline == "anchor")
+    else if (discipline == "anchor" || discipline == "anchor_clock")
       touched.push_back(name + "#phase");
     for (const auto & slot_name : touched)
     {
@@ -1167,7 +1217,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     return commit();
   }
 
-  if (discipline == "anchor")
+  if (discipline == "anchor" || discipline == "anchor_clock")
   {
     const uint32_t fi = slot_of("param:" + name);
     if (fi == UINT32_MAX)
@@ -1178,13 +1228,42 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
       write(fi, value);
       return commit();
     }
-    const double inc0 =
-      std::floor(read(fi) * 4294967296.0 / state.sample_rate);
-    const double inc1 =
-      std::floor(value * 4294967296.0 / state.sample_rate);
-    const double dcyc = ((inc0 - inc1) * now) / 4294967296.0;
-    const double phase = read(pi) + dcyc;
-    write(pi, phase - std::floor(phase));
+    // The clock the phasor reads, at `now`, as the kernel computes it: the
+    // sample clock, or (`clock` names a velocity param) the master clock
+    // `trunc(tau_base·SR·2¹⁶) + scaleClockQ(trunc(velocity·2³²), now·2¹⁶)`.
+    int64_t clk = tropical_clock::clock_of_sample(sample_index);
+    if (discipline == "anchor_clock")
+    {
+      // The clock's slots come only from what the plan declares: `clock`
+      // names a param carrying the velocity discipline, whose companion is
+      // the origin. The parser refuses a plan where they do not resolve.
+      const ParamDiscipline * cd = state.find_discipline(pd->clock);
+      if (!cd || cd->discipline != "velocity" || cd->companions.empty())
+        return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
+          + "' is not a velocity param with an origin companion");
+      const uint32_t vi = slot_of("param:" + pd->clock);
+      const uint32_t ti = slot_of("param:" + cd->companions.front());
+      if (vi == UINT32_MAX || ti == UINT32_MAX)
+        return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
+          + "' has no velocity/origin slot");
+      const int64_t origin_q = trunc_sat_i64(
+        (read(ti) * state.sample_rate)
+          * static_cast<double>(INT64_C(1) << tropical_clock::kClockFracBits));
+      const int64_t velocity_q = trunc_sat_i64(read(vi) * 4294967296.0);
+      clk = wrapping_add(origin_q, scale_clock_q(velocity_q, clk));
+    }
+    // Exact on ℤ/2³²: off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C), with the
+    // kernel's own truncating conversions. off₁ is a multiple of 2⁻³² in
+    // [0, 1), which the f64 slot holds exactly.
+    const int64_t inc0 =
+      trunc_sat_i64((read(fi) * 4294967296.0) / state.sample_rate);
+    const int64_t inc1 =
+      trunc_sat_i64((value * 4294967296.0) / state.sample_rate);
+    const uint64_t off0 =
+      static_cast<uint64_t>(trunc_sat_i64(read(pi) * 4294967296.0));
+    const uint64_t off1 = (off0 + phasor_phase_q32(inc0, clk)
+      - phasor_phase_q32(inc1, clk)) & UINT64_C(0xffffffff);
+    write(pi, static_cast<double>(off1) / 4294967296.0);
     write(fi, value);
     return commit();
   }
