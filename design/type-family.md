@@ -52,7 +52,7 @@ it or derive the name from it. With the size in the name:
   family's own builder (`family.build "…8" 8`), so patches, goldens and the
   boot catalog do not move.
 - `SplineOscCatmullRom<K>` and `SplineOscBSpline<K>` (`design/spline-osc.md`,
-  sizes 1 to 64) are families too. A member derives its partial count from
+  sizes 2 to 16) are families too. A member derives its partial count from
   `K` and the registered error budget, so the size fixes more than the port
   list. No member is registered at boot.
 

@@ -15,59 +15,125 @@ from a declared error budget. One object sweeps from LFO rate to audio rate.
 
 ## The budget
 
-The budget is an error power relative to the in-band signal power, in dB:
-the output minus the ideal band-limited curve (every harmonic strictly
-below Nyquist, nothing else), over the ideal curve's AC power. It holds for
-every choice of control values.
+The budget bounds the error power relative to the in-band signal power, in
+dB. The error is the output minus the ideal band-limited curve: every
+harmonic strictly below Nyquist, nothing else. The in-band power is that
+curve's AC power. The bound holds for every control set and every
+fundamental, including rational ones (`f0 = fs·p/N`), where the aliases land
+on harmonic bins and add as amplitudes.
 
-That is possible because the harmonics split into classes. Harmonic `n` is
-`C[n mod K]·φ̂(n/K)/K`, so the class `n ≡ ±m (mod K)` scales as one
-`|C[m]|²`, and classes are orthogonal. Any control set's error ratio is a
-weighted mean of the class ratios, so the worst case over all controls is the
-worst class: `max_m (aliased power of class m) / (in-band power of class m)`,
-in units of `φ̂²`. Controls with all their power in one class
-(`c_j = cos(2πjm/K)`) reach it.
+The registered types use 60 dB (`splineOscBudgetDb`). The member name does
+not carry the budget, so changing that constant changes the band and partial
+count of every existing `SplineOsc…<K>` instance. It is part of the
+families' contract, not a tuning knob. A second size in the name (budget as
+well as K) would need two-size families, which `Family.lean` does not have,
+and there is one budget in use. If a second budget is ever wanted, it should
+be a second family name.
+
+## In-band harmonics
+
+`M(f0) = ⌈Nyquist/|f0|⌉ − 1` is the number of harmonics strictly below
+Nyquist. The bound, the bank's trip count and the gates all use this. A
+harmonic exactly at Nyquist is not in band.
+
+## The bound (what is proved)
+
+Write `A_n = 2|F_n|` for harmonic `n`'s amplitude. At every sample, the
+cubic's error is the sum of the folded harmonics above `M`, so it is at most
+`Σ_{n>M} A_n`. Its mean power over any window is therefore at most
+`(Σ_{n>M} A_n)²`. This covers every coincidence of folded components,
+including those landing on DC. The in-band power is `Σ_{n≤M} A_n²/2`. That
+is exact over whole periods, and is the long-run mean otherwise.
+
+Harmonic `n` is `C[n mod K]·φ̂(n/K)/K`. Group the harmonics into classes
+`n ≡ ±m (mod K)`, each with one `|C[m]|`. Cauchy–Schwarz over the classes
+gives, for every control set,
+
+    error / in-band  ≤  B(M) = 2·Σ_m a_m(M)² / b_m(M)
+    a_m(M) = Σ_{n>M, n≡±m} |φ̂(n/K)|,   b_m(M) = Σ_{1≤n≤M, n≡±m} φ̂(n/K)²
+
+The sum runs over `m = 1 … ⌊K/2⌋`. `B(M) = ∞` while a class has no
+harmonic in band. The coupling of classes at rational `f0` (aliases of
+different classes landing on one bin) is inside the bound: the numerator
+adds every alias coherently.
+
+**How `B` is computed.** All of it is exact carrier or f64 `+ − × ÷`, with no
+libm (the `exact-corpse` gate):
+
+- **`φ̂(n/K)` for `n ≤ 4K`** is `kernelTransform`, the exact carrier.
+- **Beyond `4K`,** `φ̂` comes from the jump formula. A piecewise cubic with
+  knot jumps `J_k(x)` in its `k`-th derivative has, exactly,
+  `φ̂(ξ) = Σ_x Σ_k J_k(x)·e^{−iωx}/(iω)^{k+1}`, with `ω = 2πξ`. The jumps are
+  integers read off the matrix. `|Re| + |Im|` bounds the modulus.
+- **Past `N = 1024·K`,** the tail is bounded by
+  `Σ_k S_k·(K/6)^{k+1}/(k·N^k)`, with `S_k = Σ_x |J_k(x)|` and `2π > 6`.
+  This term is added to every class.
+- **Rounding.** The result is inflated by `1 + 2⁻³⁰` to cover the f64
+  rounding of the sums.
+
+**Refused bases.** A basis that is not continuous (`J_0 ≠ 0`; its alias
+does not converge), not even, or does not reproduce constants is refused.
+
+**Assumption.** The ideal curve is defined by `M(f0)` of the `f0` value.
+The kernel's increment truncates `f0·2³²/rate`, so the rendered frequency
+sits up to `rate/2³²` (≈ 10⁻⁵ Hz) below it. That changes which harmonic
+is "in band" only within that distance of a band boundary.
+
+The bound is not tight. At K = 8 the exact worst case found by the gate,
+an eigenvector over the AC control subspace at rational `f0`, sits several
+dB below `B`. Using the exact worst case would shrink the bank. That would
+need the eigenvalue maximised over all `f0`, and is not done.
 
 ## The band
 
-**Top edge, from the cubic.** With `M = ⌊Nyquist/|f0|⌋` harmonics in band,
-the cubic's aliased power in class `m` is the class total minus its first
-terms. The total has a closed form by Poisson summation over the kernel's
-autocorrelation `r_k = ∫φ(u)φ(u+k)du` (nonzero for `|k| ≤ 3`):
+The bank is exact above its bottom edge, so the mix's error is
+`(1 − w)·(cubic error)`. Its ratio is at most `(1 − w(f0))²·B(M(f0))`. The
+band is `[Nyquist/capacity, Nyquist/edge]`:
 
-    Σ_{j∈ℤ} φ̂(m/K + j)² = r_0 + 2·Σ_{k=1..3} r_k cos(2πkm/K)
+- **`capacity`** is the least `c` with `B(c − 1)` within budget. At the
+  bottom edge `w = 0` and `M = c − 1`. Below the band `M` is larger and `B`
+  smaller, so the cubic alone meets the budget at every lower `f0`.
+- **`edge`** is the least `e` (the widest band) for which
+  `(1 − w)²·B(m) ≤ budget` holds on every `m`-interval in the band. On the
+  interval where `M = m`, `f0 ∈ [Nyquist/(m+1), Nyquist/m)`. There `B` is
+  constant and `(1 − w)²` falls with `f0`, so the worst point is the left
+  end, `t = (c − m − 1)·e / ((m + 1)(c − e))`. Every `m` from `e` to
+  `c − 1` is checked at that point. `e = c − 1` always passes.
+- **Above the band** `w = 1` and the error is the bank's rounding.
 
-halved at `m = K/2`, where `±m` are one class. `r_k` is an exact integer
-over `420·scale²`, from the basis matrix, so this works for any even
-kernel. The in-band terms use `kernelTransform` (the exact carrier). `edge`
-is the least `M` at which every class meets the budget; the cubic then meets
-it for `|f0| ≤ Nyquist/edge`. The gate checks the closed-form class total
-against a brute-force sum (agreement to 4·10⁻¹⁵) and that `edge` is the
-least such `M`.
+So the budget holds at every `f0`, not only at the edges. `worstBound` on the
+band is the largest `(1 − w)²·B(m)` over the band.
 
-**Bottom edge, from the bank.** A bank of `capacity` partials holds every
-harmonic below Nyquist when `|f0| ≥ Nyquist/capacity`. So the band is
-`[Nyquist/capacity, Nyquist/edge]`, and it exists only if `capacity > edge`.
-A capacity at or below `edge` is refused at assemble ("no band meets the
-budget with this many partials"), as are a 0 dB budget and a budget past
-120 dB (the class tails are differences of f64 sums; past 10⁻¹² they are
-rounding).
+**Refused at assemble:** fewer than 2 controls (one control is a constant
+curve), a capacity below the least, a 0 dB budget, a budget past 120 dB,
+and a budget the phase rail's capacity cannot meet.
 
-**Capacity.** Default `2·edge`: an octave band. The capacity is the only
-free choice. A wider band costs more partials (the bank must reach lower);
-a narrower one makes the crossfade steeper in `f0` (see continuity). It is
-an argument of `splineOscBand`; the registered types use the default.
+**At `f0 = Nyquist/edge` exactly,** `t = 1` and `w = 1`. Harmonic `edge`
+sits at Nyquist and is not in band, so the bank trips `edge − 1` partials.
+**Whenever `t > 0`** (that is, `|f0| > Nyquist/capacity`), the trip count is
+at most `capacity − 1`.
 
-All of this is in fractions of Nyquist, so nothing depends on the rate.
+**K = 8, 60 dB, coherent bound.** The band in Hz scales with the rate.
 
-| K = 8, 60 dB | edge `M` | worst class at the edge | capacity | band at 48 kHz |
+| basis | capacity | edge | band at 48 kHz | band at 44.1 kHz |
 |---|---|---|---|---|
-| Catmull-Rom | 22 | −60.7 dB | 44 | 545–1091 Hz |
-| B-spline | 20 | −66.7 dB | 40 | 600–1200 Hz |
+| Catmull-Rom | 54 | 45 | 444–533 Hz | 408–490 Hz |
+| B-spline | 29 | 25 | 828–960 Hz | 760–882 Hz |
 
-(The B-spline's staircase jumps past −60 dB between `M = 19` and 20.) The
-edge scales with `K`: Catmull-Rom at 60 dB has `edge = 11, 22, 44, 177` for
-`K = 4, 8, 16, 64`; at 80 dB, `K = 8` needs `edge = 61`, at 100 dB 149.
+The bound is steep in `M`, so the widest band that meets it is narrow:
+about a fifth of an octave for Catmull-Rom. The first version of this note
+derived the band from an incoherent (power-sum) model, with 44 and 40
+partials. That model is wrong at rational `f0`: the Catmull-Rom cubic alone
+reaches −59.6 dB at `fs/58`.
+
+Other sizes, Catmull-Rom (B-spline):
+
+| K | capacity | edge |
+|---|---|---|
+| 2 | 8 (8) | 5 (5) |
+| 4 | 20 (15) | 17 (10) |
+| 16 | 124 (58) | 112 (53) |
+| 64 | 692 (291) | 647 (279) |
 
 ## The crossfade
 
@@ -75,20 +141,9 @@ edge scales with `K`: Catmull-Rom at 60 dB has `edge = 11, 22, 44, 177` for
     w = smoothstep(clamp(t, 0, 1))
     out = (1 − w)·cubic + w·bank
 
-`t` is 0 at the bottom edge and 1 at the top. `w` depends only on `f0`, which
-is uniform, so it is a per-call value, not per-sample work. Below the band
-`w = 0` exactly and the output is exactly the cubic; above it `w = 1` and the
-output is exactly the bank.
-
-Why the mix meets the budget: the cubic's error (alias, at non-harmonic
-frequencies) and the bank's (none above the bottom edge but rounding) are
-uncorrelated, so the mix's error power is at most
-`(1−w)²·A + w²·L ≤ max(A, L)`. Inside the band both are within budget.
-This is conservative: near the top of the band the cubic's weight is small,
-so the band could sit higher (fewer partials) for the same budget. Not done.
-
-The power sum assumes the aliased components do not land on each other,
-true for all but rational `fs/f0`; measured below on generic fundamentals.
+`w` depends only on `f0`, which is uniform, so it is computed once per call.
+Below the band `w = 0` exactly and the output is exactly the cubic; above
+it, `w = 1` and the output is exactly the bank.
 
 ## The bank's edge
 
@@ -106,35 +161,32 @@ the ideal curve takes.
 
 Below the band the bank's live trip count is 0, so its region runs no
 iteration. The plan's family region carries a live count over the capacity
-(`ReduceBegin` with a count argument, `loopCount = capacity`), the emitters
-trip `clamp(count, 0, loopCount)`, and the kernel's own count is 0 there: the
-`spline-osc-trip` gate asserts all three. The general way was already in the
-family (`liveCount`, trip-count-as-data); nothing in `Spectral.lean`
-changed.
+(`ReduceBegin` with a count argument, `loopCount = capacity`). The emitters
+trip `clamp(count, 0, loopCount)`, and the kernel's own count is 0 there.
+The `spline-osc-trip` gate asserts all three. Nothing in `Spectral.lean`
+changed: the general mechanism was already the family's `liveCount`.
 
-Above the band the cubic is still evaluated: the kernel has no branch, and
-its weight `1 − w` is 0. It is about 20 operations.
+Above the band the cubic is still evaluated, because the kernel has no
+branch; its weight `1 − w` is 0 there.
 
-Measured, `SplineOscCatmullRom8` on the JIT (44 partials, 512-frame
-blocks, wall clock on the dev machine, so only the ratios mean much):
+Measured on the JIT (wall clock on the dev machine, 512-frame blocks, the
+session's 44.1 kHz), so only the ratios mean much:
 
-| f0 | regime | partials run | ns per sample |
-|---|---|---|---|
-| 100 Hz | below the band | 0 | 2 |
-| 800 Hz | in the band | 29 | 107 |
-| 1500 Hz | above | 15 | 59 |
-| 5000 Hz | above | 4 | 22 |
+| type | f0 | regime | partials run | ns per sample |
+|---|---|---|---|---|
+| `SplineOscCatmullRom8` | 100 Hz | below the band | 0 | 1.9 |
+| `SplineOscCatmullRom8` | 412 Hz | bottom of the band | 53 | 203 |
+| `SplineOscCatmullRom8` | 450 Hz | in the band | 48 | 186 |
+| `SplineOscCatmullRom8` | 1500 Hz | above | 14 | 60 |
+| `SplineOscCatmullRom8` | 5000 Hz | above | 4 | 24 |
+| `SplineOscCatmullRom16` | 180 Hz | bottom of the band | 122 | 481 |
+| `SplineOscBSpline16` | 384 Hz | bottom of the band | 57 | 219 |
 
-About 3.5 ns per partial (a sine and a cosine on the fixed-point rail, a
-complex weight). The cubic costs about 2 ns, so evaluating it above the band
-is a few percent at most; skipping it would need a branch the kernel does
-not have.
-
-The capacity is 44 partials for Catmull-Rom at K = 8, not the 256 of the
-`SplineSpectrum*8` fixtures, and the bank never needs more: below the band
-the cubic plays. The 2 ns below the band is everything the kernel does per
-sample there, including whatever remains of the literal `φ̂` column
-(`design/spline-spectrum.md`, "Stage 0").
+About 3.5–4 ns per partial (a sine and a cosine on the fixed-point rail and
+a complex weight). The cubic costs about 2 ns, so evaluating it above the
+band costs a few percent at most. The worst case is the bottom of the band,
+where the bank runs `capacity − 1` partials. At K = 64 that would be 691
+partials, about 2.7 µs per sample, which is why the range stops at 16.
 
 ## Phase
 
@@ -165,46 +217,71 @@ from `τ = 2⁴⁰` and checks each step against the bound.
 
 The session supports this when the host writes `f0` with the `anchor`
 discipline and `phase` as its `#phase` companion. Patch-bay types do not
-declare disciplines; the playground does, per knob. A plain `set_param` on
-`f0` retunes without re-anchoring, so the phase jumps by
+declare disciplines yet; the playground does, per knob. Once patch-bay types
+can declare write disciplines, this type should declare `f0` anchored with
+`phase` as its `#phase` companion, and the controls `c0 …` raw. Until then a
+plain `set_param` on `f0` retunes without re-anchoring, so the phase jumps by
 `Φ(inc₁, C) − Φ(inc₀, C)`, as it does for every oscillator.
 
 ## What it supports and refuses
 
-- **Uniform fundamental only.** `f0` and `phase` must be constant within a
-  kernel call (`sigIsUniform`); anything else is refused at assemble with
-  the family's reason. The weight `w` and the trip count are per call.
-  Audio-rate FM of this oscillator's clock is refused; the time-domain
-  `PeriodicCatmullRom<K>` read by any phase is the object for that.
+- **Uniform fundamental.**
+  - **At assemble.** `splineOscSig` refuses an `f0` whose stage signature
+    reads τ or an instance output, with the family's reason.
+  - **Not refused in a patch.** A program input is uniform at assemble,
+    so the registered type itself accepts any wire. The patch bay has no
+    rate rule for program inputs: that rule (a frequency inlet accepts only
+    uniforms) lives in the playground's wiring layer
+    (`design/spectral-family.md` §3). An LFO wired into `f0` of
+    `SplineOsc…<K>` in a patch therefore compiles. It is outside this
+    object's contract: the weight, the trip count and the bound all assume
+    `f0` is constant within the call. The patch bay has no mechanism for a
+    registered type to refuse a non-uniform wire, so this is documented,
+    not refused.
+  - **Audio-rate FM.** For FM of the clock, use the time-domain
+    `PeriodicCatmullRom<K>` read by any phase.
 - **Clock warps.** `clk` is any clock; the bank reads it the way every
   family does.
 - **Negative fundamentals.** The phasor runs backward and both realizations
-  read the spline in reverse (`inc < 0`, the same integer rail); `w` and the
-  trip count use `|f0|`. Gated at −0.7 of the band and in WASM≡JIT.
-- **Zero.** The phase is frozen, the output is the cubic at that phase
+  read the spline in reverse (`inc < 0`, the same integer rail). `w` and the
+  trip count use `|f0|`.
+- **Zero.** The phase is frozen. The output is the cubic at that phase
   (`w = 0`, trip 0), which is also the ideal curve's value.
 - **No spectral envelope.** A `G(f, τ)` envelope cannot sit on the cubic, so
-  the oscillator is not a family to the term algebra. A filtered spline is
-  `SplineSpectrum` under an envelope.
-- **Live controls.** `c0 … c(K−1)` wired from `param:` slots are live: the
-  DFT and the cubic's table read the slots, no recompile.
+  the oscillator is not a family to the term algebra.
+- **Live controls.** `c0 … c(K−1)` wired from `param:` slots are live, with
+  no recompile.
+- **Sizes 2 to 16.** One control point is a constant curve. The bank grows
+  about linearly with `K`, so the range stops at 16 (see Cost).
 
 ## Measured
 
-`tropicaltest --spline-osc-only`, K = 8, 60 dB, 48 kHz:
+`tropicaltest --spline-osc-only`, K = 8, 60 dB:
 
-- **Budget (headline).** Worst error against the ideal band-limited curve
-  over 152 configurations (a 36-point log sweep 20 Hz–20 kHz per basis, and
-  each one-class control set at 10 points across each band), 8192 samples
-  each from τ = 2⁴⁰: **−68.7 dB** (Catmull-Rom, class 3, 655 Hz, w = 0.10).
-  The sweep with generic controls: −151 dB at 20 Hz, −99 dB at 214 Hz,
-  −82 dB at 470 Hz, −96 dB at 1036 Hz (Catmull-Rom); −179 dB (rounding) from
-  the top of the band up.
-- **Oracle.** 12 configurations against the f64 mix at τ near 0, 2⁴⁰,
-  2⁴⁷: worst error 0.51 of the sine rail's bound.
-- **Continuity.** 48 anchored retunes across the band: worst step
-  5.1·10⁻⁴ (Catmull-Rom, signal `Σ2|F_n|` 1.2) and 3.4·10⁻⁵ (B-spline), at
-  most 0.92 of the derived bound. A hard switch at the top edge could step
-  by 2.1·10⁻³ and 1.6·10⁻⁴.
-- **Trip count.** 0 at 0 Hz, below and at the bottom edge; 29 and 12 (CR)
-  inside and above; the region is `loopCount = 44` with a live count.
+- **Budget (headline).** The test compares the output against the ideal
+  band-limited curve over 96 configurations of 8192 samples each, starting
+  at τ = 2⁴⁰:
+  - a 36-point log sweep from 20 Hz to 20 kHz per basis, with generic
+    controls;
+  - the exact coherent worst cases at `rate·p/N` (`p ≤ 3`, at 48 and
+    44.1 kHz, four sub-sample grid phases). Each uses the worst control set:
+    the top eigenvector of the error Gram matrix over the in-band powers on
+    the AC subspace. The six worst per basis and rate are rendered.
+
+  The true worst is **−65.2 dB** (B-spline, 857.1 Hz = 48000/56, w = 0.13).
+  The model and the render agree to 0.01 dB.
+- **Anti-gate.** A band half an octave too high (Catmull-Rom, edge 16,
+  capacity 32) measures −57.5 dB at 48000/42 Hz, so the gate fails it. An
+  incoherent model passes that band.
+- **Derived bands.** For K = 4, 8, 16 and 64, both bases, the derived band
+  meets an independent coherent bound at every interval. The independent
+  bound uses the closed-form transforms, an explicit class test and its own
+  tail. Its capacity agrees exactly for K ≤ 16. At K = 64 Catmull-Rom it is
+  692 against an independent least of 690: the core's tail is looser.
+- **Jump formula.** Agrees with the closed-form transforms past `4K` to
+  5·10⁻¹³ relative.
+- **Oracle.** 12 configurations against the f64 mix at τ near 0, 2⁴⁰ and
+  2⁴⁷. The worst error is 0.41 of the sine rail's bound.
+- **Continuity.** 48 anchored retunes across the band. The worst step is
+  1.7·10⁻⁵ (Catmull-Rom) and 4·10⁻⁶ (B-spline), at most 0.97 of the derived
+  bound.

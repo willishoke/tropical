@@ -108,8 +108,14 @@ def resolveInstanceMeta (programName : String)
     let suggestion := match nearestMatch programName options with
       | some s => s!". Did you mean '{s}'?"
       | none => ""
+    -- The family list only when there is no suggestion and it fits the
+    -- envelope's 200 characters; `list_programs` always carries it.
+    let base := s!"Invalid {programParam}: {(Json.str (shownName programName)).compress}{noSize}"
+    let withFamilies := base ++ familiesHint st
+    let message := if suggestion.isEmpty && withFamilies.length ≤ 200 then withFamilies
+      else base ++ suggestion
     throwEnum .unknownProgram programParam (Json.str programName) options
-      (message := some s!"Invalid {programParam}: {(Json.str (shownName programName)).compress}{noSize}{familiesHint st}{suggestion}")
+      (message := some message)
   | some pm =>
     -- No generics: no program declares `type_params`, so `type_args` is always
     -- rejected. Return the concrete metadata + its resolved snapshot.

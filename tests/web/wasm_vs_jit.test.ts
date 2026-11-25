@@ -506,8 +506,8 @@ describe('wasm vs native JIT', () => {
   // realizations run), the band-limited bank above it. Same ports as the
   // band-limited fixtures plus `phase` and `clk`, left at their defaults.
   for (const [program, f0] of [
-    ['SplineOscCatmullRom8', 220], ['SplineOscCatmullRom8', 800], ['SplineOscCatmullRom8', 3100],
-    ['SplineOscBSpline8', 900], ['SplineOscBSpline8', -2500],
+    ['SplineOscCatmullRom8', 220], ['SplineOscCatmullRom8', 470], ['SplineOscCatmullRom8', 3100],
+    ['SplineOscBSpline8', 850], ['SplineOscBSpline8', -2500],
   ] as const) {
     test(`${program} at ${f0} Hz (spline oscillator) — WASM matches JIT`, async () => {
       const prog = splineSpectrumProgram(program, f0)

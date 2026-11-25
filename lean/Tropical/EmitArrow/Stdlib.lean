@@ -633,7 +633,10 @@ def periodicBSplineFamily : TypeFamily :=
   periodicSplineFamily "PeriodicBSpline" uniformBSplineBasis
 
 /-- The error budget of the registered spline oscillators, in dB below the
-    in-band power (`EmitArrow.SplineOsc`, `design/spline-osc.md`). -/
+    in-band power (`EmitArrow.SplineOsc`, `design/spline-osc.md`). It is part
+    of the families' contract: the member name does not carry it, so changing
+    it changes the band and partial count of every existing
+    `SplineOsc…<K>` instance. -/
 def splineOscBudgetDb : Nat := 60
 
 /-- A spline oscillator program (`splineOscSig`): inputs `f0` (Hz, uniform,
@@ -657,17 +660,19 @@ def splineOscProgram (arena : Arena) (name : String) (basis : SplineBasis) (k : 
         #[clockInDecl "clk" (← clockSig)]
       assigns := #[(.port ⟨0⟩, parts.out)] }
 
-/-- The size range of a spline oscillator family: the band's capacity grows
-    with `K` (about `2·edge`, and the edge scales with `K`), so the range
-    stops where the partial count is still a small bank. -/
-def splineOscSizes : Nat × Nat := (1, 64)
+/-- The size range of a spline oscillator family. One control point is a
+    constant curve with no harmonics, so the least is 2. The partial count
+    grows about linearly with `K` (Catmull-Rom: 54 at K = 8, 124 at 16, 692
+    at 64), so the range stops at 16, where the bank is still small
+    (`design/spline-osc.md`, "Cost"). -/
+def splineOscSizes : Nat × Nat := (2, 16)
 
 private def splineOscFamily (name : String) (basis : SplineBasis) : TypeFamily where
   name
   sizeMin := splineOscSizes.1
   sizeMax := splineOscSizes.2
   sizeMeaning := "control points"
-  ports := s!"inputs f0 (Hz, uniform), phase (cycles, uniform), c0 … c<size−1> (float control values, {basis.name} basis) and clk; output out (float), alias and loss within {splineOscBudgetDb} dB of the in-band power at every f0"
+  ports := s!"inputs f0 (Hz, uniform), phase (cycles, uniform), c0 … c<size−1> (float control values, {basis.name} basis) and clk; output out (float), its error at least {splineOscBudgetDb} dB below the in-band power at every f0"
   portsAt := fun k => k + 4
   build := fun member k arena _ => splineOscProgram arena member basis k
 
