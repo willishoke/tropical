@@ -490,6 +490,161 @@ def buildSinOscQ15 (arena : Arena)
       assigns := #[(.port ⟨0⟩, body)]
     }
 
+/-- `lcm(1, …, 15)`, the universal cycle of `ClockMultDivQ15` in master
+    cycles: every ratio `n/d` with `n, d ≤ 15` returns to its phase within it. -/
+def universalCycle : Nat := 360360
+
+/-- Bit `b` of `universalCycle / d` for every `d ∈ [0, 15]` (0 at `d = 0`), as
+    a 16-bit truth table indexed by `d`. -/
+def universalCycleSlice (b : Nat) : Nat :=
+  (List.range 16).foldl (fun acc d =>
+    let v := if d == 0 then 0 else universalCycle / d
+    if v.testBit b then acc ||| (1 <<< d) else acc) 0
+
+/-- `universalCycle / d` for an `int32` `d` in `[0, 15]`, and 0 at `d = 0`: a
+    table of fifteen constants, read bit-sliced. Bit `b` of the entry is bit
+    `d` of the constant `universalCycleSlice b`, so the read is a shift by
+    `d`, a mask and an or per bit (19 bits), with no compare. A chain of
+    selects, or of compare masks (which LLVM turns back into selects), is a
+    branch per entry on a core without conditional execution, and the IR's
+    arrays hold floats. -/
+def universalCycleOver (d : Sig) : BuildM Sig := do
+  let mut acc ← litI32 0
+  let one ← litI32 1
+  for b in [0:19] do
+    let bit ← bitAnd (← rshift (← litI32 (universalCycleSlice b)) d) one
+    acc ← bitOr acc (← lshift bit (← lit b))
+  pure acc
+
+/-- The phase of the ratio `n/d` of the ring position `psi` (`ringPosition64`
+    with one wrap = `universalCycle` master cycles), in Q0.64 cycles:
+    `m·Ψ + offset·2³²` mod 2⁶⁴ with `m = n · (360360 / d)`. `n` and `d` are
+    `int32` words of which the low four bits are read; `offset` is an `int32`
+    Q0.32 word. `d = 0` gives `m = 0`, so the phase stays at the offset.
+    Returns the phase and the masked `d`. Every product is a 32-bit multiply
+    (`mulLoU32By64`), and the table read is bit-sliced, so the thumbv6m object
+    needs no libcall and no branch. -/
+def ratioRingPhase (psi n d offset : Sig) : BuildM (Sig × Sig) := do
+  let nibble ← litI32 15
+  let n ← bitAnd n nibble
+  let d ← bitAnd d nibble
+  let m ← mul n (← universalCycleOver d)
+  let phase ← add (← mulLoU32By64 m psi) (← lshift (← toIntE offset) (← lit 32))
+  pure (phase, d)
+
+/-- A four-output clock multiplier/divider with every output phase-locked to
+    the master exactly and forever. Output `i` runs at `nᵢ/dᵢ` of the master
+    frequency `freq` (an `int32` Q16.16 Hz word), with `nᵢ, dᵢ ∈ [0, 15]`
+    (`int32` words, of which the low four bits are read: a knob is a nibble,
+    so 16 reads as 0).
+
+    The master position is `Ψ ∈ ℤ/2⁶⁴`, one wrap of which is
+    `universalCycle = lcm(1..15)` master cycles (`hzQ16ToInc64`,
+    `ringPosition64`). Output `i`'s phase, in Q0.64 cycles, is
+    `mᵢ·Ψ + oᵢ·2³²` with `mᵢ = nᵢ · (360360 / dᵢ)`, an integer below 2²³:
+    the ring product needs no division and drops nothing, so the outputs keep
+    their ratios exactly, and at `Ψ ≡ 0` every output is at its offset. The
+    division `360360 / d` is a table of constants. `oᵢ` is a Q0.32 offset in
+    cycles.
+
+    `RatioClock` is one of these ratios with its phase on the `int` rail;
+    this program is the embedded fixture (`tests/fixtures/embedded_clock_mult_div.json`):
+    four ratios of one Ψ, with the outputs a Cortex-M0+ module drives.
+
+    Per output: `gate` (Q17.15: `1.0` for the first half of the cycle, else
+    0), `sine` (Q17.15, `fixedSinQ15Sig` of the phase's top word) and `phase`
+    (the top word, Q0.32). `d = 0` holds the gate and sine low. `n = 0` pins
+    the phase at the offset; a hardware module would hold the current value,
+    which needs state the kernel does not have.
+
+    All products are 32-bit multiplies (`mulLo64` and friends), so the
+    thumbv6m object needs no `__aeabi_lmul`, and the hold and the gate are
+    masks rather than selects, so the frame loop has no branch of its own. -/
+def buildClockMultDivQ15 (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let q15Out (name : String) : OutputDecl :=
+    { name, type? := some (.scalar .int32), fracBits := 15 }
+  let waves := [1, 2, 3, 4]
+  let outputs : Array OutputDecl :=
+    (waves.map fun i => q15Out s!"gate{i}").toArray ++
+    (waves.map fun i => q15Out s!"sine{i}").toArray ++
+    (waves.map fun i =>
+      ({ name := s!"phase{i}", type? := some (.scalar .int32), fracBits := 32 } :
+        OutputDecl)).toArray
+  assemble arena "ClockMultDivQ15" outputs #[] do
+    let clk ← inputRef ⟨0⟩
+    let freq ← inputRef ⟨1⟩
+    let inc ← hzQ16ToInc64 universalCycle freq
+    let psi ← ringPosition64 inc clk
+    let zero ← litI32 0
+    let nibble ← litI32 15
+    let shift32 ← lit 32
+    let mut gates : Array (OutputTarget × Sig) := #[]
+    let mut sines : Array (OutputTarget × Sig) := #[]
+    let mut phases : Array (OutputTarget × Sig) := #[]
+    for k in [0:4] do
+      let (phase, d) ← ratioRingPhase psi (← inputRef ⟨2 + k⟩) (← inputRef ⟨6 + k⟩)
+        (← inputRef ⟨10 + k⟩)
+      let top ← toInt32E (← rshift phase shift32)
+      -- all ones unless d = 0 (`d ∈ [0, 15]`)
+      let live ← sub zero (← rshift (← add d nibble) (← lit 4))
+      -- 32768 in the first half cycle (top word ≥ 0), else 0: the inverted
+      -- sign bit moved to bit 15 (a compare would be a branch on Thumb-1)
+      let firstHalf ← bitAnd (← rshift (← binary .bitXor top (← litI32 (-1))) (← lit 16))
+        (← litI32 32768)
+      let gate ← bitAnd firstHalf live
+      let sine ← bitAnd (← fixedSinQ15Sig top) live
+      gates := gates.push (.port ⟨k⟩, gate)
+      sines := sines.push (.port ⟨4 + k⟩, sine)
+      phases := phases.push (.port ⟨8 + k⟩, top)
+    let oneHz ← litI32 65536
+    let one ← litI32 1
+    let defaultClock ← clockSig
+    let word (name : String) (default : Sig) (fracBits : Nat := 0) : AInputDecl :=
+      { name, type? := some (.scalar .int32), defaultSig := some default, fracBits }
+    pure {
+      inputs := #[clockInDecl "clk" defaultClock, word "freq" oneHz 16] ++
+        (waves.map fun i => word s!"n{i}" one).toArray ++
+        (waves.map fun i => word s!"d{i}" one).toArray ++
+        (waves.map fun i => word s!"offset{i}" zero 32).toArray
+      assigns := gates ++ sines ++ phases }
+
+/-- A rational clock: the phase of `n/d` × the master frequency `freq`, on
+    the `int` phase rail (Q0.32, one cycle = 2³², the input every spline and
+    `FixedSin` read). `freq` is an `int32` Q16.16 Hz word; `n` and `d` are
+    `int32` words of which the low four bits are read (`n, d ∈ [0, 15]`);
+    `offset` is an `int32` Q0.32 offset in cycles.
+
+    The master position is `Ψ ∈ ℤ/2⁶⁴`, one wrap of which is
+    `lcm(1..15) = 360360` master cycles (`hzQ16ToInc64`, `ringPosition64`),
+    and the phase is the top word of `m·Ψ + offset·2³²` with
+    `m = n · (360360 / d)` (`ratioRingPhase`). Ψ depends on `clk` and `freq`
+    only, so every instance on the same clock and master frequency computes
+    the same Ψ, and any two of them are locked exactly and forever:
+    `nⱼ·dᵢ·(Pᵢ − oᵢ) = nᵢ·dⱼ·(Pⱼ − oⱼ)` on ℤ/2⁶⁴ (`ClockMultDivLaws.lock`), and
+    one wrap of Ψ returns every one to its offset. `d = 0` stops the clock at
+    its offset; so does `n = 0`. -/
+def buildRatioClock (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  assemble arena "RatioClock" #[{ name := "phase", type? := some (.scalar .int) }] #[] do
+    let clk ← inputRef ⟨0⟩
+    let freq ← inputRef ⟨1⟩
+    let psi ← ringPosition64 (← hzQ16ToInc64 universalCycle freq) clk
+    let (phase, _) ← ratioRingPhase psi (← inputRef ⟨2⟩) (← inputRef ⟨3⟩) (← inputRef ⟨4⟩)
+    let phaseQ ← bitAnd (← rshift phase (← lit 32)) (← lit 4294967295)
+    let oneHz ← litI32 65536
+    let one ← litI32 1
+    let zero ← litI32 0
+    let defaultClock ← clockSig
+    let word (name : String) (default : Sig) (fracBits : Nat := 0) : AInputDecl :=
+      { name, type? := some (.scalar .int32), defaultSig := some default, fracBits }
+    pure {
+      inputs := #[clockInDecl "clk" defaultClock, word "freq" oneHz 16, word "n" one,
+        word "d" one, word "offset" zero 32]
+      assigns := #[(.port ⟨0⟩, phaseQ)] }
+
 def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
@@ -680,7 +835,8 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("SinOscQ15", buildSinOscQ15),
   ("PeriodicCatmullRom8", buildPeriodicCatmullRom8),
   ("PeriodicBSpline8", buildPeriodicBSpline8),
-  ("PhaseClip", buildPhaseClip)]
+  ("PhaseClip", buildPhaseClip),
+  ("ClockMultDivQ15", buildClockMultDivQ15), ("RatioClock", buildRatioClock)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}

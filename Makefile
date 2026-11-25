@@ -66,7 +66,8 @@ validate: build lean
 	./lean/.lake/build/bin/tropicaltest
 	$(PYTHON) tools/embedded_object.py --check-only --diffcli ./lean/.lake/build/bin/diffcli \
 		--llvm-bin $(LLVM_DIR)/../../../bin --patch tests/fixtures/embedded_lfo.json \
-		--patch tests/fixtures/embedded_lfo_knob.json --out-dir $(BUILD_DIR)/embedded
+		--patch tests/fixtures/embedded_lfo_knob.json --patch tests/fixtures/embedded_clock_mult_div.json \
+		--out-dir $(BUILD_DIR)/embedded
 	TROPICAL_DIFFCLI=./lean/.lake/build/bin/diffcli TROPICAL_LLVM_BIN=$(LLVM_DIR)/../../../bin \
 		$(PYTHON) tools/test_embedded_object.py
 	$(PYTHON) tools/embedded_object.py --core m4f --check-only --diffcli ./lean/.lake/build/bin/diffcli \

@@ -47,6 +47,7 @@ import Tropical.Tropicaltest.SplineSpectrum
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
+import Tropical.Tropicaltest.ClockMultDiv
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -87,6 +88,8 @@ def main (args : List String) : IO UInt32 := do
     let b ← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals
     let c ← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine
     return if a && b && c then 0 else 1
+  if args.contains "--clock-mult-div-only" then
+    return if ← Tropical.Tropicaltest.ClockMultDiv.runAll then 0 else 1
   if args.contains "--float32-only" then
     let a ← Tropical.Tropicaltest.Float32.runLiterals
     let b ← Tropical.Tropicaltest.Float32.runRoundingFixture writeMode
@@ -355,6 +358,17 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsRefusals) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.TypedPorts.runTypedPortsEngine) then failed := failed + 1
+
+  -- ── (f⁗ᵃ) ClockMultDivQ15: the 64-bit ring against its big-integer model ──
+  IO.println "ratio clock (ClockMultDivQ15, RatioClock ≡ the ring model; RatioClock read by splines):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ClockMultDiv.runPhase) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ClockMultDiv.runGateSine) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ClockMultDiv.runRecurrence) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ClockMultDiv.runRatioSpline) then failed := failed + 1
 
   -- ── (f⁗′) The binary32 value lane (`--float f32`) ────────────────────────
   IO.println "binary32 value lane (--float f32):"

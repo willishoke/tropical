@@ -22,6 +22,8 @@ clock: its phase is any integer phase signal.
   the DDS phase rail that `FixedSin` and the families use. From a
   `ClockPhasor`, wire `toInt(phase · 2³²)`. In f64 that product is exact,
   because the phasor's output is a 32-bit integer over 2³².
+  A `RatioClock`'s `phase` is already on this rail and wires bare
+  (`design/ratio-clock.md`).
 - **Uniform knots, no search.** With `n` segments, `s = p · n` in `int`,
   `i = s >> 32` is exact on every target and `t = (s mod 2³²) / 2³²` is
   exact in f64, for every `n < 2³¹`. For a power-of-two `n` the multiply is
