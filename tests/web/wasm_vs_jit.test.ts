@@ -204,6 +204,32 @@ function splineSpectrumProgram(program: string, f0: number): ProgramFile {
   }
 }
 
+// Families on a ratio column (`design/spectral-family.md`, ratio columns): a
+// rational chord (`Λ = 60`, the shared 64-bit ring position and its wrapping
+// multiply) and an inharmonic bell (one increment per partial) under the
+// complex lowpass, its cutoff from the LFO.
+function spectralChordProgram(f0: number, phase: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spectral_chord',
+    body: { op: 'block', decls: [
+      { op: 'instanceDecl', name: 'chord', program: 'SpectralRatioChord', inputs: { f0, phase } },
+    ], assigns: [dacOut('chord', 'out')] },
+  }
+}
+
+function spectralBellProgram(f0: number, lfoHz: number, q: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spectral_bell',
+    body: { op: 'block', decls: [
+      { op: 'instanceDecl', name: 'lfo', program: 'ExpCutoffLfo', inputs: { c0: 1200, octaves: 2, rate: lfoHz } },
+      { op: 'instanceDecl', name: 'bell', program: 'SpectralBellLowpass', inputs: {
+        f0, cutoff: { op: 'ref', instance: 'lfo', output: 'out' }, q } },
+    ], assigns: [dacOut('bell', 'out')] },
+  }
+}
+
 // The int32 kernels: `FixedSinOscQ15` (int32 throughout, an int32 output),
 // `Int32Zoo` (every int32 op at runtime, seeded from the sample index's low
 // word; registered by `--fixtures`), and `Int32Zoo` with its int32 input wired
@@ -424,6 +450,28 @@ describe('wasm vs native JIT', () => {
     const N = 512
     const nat = runNative(wire, N)
     expectAudible('SpectralSaw', nat)
+    const wasm = await runWasm(prog, wire, N)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
+
+  test('SpectralRatioChord (rational column, Λ = 60) — WASM matches JIT', async () => {
+    const prog = spectralChordProgram(137.5, 0.125)
+    const wire = compileViaLean(prog)
+    const N = 512
+    const nat = runNative(wire, N)
+    expectAudible('SpectralRatioChord', nat)
+    const wasm = await runWasm(prog, wire, N)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
+
+  test('SpectralBellLowpass (free column, cutoff from a 5 Hz LFO) — WASM matches JIT', async () => {
+    const prog = spectralBellProgram(311.1, 5, 3)
+    const wire = compileViaLean(prog)
+    const N = 512
+    const nat = runNative(wire, N)
+    expectAudible('SpectralBellLowpass', nat)
     const wasm = await runWasm(prog, wire, N)
     expect(wasm.length).toBe(nat.length)
     for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)

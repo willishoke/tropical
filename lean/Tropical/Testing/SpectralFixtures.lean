@@ -18,6 +18,11 @@ except the family's static capacity (its topology).
   `q` (any signal), `clk`.
 * `ExpCutoffLfo` — `c0·2^(octaves·sin(2π·rate·τ))`, the cutoff modulator of
   the cost benchmark. Inputs: `c0`, `octaves`, `rate` (Hz), `clk`.
+* `SpectralRatioChord` — a family on the rational column `chordRatios`
+  (13 partials, `Λ = 60`), `1/k` weights. Inputs: `f0`, `phase`, `clk`.
+* `SpectralBellLowpass` — a family on the free (inharmonic) column
+  `bellRatios`, authored out of order, under a complex SVF lowpass. Inputs:
+  `f0`, `cutoff`, `q`, `clk`.
 
 `chirpCutoffSig` is the filter-FM listening set's cutoff path (built into the
 oracle gate's carrier directly, not registered).
@@ -93,6 +98,29 @@ def sawFamily (freq : Sig) (phase : Option Sig) (clk : Clock) (count : Nat)
     (wave : PartialWave := .sine) : BuildM PartialFamily := do
   pure { name := "saw", freq, phase, clk, count, weights := ← sawWeights count, wave }
 
+/-- A rational ratio column: 13 partials `n/d` whose denominators' lcm is
+    `Λ = 60`, so the bundle recurs every 60 fundamental cycles. -/
+def chordRatios : Array (Nat × Nat) := #[(1, 1), (5, 4), (3, 2), (5, 3), (9, 5), (2, 1),
+  (7, 3), (5, 2), (11, 4), (3, 1), (13, 4), (18, 5), (4, 1)]
+
+/-- An inharmonic column, after Risset's bell partials, authored out of
+    ascending order (the lowering sorts it), with its weights. -/
+def bellRatios : Array Float := #[2.74, 0.56, 4.07, 1.19, 3.0, 0.92, 2.0, 3.76, 1.7]
+def bellWeights : Array Float := #[0.33, 1.0, 0.33, 0.67, 0.29, 0.9, 0.5, 0.25, 0.6]
+
+/-- The chord family: `chordRatios` with weights `1/k` in authored order. -/
+def chordFamily (freq : Sig) (phase : Option Sig) (clk : Clock) :
+    BuildM PartialFamily := do
+  pure { name := "chord", freq, phase, clk, count := chordRatios.size,
+         weights := ← sawWeights chordRatios.size, ratios := .rational chordRatios }
+
+/-- The bell family: `bellRatios` with `bellWeights`. -/
+def bellFamily (freq : Sig) (clk : Clock) (wave : PartialWave := .sine) :
+    BuildM PartialFamily := do
+  let ws ← bellWeights.mapM litExact
+  pure { name := "bell", freq, clk, count := bellRatios.size, weights := .table ws,
+         ratios := .free bellRatios, wave }
+
 /-- `SpectralLowpassSaw`'s body: the 200-partial zero-phase cosine saw family
     under a complex SVF lowpass with cutoff and Q as signals. The playground
     equivalence gate builds the same body with literal inputs. -/
@@ -142,11 +170,36 @@ def buildExpCutoffLfo (arena : Arena) : Except String (Arena × ProgramIdx) :=
         ← clockIn "clk"]
       assigns := #[(.port ⟨0⟩, out)] }
 
+def buildSpectralRatioChord (arena : Arena) : Except String (Arena × ProgramIdx) :=
+  assemble arena "SpectralRatioChord" #[{ name := "out", type? := some (.scalar .float) }] #[] do
+    let f0 ← inputRef ⟨0⟩
+    let phase ← inputRef ⟨1⟩
+    let clk ← inputRef ⟨2⟩
+    let out ← emitTerm (.family (← chordFamily f0 (some phase) clk))
+    pure {
+      inputs := #[← floatIn "f0" 110, ← floatIn "phase" 0, ← clockIn "clk"]
+      assigns := #[(.port ⟨0⟩, out)] }
+
+def buildSpectralBellLowpass (arena : Arena) : Except String (Arena × ProgramIdx) :=
+  assemble arena "SpectralBellLowpass" #[{ name := "out", type? := some (.scalar .float) }] #[] do
+    let f0 ← inputRef ⟨0⟩
+    let cutoff ← inputRef ⟨1⟩
+    let q ← inputRef ⟨2⟩
+    let clk ← inputRef ⟨3⟩
+    let term := svfEnvelope .lowpass (.konst cutoff) (.konst q) (.family (← bellFamily f0 clk))
+    let out ← emitTerm (normalize term)
+    pure {
+      inputs := #[← floatIn "f0" 220, ← floatIn "cutoff" 800, ← floatIn "q" 2,
+        ← clockIn "clk"]
+      assigns := #[(.port ⟨0⟩, out)] }
+
 /-- The roster `--fixtures` registers, in order. -/
 def spectralFixtures : Array (String × (Arena → Except String (Arena × ProgramIdx))) := #[
   ("SpectralSaw", buildSpectralSaw),
   ("SpectralLowpassSaw", buildSpectralLowpassSaw),
-  ("ExpCutoffLfo", buildExpCutoffLfo)
+  ("ExpCutoffLfo", buildExpCutoffLfo),
+  ("SpectralRatioChord", buildSpectralRatioChord),
+  ("SpectralBellLowpass", buildSpectralBellLowpass)
   ]
 
 end Tropical.Testing.SpectralFixtures
