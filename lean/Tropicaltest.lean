@@ -39,6 +39,7 @@ import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
 import Tropical.Tropicaltest.Spline
+import Tropical.Tropicaltest.TypeFamily
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -122,7 +123,8 @@ def main (args : List String) : IO UInt32 := do
         return 1
     | .ok (arena, _) =>
         let (_, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
-        return if bad == 0 then 0 else 1
+        let (_, familyBad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
+        return if bad == 0 && familyBad == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
@@ -379,6 +381,12 @@ def main (args : List String) : IO UInt32 := do
       let (n, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
       total := total + n
       failed := failed + bad
+
+  -- ── (g″) Type families: a registered type at a size (Tropical/Family.lean) ──
+  IO.println "type families (spline members at K = 1 … 100, refusals, save/load):"
+  let (n, bad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
+  total := total + n
+  failed := failed + bad
 
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"

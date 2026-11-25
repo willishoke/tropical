@@ -115,7 +115,9 @@ arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  �
   │  PATCH BAY: `normalizeProgramFile` (lean/Tropical/Parse/Raise.lean,
   │  schema check + node/metadata split) → the session ingest
   │  (Session/Ingest.lean) walks the node directly — instances +
-  │  wiring + params of REGISTERED types. Ingest is the refusal site:
+  │  wiring + params of REGISTERED types (a type-family member,
+  │  `<family><size>`, is assembled and registered on first use —
+  │  Family.lean). Ingest is the refusal site:
   │  a programDecl (a program body over the wire) dies with the
   │  retirement message; wire expressions are a TYPED inductive
   │  (Tropical.WireExpr — the decoder is the refusal site; no
@@ -323,7 +325,7 @@ Three distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | read by `lean/Tropical/Parse/Raise.lean` + `Session/Ingest.lean`; written by `Engine/ProgramIO/Export.lean` | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
+| `tropical_program_2` | read by `lean/Tropical/Parse/Raise.lean` + `Session/Ingest.lean`; written by `Engine/ProgramIO/Export.lean` | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. An instance may name a type-family member, `<family><size>` (`PeriodicCatmullRom12`): ingest assembles it from the family's builder and registers it as an ordinary concrete type, so nothing past ingest sees a family (`lean/Tropical/Family.lean`, `design/type-family.md`). (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
 | `tropical_plan_7`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
 | `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with element type, `frac_bits` for an integer word, defaults and disciplines) and its output (element type, shape and channel names), rate, realization, with the `tropical_plan_7` plan nested for the gates. `tropicalc`, `diffcli compile-kernel` and `diffcli compile-object` write it; the C++ runtime and the web player read it. |
 

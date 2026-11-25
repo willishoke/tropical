@@ -585,11 +585,12 @@ def stdlibSplineControls : Nat := 8
 /-- A spline program (`splineSig`): an integer `phase` (Q0.32, one cycle is
     2³², the DDS phase rail; `toInt(phase · 2³²)` of a `ClockPhasor`) and
     `stdlibSplineControls` float control values `c0 …`, each live when wired
-    from a `param:` slot. Basis, boundary and K are fixed per program. -/
-private def splineProgram (arena : Arena) (name : String) (basis : SplineBasis)
-    (boundary : SplineBoundary) : Except String (Arena × ProgramIdx) :=
+    from a `param:` slot. Basis, boundary and K are fixed per program; the
+    periodic ones are also type families over K (`EmitArrow/Families.lean`). -/
+def splineProgram (arena : Arena) (name : String) (basis : SplineBasis)
+    (boundary : SplineBoundary) (k : Nat := stdlibSplineControls) :
+    Except String (Arena × ProgramIdx) :=
   assemble arena name #[floatOut] #[] do
-    let k := stdlibSplineControls
     let phase ← inputRef ⟨0⟩
     let controls ← (Array.range k).mapM fun j => inputRef ⟨j + 1⟩
     let body ← splineSig basis boundary controls phase

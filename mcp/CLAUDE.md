@@ -13,17 +13,18 @@ are deleted, and Lean implements them natively
 `Tropical/Frontend.lean`).
 
 What lives in this directory now is the **behavioral protocol suite** —
-two bun tests that run against the live Lean engine over its
+three bun tests that run against the live Lean engine over its
 JSON-RPC surface — plus this doc and `ERRORS.md`:
 
 ```
 errors.test.ts    Error-envelope protocol: codes, suggestions, retryability.
 wire_dac.test.ts  Wiring + dac-output protocol behavior.
+type_family.test.ts  Type-family members over the tools: add/list/save/load, refusals.
 CLAUDE.md         This file.
 ERRORS.md         The error-code catalog (mirrors Tropical/Errors.lean).
 ```
 
-Both suites are engine-agnostic: they speak the protocol via
+The suites are engine-agnostic: they speak the protocol via
 `TROPICAL_ENGINE_CMD`, which points at the Lean engine in `--rpc`
 mode. `make test-lean-engine` runs them against
 `lean/.lake/build/bin/frontend --rpc`.
@@ -92,6 +93,9 @@ tools read and mutate:
 - `programs` / `templateByName` — registered concrete program metadata and
   resolved roots. Populated by `Tropical.Stdlib` boot and
   `export_program`; loaded patch files cannot carry definitions.
+- `families` — registered type families (`Tropical/Family.lean`). The first
+  instance that names a member (`PeriodicCatmullRom12`) assembles it and
+  registers it in `programs` / `templateByName` under that name.
 - `instances` — ordered live instances with resolved type snapshots.
 - `wires` — typed `WireExpr` connections.
 - `graphOutputs` — what wires to dac.
@@ -121,7 +125,11 @@ surface language. The former `define_program` tool and its entire
 generics apparatus (`type_params` / `type_args`, monomorphization, the
 specialization cache) are gone; every registered program is concrete.
 
-- `add_instance` — instantiate a registered type by name. Validates
+- `add_instance` — instantiate a registered type by name, or a type-family
+  member by `<family><size>` (`PeriodicCatmullRom12`: ports `phase`,
+  `c0 … c11`). The member is assembled once per session and is then an
+  ordinary registered type (`design/type-family.md`). A family spelling that
+  names no member is refused with `invalid_value` (`ERRORS.md`). Validates
   uniqueness. Since no program declares `type_params`, passing
   `type_args` is always rejected with `invalid_type_args`.
 - `remove_instance` — delete an instance, cascade-clean wiring that
@@ -129,7 +137,9 @@ specialization cache) are gone; every registered program is concrete.
 - `replicate` — create N instances in one call (does not trigger
   recompile by itself; pair with `wire`).
 - `list_programs` — the registered concrete types with their ports and
-  input defaults.
+  input defaults, then one entry per type family with a `family`
+  descriptor (`member`, `size_min`, `size_max`, `size_meaning`, `ports`)
+  and empty port lists.
 - `list_instances` — live instances with their base type and ports.
 - `get_info` — detailed port / wiring info for one instance.
 
@@ -160,11 +170,15 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
   Optionally removes the exported instances. It builds the resolved IR
   **directly** off the session mirror — there is no JSON round-trip.
   This is the only tool that registers a new program type at runtime
-  (wire lifting registers anonymous `__wire_N` programs internally).
+  (wire lifting registers anonymous `__wire_N` programs internally, and
+  naming a type-family member registers that member). A family's name and
+  every `<family><size>` spelling are reserved: exporting under one is
+  refused with `invalid_value`.
 - `load` — `tropical_program_2` JSON (path or inline). Stops audio,
   recreates the session from the file's instances + wiring over
   already-registered programs. It is a PATCH BAY: instances, wiring,
-  and params of types that are **already registered**. A file carrying
+  and params of types that are **already registered** (or members of a
+  registered type family, assembled on first use). A file carrying
   an inline program definition (`programDecl`) is refused at ingest —
   program definitions over the wire are retired. To get a new type,
   either author it in Lean as an arrow builder (`Tropical.Stdlib` /

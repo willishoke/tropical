@@ -38,6 +38,7 @@ globs = [
   "Tropical.Errors",
   "Tropical.Exact.*",
   "Tropical.Expr",
+  "Tropical.Family",
   "Tropical.HostPort",
   "Tropical.Ir.+",
   "Tropical.Kernel",

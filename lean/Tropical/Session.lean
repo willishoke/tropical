@@ -4,6 +4,7 @@ import Tropical.Expr
 import Tropical.WireExpr
 import Tropical.Ir.Nodes
 import Tropical.Plan
+import Tropical.Family
 
 /-!
 # Session state — the authoritative graph topology
@@ -145,6 +146,10 @@ structure SessionSt where
       through this map. Distinct from `resolvedByName`, which is keyed by the
       decoded program's own name. -/
   templateByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
+  /-- The registered type families (`Tropical.Family`). A member is assembled
+      and registered under its own name the first time an instance names it
+      (`Session.resolveInstanceMeta`). -/
+  families : Array TypeFamily := #[]
 
 namespace SessionSt
 

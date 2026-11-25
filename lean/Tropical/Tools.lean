@@ -12,7 +12,8 @@ maps stay opaque `Json` (tropical leaves them untyped too).
 open Lean Turnstile
 
 tool_args AddInstance where
-  /-- Registered program/type name (builtin or user-defined). -/
+  /-- Registered program/type name (builtin or user-defined), or a type-family
+      member named by the family and its size, e.g. PeriodicCatmullRom12. -/
   program : String
   /-- Unique name for this instance. -/
   instance_name : String
@@ -26,7 +27,7 @@ tool_args RemoveInstance where
 deriving instance ToJson for RemoveInstance
 
 tool_args Replicate where
-  /-- Registered program type name. -/
+  /-- Registered program type name, or a type-family member (<family><size>). -/
   program : String
   /-- Number of instances to create. -/
   count : Nat where 1 ≤ count

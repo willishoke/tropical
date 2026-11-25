@@ -1,7 +1,8 @@
 # Uniform cubic spline read by a phase
 
 Date: 2026-11-24. Code: `lean/Tropical/EmitArrow/Spline.lean`. Gates:
-`lean/Tropical/Tropicaltest/Spline.lean` (`tropicaltest --spline-only`).
+`lean/Tropical/Tropicaltest/Spline.lean` and, for the families,
+`Tropicaltest/TypeFamily.lean` (`tropicaltest --spline-only`).
 
 A spline is a shape read by a phase. It is a function of one phase
 coordinate, not a parametric Bézier curve. At audio rate it is a
@@ -42,12 +43,14 @@ envelope. The spline owns no clock: its phase is any integer phase signal.
   at assemble time.
 - **No new IR node.** The spline is `arr` + `index` + integer and float
   arithmetic. No backend needs the spline as data.
-- **Registered set.** The patch bay has no structural arguments, so each
-  structural choice is a program type. There are four, at K = 8:
-  `PeriodicCatmullRom8`, `PhantomEndCatmullRom8`, `PeriodicBSpline8`,
-  `PhantomEndBSpline8`. Each has inputs `phase` (int, Q0.32) and `c0 … c7`
-  (float, live when wired from `param:` slots) and output `out`. Other K,
-  bases or boundaries are one `splineSig` call in a builder.
+- **Registered set.** The periodic splines are type families over K
+  (`design/type-family.md`): `PeriodicCatmullRom<K>` and
+  `PeriodicBSpline<K>`, `1 ≤ K ≤ 2³¹ − 1`, e.g. `PeriodicCatmullRom12`.
+  Each has inputs `phase` (int, Q0.32) and `c0 … c(K−1)` (float, live when
+  wired from `param:` slots) and output `out`. The size-8 members are also
+  registered at boot. The phantom-end splines are registered at K = 8 only:
+  `PhantomEndCatmullRom8`, `PhantomEndBSpline8`. Other bases or boundaries
+  are one `splineSig` call in a builder.
 
 ## Cost
 

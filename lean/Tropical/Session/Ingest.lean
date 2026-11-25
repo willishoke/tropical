@@ -1,4 +1,5 @@
 import Tropical.Session.Monad
+import Tropical.Session.Registry
 import Tropical.Parse.Raise
 
 /-!
@@ -33,10 +34,44 @@ def InstanceResolution.toInstanceInfo
   progMeta := resolved.programMeta
   resolvedIdx := resolved.resolvedIdx? }
 
+/-- The type families, for an unknown-type message: empty when there are
+    none. -/
+private def familiesHint (st : SessionSt) : String :=
+  if st.families.isEmpty then ""
+  else
+    let names := st.families.map fun f => s!"{f.name} ({f.rangeText})"
+    s!". Type families (name a member as <family><size>): {String.intercalate ", " names.toList}"
+
+/-- A type-family spelling that names no member (bare family name, size out
+    of range, leading zeros, or a size on a type that is not a family): its
+    refusal, in the ingest shape (`internal_error`) or the tool shape
+    (`invalid_value` on `program`; a range miss carries the range as a
+    predicate). -/
+private def refuseFamilySpelling (st : SessionSt) (programName programParam : String)
+    (toolEnvelopes : Bool) : SessionM Unit := do
+  let isRegistered := fun n => (st.programs.get? n).isSome
+  let some msg := familyRefusal st.families isRegistered programName
+    | pure ()
+  if !toolEnvelopes then internalError msg
+  match lookupFamily st.families programName with
+  | .outOfRange f size =>
+    throwPredicate .invalidValue programParam (Json.str programName)
+      s!"size of type family '{f.name}' in range"
+      (some (Json.mkObj [("min", toJson f.sizeMin), ("max", toJson f.sizeMax)]))
+      (some (toJson size)) (message := some msg)
+  | _ =>
+    throwBare .invalidValue msg (param := some programParam)
+      (value := some (Json.str programName))
+
 /-- Resolve a program name (+ optional type args) to instance metadata
     plus the typed-store snapshot for the resolved program. Concrete
     programs take the store's current mapping for the name; no program
     declares type parameters, so `type_args` must be absent or empty.
+
+    A name that is a type-family member (`PeriodicCatmullRom12`) and not yet
+    registered is assembled and registered first (`registerFamilyMember`),
+    then resolves like any concrete type. A family spelling that names no
+    member is refused (`refuseFamilySpelling`).
 
     `toolEnvelopes := false` selects the LOAD/MERGE ingest path's
     failure shape: a plain `internal_error` carrying the message
@@ -47,6 +82,11 @@ def resolveInstanceMeta (programName : String)
     (toolEnvelopes : Bool := true) :
     SessionM InstanceResolution := do
   let st ← get
+  if (st.programs.get? programName).isNone then
+    match lookupFamily st.families programName with
+    | .member f size => registerFamilyMember f size
+    | _ => refuseFamilySpelling st programName programParam toolEnvelopes
+  let st ← get
   match st.programs.get? programName with
   | none =>
     -- The options list is concrete names first, then every catalog name
@@ -55,9 +95,13 @@ def resolveInstanceMeta (programName : String)
       (st.programs.get? n).isSome
     if !toolEnvelopes then
       let known := String.intercalate ", " (concrete ++ st.catalogOrder).toList
-      internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}"
-    throwEnum .unknownProgram programParam (Json.str programName)
-      (concrete ++ st.catalogOrder)
+      internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}{familiesHint st}"
+    let options := concrete ++ st.catalogOrder
+    let suggestion := match nearestMatch programName options with
+      | some s => s!". Did you mean '{s}'?"
+      | none => ""
+    throwEnum .unknownProgram programParam (Json.str programName) options
+      (message := some s!"Invalid {programParam}: {(Json.str programName).compress}{suggestion}{familiesHint st}")
   | some pm =>
     -- No generics: no program declares `type_params`, so `type_args` is always
     -- rejected. Return the concrete metadata + its resolved snapshot.

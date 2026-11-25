@@ -176,6 +176,10 @@ def renderProgramCatalog (st : Tropical.SessionSt) : String := Id.run do
       lines := lines.push s!"Outputs: {outputsJoined}"
       lines := lines.push ""
     | none => continue
+  for f in st.families do
+    lines := lines.push s!"## {f.name}<size> (type family, sizes {f.rangeText})"
+    lines := lines.push f.ports
+    lines := lines.push ""
   return String.intercalate "\n" lines.toList
 
 /-- `readResourceText` by uri. -/

@@ -10,7 +10,9 @@ import Tropical.Stdlib
 `registerResolved` lands an already-resolved (arrow-builder or
 directly-constructed) program in the typed store: strata, adoption, entry
 rendering. `registerStdlib` is the boot chain, registering the
-`Tropical.EmitArrow.stdlibBuilders` in manifest order. The former raise →
+`Tropical.EmitArrow.stdlibBuilders` in manifest order, then records the
+stdlib's type families; `registerFamilyMember` registers a family member on
+first use. The former raise →
 elaborate path died with the elaborator (2026-07-26): programs are authored
 in Lean (arrow builders) or crystallized from a session by
 `export_program`'s direct construction; nothing registers from parsed JSON
@@ -109,6 +111,26 @@ def registerStdlib : SessionM Unit := do
       | .ok r => pure r
     let _ ← registerResolved name arena' rawIdx
     chain := chain.push (name, rawIdx)
+  let families := Tropical.EmitArrow.stdlibFamilies
+  let conflicts := familyConflicts families (← get).catalogOrder
+  if !conflicts.isEmpty then
+    internalError s!"stdlib type families: {String.intercalate "; " conflicts.toList}"
+  modify fun s => { s with families }
+
+/-- Assemble a type family's member at `size` and register it under its own
+    name (`TypeFamily.memberName`), exactly as a boot program is registered.
+    The member may instantiate any registered type, linked by name. After this
+    the member is an ordinary concrete type: nothing downstream knows it came
+    from a family. -/
+def registerFamilyMember (f : TypeFamily) (size : Nat) : SessionM Unit := do
+  let st ← get
+  let name := f.memberName size
+  let chain := st.catalogOrder.filterMap fun n =>
+    (st.templateByName.get? n).map (n, ·)
+  let (arena', rawIdx) ← match f.build name size st.arena chain with
+    | .error e => internalError s!"type family '{f.name}' at size {size}: {e}"
+    | .ok r => pure r
+  let _ ← registerResolved name arena' rawIdx
 
 /-- A fresh session holding the registered stdlib and nothing else: the
     state every compile starts from. -/

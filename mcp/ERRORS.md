@@ -155,6 +155,15 @@ ingest (`load` / `merge`) is the exception: a decode failure there is a
 property of the whole document, not of a named tool argument, so it
 keeps `internal_error` with the verbatim message.
 
+**Type-family spellings.** A `program` that spells a type family
+(`design/type-family.md`) but names no member is refused with
+`invalid_value` on `program`: the bare family name (needs a size), a size
+written with leading zeros, and a size on a type that is not a family are
+bare refusals; a size outside the family's range carries
+`valid: {kind: 'predicate', expected: {min, max}, got: size}`. A family
+name nobody registered is `unknown_program`, whose message lists the
+families. File ingest reports the same messages as `internal_error`.
+
 ## Suggestion computability
 
 | Code | Suggestion computed by |
