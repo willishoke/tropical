@@ -258,13 +258,13 @@ Options parse_options(int argc, char ** argv)
     throw std::runtime_error(
       "--dac writes require --write-stop-at before the final checkpoint");
   const std::array<std::string, 4> required_disciplines = {
-    "raw", "glide", "anchor", "velocity"
+    "raw", "glide", "anchor_clock", "velocity"
   };
   for (const auto & event : o.param_events)
     if (std::find(required_disciplines.begin(), required_disciplines.end(),
                   event.discipline) == required_disciplines.end())
       throw std::runtime_error(
-        "--param-event discipline must be raw/glide/anchor/velocity");
+        "--param-event discipline must be raw/glide/anchor_clock/velocity");
   if (o.dac)
   {
     if (!o.reference_slot || o.write_every == 0 || !o.write_stop_at
@@ -274,7 +274,7 @@ Options parse_options(int argc, char ** argv)
         "--write-stop-at, --jump-at, and --reload-at");
     if (o.param_events.size() != required_disciplines.size())
       throw std::runtime_error(
-        "--dac qualification requires exactly one raw, glide, anchor, "
+        "--dac qualification requires exactly one raw, glide, anchor_clock, "
         "and velocity --param-event");
     for (const auto & required : required_disciplines)
       if (std::count_if(

@@ -132,7 +132,7 @@ def passing_result() -> dict:
              "effective_sample_index": 1636},
             {"discipline": "glide", "observed_sample_index": 100,
              "effective_sample_index": 1636},
-            {"discipline": "anchor", "observed_sample_index": 100,
+            {"discipline": "anchor_clock", "observed_sample_index": 100,
              "effective_sample_index": 1636},
             {"discipline": "velocity", "observed_sample_index": 100,
              "effective_sample_index": 1636},
@@ -500,7 +500,7 @@ class AcceptanceGateTests(unittest.TestCase):
             "param_events": [
                 ("raw", "raw", 0.0, 1.0),
                 ("glide", "glide", 0.0, 1.0),
-                ("anchor", "anchor", 0.0, 1.0),
+                ("anchor_clock", "anchor", 0.0, 1.0),
                 ("velocity", "velocity", 0.0, 1.0),
             ],
             "canary_amplitude_bound": 1e-12,
@@ -540,7 +540,7 @@ class AcceptanceGateTests(unittest.TestCase):
             "param_events": [
                 ("raw", "raw", 0.0, 1.0),
                 ("glide", "glide", 0.0, 1.0),
-                ("anchor", "anchor", 0.0, 1.0),
+                ("anchor_clock", "anchor", 0.0, 1.0),
                 ("velocity", "velocity", 0.0, 1.0),
             ],
             "canary_amplitude_bound": 1e-12,
@@ -653,7 +653,7 @@ class LatencyProbeTests(unittest.TestCase):
             "ir": Path("k.ll"), "manifest": Path("m.json"),
             "coeff": Path("s.ll"), "msl": Path("k.metal"),
         }
-        args = RUN.latency_args(artifact, 128, "anchor")
+        args = RUN.latency_args(artifact, 128, "anchor_clock")
         # Without stage0.ll the Metal kernel renders silence.
         self.assertEqual(args[args.index("--coeff") + 1], "s.ll")
         self.assertEqual(args[args.index("--msl") + 1], "k.metal")

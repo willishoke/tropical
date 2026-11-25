@@ -566,7 +566,7 @@ def runManifestDisciplines (arena : Arena)
           issues := issues.push s!"{label}: glided {d.name} has a base slot (companions are the value)"
         if d.glideDurSec.isNone then
           issues := issues.push s!"{label}: glided {d.name} missing glide_dur_sec"
-      | "raw" | "anchor" | "velocity" =>
+      | "raw" | "anchor" | "anchor_clock" | "velocity" =>
         if !names.contains base then
           issues := issues.push s!"{label}: {d.discipline} {d.name} has no base slot"
       | other => issues := issues.push s!"{label}: unknown discipline {other}"

@@ -273,6 +273,7 @@ def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
 def ofPlan (plan : FlatPlan) (frames : Nat) (float : FloatFormat := .f64) :
     Except String KernelType := do
   if let some e := plan.portError? then throw s!"Kernel: {e}"
+  if let some e := plan.disciplineError? then throw s!"Kernel: {e}"
   if float == .f32 then
     if let some e := binary32DisciplineError? plan then throw s!"Kernel: {e}"
   let tau : Port :=
@@ -389,9 +390,12 @@ def Discipline.ofWire (j : Json) : Except String Discipline := do
   let glideDurSec := match j.getObjVal? "glide_dur_sec" with
     | .ok (.num n) => some n
     | _ => none
-  let clock := match j.getObjVal? "clock" with
-    | .ok (.str c) => some c
-    | _ => none
+  let clock ← match j.getObjVal? "clock" with
+    | .ok (.str c) => pure (some c)
+    | .error _ => pure none
+    | .ok _ => throw "Kernel.Discipline: clock must be a string"
+  if (discipline == "anchor_clock") != clock.isSome then
+    throw "Kernel.Discipline: a clock is declared exactly on an anchor_clock discipline"
   return { discipline, glideDurSec, companions := strArr j "companions", clock }
 
 def Port.ofWire (j : Json) : Except String Port := do

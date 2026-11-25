@@ -26,7 +26,7 @@ document is the intent and the code is the bug.
     "companions": ["sf.depth#v0", "sf.depth#v1", "sf.depth#t0",
       "sf.depth#t0#u0", "sf.depth#t0#u1",
       "sf.depth#t0#u2", "sf.depth#t0#u3"] },
-  { "name": "osc.freq", "discipline": "anchor",
+  { "name": "osc.freq", "discipline": "anchor_clock",
     "companions": ["osc.freq#phase"], "clock": "master.velocity" },
   { "name": "res.decay", "discipline": "raw" }
 ]
@@ -99,28 +99,54 @@ re-anchors the ramp so it departs from the CURRENT value (no jump):
 The base slot `param:<name>` is not written (glided knobs have no base slot;
 the companions are the value).
 
-## `anchor` — phase-anchored frequency
+## `anchor`, `anchor_clock` — phase-anchored frequency
 
 The oscillator's phase on ℤ/2³² is `Φ(inc, C) + off`, with
 `Φ(inc, C) = ⌊inc · C / 2¹⁶⌋ mod 2³²`, `C` the Q48.16 clock the phasor reads,
 `inc = trunc(f · 2³² / SR)` and `off = trunc(φ · 2³²)`. Changing `f` alone
 jumps the phase by `Φ(inc₁, C) − Φ(inc₀, C)` — a click that grows with `C`.
 The write moves the `#phase` companion by exactly that jump, in the kernel's
-own integer arithmetic (truncating conversions, wrapping products):
+own integer arithmetic (truncating conversions, products wrapping modulo
+2⁶⁴, arithmetic shifts):
 
-1. `C` = the clock at `now`. Without a `clock` field it is the sample clock
-   `now · 2¹⁶`. With `"clock": "<velocity param>"` it is the master clock
+1. `C` = the clock at `now`. For `anchor` it is the sample clock `now · 2¹⁶`.
+   For `anchor_clock` it is the master clock
    `trunc(tau_base · SR · 2¹⁶) + scaleClockQ(trunc(velocity · 2³²), now · 2¹⁶)`,
-   read from that param's slot and from its `velocity` discipline's origin
-   companion (`EmitArrow.scaleClockQ` is the exact product);
+   where `"clock"` names the velocity param and that param's `velocity`
+   discipline names the origin (`tau_base`) as its companion
+   (`EmitArrow.scaleClockQ` is the exact product);
 2. `off₁ = (off₀ + Φ(inc₀, C) − Φ(inc₁, C)) mod 2³²`;
 3. write `#phase := off₁ / 2³²` (a multiple of 2⁻³² in `[0, 1)`, exact in an
    f64 slot), then `param:<name> := target`.
 
-The phase is then bit-exactly continuous at `now`: the oscillator continues
-from its pre-write phase with the new increment
-(`tropicaltest --anchor-only` pins this in the rendered audio). If the
-`#phase` companion is absent from the loaded plan, degrade to `raw`.
+A `clock` appears exactly on an `anchor_clock`, and must name a param that
+carries the `velocity` discipline with an origin companion, both with slots
+in the plan. Every reader refuses a plan that breaks this at decode
+(`FlatPlan.disciplineError?`, the C++ plan parser, the web `ParamWriter`
+constructor), and refuses a discipline it does not know. The playground
+declares `anchor_clock` on every anchored knob; plain `anchor` keeps its
+sample-clock meaning.
+
+On the f64 lanes (the JIT and wasm) the phase is then bit-exactly continuous
+at `now`: the oscillator continues from its pre-write phase with the new
+increment. `tropicaltest --anchor-only` checks this in the rendered audio,
+against both an exact model of the kernel (lockstep reference) and the
+kernel itself (the first audible sample after the write equals the old
+oscillator's sample at `now`). Known exceptions:
+
+- Metal: slots reach the kernel as f32 and the increment is computed on the
+  f32 value path, so the host's f64 bump is not the kernel's; continuity
+  there is within the f32 tolerance, not bit-exact.
+- `harmonic` partials: partial `k` takes `⌊k·P / 2¹⁶⌋` of the fundamental's
+  phase with the clock's fraction bits kept (`EmitArrow.Spectral`), so when
+  the clock has fraction bits (velocity ≠ 1 or a fractional origin) partial
+  `k ≥ 2` can step by up to about `k` LSBs at the write. The fundamental is
+  exact.
+- Warped generators (`fm`, `delay`, `reverse`) read the source at a warped
+  clock: a re-tune rewrites the source's history, so a tap at shift `s`
+  steps by `Δinc·s`. That is the intended semantics.
+
+If the `#phase` companion is absent from the loaded plan, degrade to `raw`.
 
 A hot-swap does not carry `#phase`: the fresh plan seeds it with 0, so an
 oscillator retuned by anchored writes jumps at the next structural edit.

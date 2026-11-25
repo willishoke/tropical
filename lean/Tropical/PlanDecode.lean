@@ -167,9 +167,10 @@ private def disciplineOfWire (j : JsonV) : Except String ParamDiscipline := do
   let glideDurSec := match j.getField? "glide_dur_sec" with
     | some (.num n) => some n
     | _ => none
-  let clock := match j.getField? "clock" with
-    | some (.str c) => some c
-    | _ => none
+  let clock ← match j.getField? "clock" with
+    | some (.str c) => pure (some c)
+    | none => pure none
+    | some _ => throw s!"PlanDecode: param '{name}': anchor clock must be a string"
   pure { name, discipline, glideDurSec, companions := strArr j "companions", clock }
 
 /-- One `slot_types` entry (`SlotType.toWire`'s inverse). -/
@@ -227,6 +228,8 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     throw s!"PlanDecode: ill-kinded plan: {e}"
   if let some e := plan.portError? then
     throw s!"PlanDecode: ill-typed port: {e}"
+  if let some e := plan.disciplineError? then
+    throw s!"PlanDecode: {e}"
   pure plan
 
 /-- Parse a tropical_plan_7 JSON object into a `FlatPlan`. -/

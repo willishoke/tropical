@@ -31,7 +31,7 @@ MATRIX = ROOT / "benchmarks" / "current_baseline" / "fixtures" / "matrix.json"
 LATENCY_PARAMS = {
     "raw": ("probe.raw", 0.25, 0.75),
     "glide": ("probe.glide", 0.25, 0.75),
-    "anchor": ("probe.freq", 220.0, 440.0),
+    "anchor_clock": ("probe.freq", 220.0, 440.0),
     "velocity": ("master.velocity", 1.0, 0.75),
 }
 LATENCY_BUFFERS = (128, 256, 512)
@@ -482,7 +482,7 @@ def evaluate_acceptance(result: dict[str, Any],
             result.get("reload_artifacts_distinct") is True
             and "midpoint_after_hot_swap" in labels,
         "all_production_param_disciplines_exercised":
-            applied_disciplines == {"raw", "glide", "anchor", "velocity"},
+            applied_disciplines == {"raw", "glide", "anchor_clock", "velocity"},
         "all_param_dispatch_indices_recorded":
             bool(param_events)
             and all(
@@ -813,7 +813,7 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
     expected = {
         "raw": "bank.freq",
         "glide": "canary.morph",
-        "anchor": "canary.freq",
+        "anchor_clock": "canary.freq",
         "velocity": "master.velocity",
     }
     applied = {
@@ -849,7 +849,7 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
         "param_events": [
             ("raw", "bank.freq", 180.0, 260.0),
             ("glide", "canary.morph", 0.0, 0.5),
-            ("anchor", "canary.freq", 55.0, 65.0),
+            ("anchor_clock", "canary.freq", 55.0, 65.0),
             ("velocity", "master.velocity", 1.0, 0.75),
         ],
         "canary_amplitude_bound": 1e-12,

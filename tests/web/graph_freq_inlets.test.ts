@@ -236,7 +236,7 @@ describe('a knob wired straight into a freq inlet is anchored', () => {
       { id: 'q', kind: 'sine', in: { freq: ['k'] } },
       { id: 'h', kind: 'harmonic', in: { freq: ['k'] } },
       { id: 'm', kind: 'mix', in: { in: ['s', 'q', 'h'] } }], out: 'm' })
-    expect(JSON.stringify(straight.get('param:k.value'))).toContain('"anchor"')
+    expect(JSON.stringify(straight.get('param:k.value'))).toContain('"anchor_clock"')
     expect(JSON.stringify(straight.get('param:k.value'))).toContain('k.value#phase')
     expect(straight.has('param:k.value#phase')).toBe(true)
     const cone = disciplines({ nodes: [

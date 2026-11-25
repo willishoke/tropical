@@ -89,6 +89,18 @@ redefined source 0, so a Plan 6 document is refused).
   may be `i32` or `i64` and the output `i32`, each with `frac_bits`; τ also
   carries `frac_bits: 16`. A reader that predates them refuses those elements
   (the old C loader's "not a scalar f64 param"), never reinterprets them.
+- `anchor_clock` discipline (2026-11-24). An anchored frequency on the
+  master clock: `"clock"` names the velocity param, whose `velocity`
+  discipline names the origin. Plain `anchor` keeps its sample-clock meaning.
+  The new readers refuse an unknown discipline, a `clock` on anything but an
+  `anchor_clock`, and an `anchor_clock` whose clock is missing, not a string,
+  or not a velocity param with an origin companion, at decode
+  (`FlatPlan.disciplineError?`, `PlanDecode`, `Kernel.Discipline.ofWire`,
+  the C++ plan parser, the web `ParamWriter`). An older web player refuses
+  the write (it knows only `raw` and `anchor`). An older C++ host does not
+  refuse: it treats any unknown discipline as `raw`, so it writes the
+  frequency raw and the phase jumps. No spelling short of a schema bump makes
+  that host refuse; it ships with the compiler that emits the plan.
 
 ## Required rejection behavior
 

@@ -7,9 +7,10 @@
  * implements the two disciplines a param port declares on itself:
  *
  *   - `raw` (or no discipline): write the value.
- *   - `anchor`: a frequency whose phase is `inc·C + φ`, `C` the clock the
- *     phasor reads (the frame clock, or the master clock the discipline's
- *     `clock` names). Changing `inc` alone jumps the phase by `Δinc·C`; the
+ *   - `anchor` / `anchor_clock`: a frequency whose phase is `inc·C + φ`, `C`
+ *     the clock the phasor reads (`anchor`: the frame clock; `anchor_clock`:
+ *     the master clock its `clock` names, refused at construction unless
+ *     that names a velocity param with an origin companion). Changing `inc` alone jumps the phase by `Δinc·C`; the
  *     write bumps the `#phase` companion by exactly that jump, in the
  *     kernel's own integer arithmetic, so the waveform stays continuous.
  *
@@ -82,6 +83,16 @@ export class ParamWriter {
       const d = (port as { discipline?: PortDiscipline }).discipline
       if (d) this.disciplines.set(port.name, d)
     })
+    for (const [name, d] of this.disciplines) {
+      if ((d.discipline === 'anchor_clock') !== (d.clock !== undefined))
+        throw new RangeError(`param '${name}': a clock is declared exactly on an anchor_clock discipline`)
+      if (d.discipline !== 'anchor_clock') continue
+      const v = typeof d.clock === 'string' ? this.disciplines.get(`param:${d.clock}`) : undefined
+      const origin = v?.companions?.[0]
+      if (v?.discipline !== 'velocity' || !this.index.has(`param:${d.clock}`)
+          || origin === undefined || !this.index.has(`param:${origin}`))
+        throw new RangeError(`param '${name}': anchor clock '${d.clock}' is not a velocity param with an origin companion in this kernel`)
+    }
   }
 
   /** The disciplines this writer can apply to `name` (a `param:` slot name),
@@ -96,9 +107,10 @@ export class ParamWriter {
     if (d !== 'raw' && this.binary32.has(name))
       return `param '${name}' is f32; discipline '${d}' is not defined on it (a binary32 artifact's params are written raw)`
     const companion = this.disciplines.get(name)?.companions?.[0]
-    if (d === 'anchor' && companion !== undefined && this.words.has(`param:${companion}`))
+    const anchored = d === 'anchor' || d === 'anchor_clock'
+    if (anchored && companion !== undefined && this.words.has(`param:${companion}`))
       return `param '${name}': its anchor companion is an integer word; anchor is not defined on it`
-    if (d !== 'raw' && d !== 'anchor')
+    if (d !== 'raw' && !anchored)
       return `param '${name}' has discipline '${d}'; the player writes raw and anchor params only`
     return null
   }
@@ -112,14 +124,14 @@ export class ParamWriter {
     const range = paramRangeError(this.ports[j]!, value)
     if (range) throw new RangeError(`param '${name}': ${range}`)
     const d = this.disciplines.get(name)
-    if (d?.discipline === 'anchor') {
+    if (d?.discipline === 'anchor' || d?.discipline === 'anchor_clock') {
       const companion = d.companions?.[0]
       const k = companion === undefined ? undefined : this.index.get(`param:${companion}`)
       if (k !== undefined) {
         // off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C) on ℤ/2³², exactly; φ stays a
         // multiple of 2⁻³² in [0, 1).
         const rate = this.manifest.rate
-        const clk = this.clockAt(kernel, d.clock, now)
+        const clk = this.clockAt(kernel, d.discipline === 'anchor_clock' ? d.clock : undefined, now)
         const inc0 = phaseIncrement(kernel.getParam(j), rate)
         const inc1 = phaseIncrement(value, rate)
         const phase = truncI64(kernel.getParam(k) * TWO_POW_32)
@@ -138,12 +150,10 @@ export class ParamWriter {
   private clockAt(kernel: WasmKernel, clock: string | undefined, now: number): bigint {
     const frame = wrapI64(BigInt(now) << 16n)
     if (clock === undefined) return frame
+    // Resolved at construction: a velocity param with an origin companion.
     const velocityName = `param:${clock}`
-    const vi = this.index.get(velocityName)
-    const origin = this.disciplines.get(velocityName)?.companions?.[0]
-    const ti = origin === undefined ? undefined : this.index.get(`param:${origin}`)
-    if (vi === undefined || ti === undefined)
-      throw new RangeError(`anchor clock '${clock}' has no velocity/origin param in this kernel`)
+    const vi = this.index.get(velocityName)!
+    const ti = this.index.get(`param:${this.disciplines.get(velocityName)!.companions![0]}`)!
     const originQ = truncI64(kernel.getParam(ti) * this.manifest.rate * 65536)
     const velocityQ = truncI64(kernel.getParam(vi) * TWO_POW_32)
     return wrapI64(originQ + scaleClockQ(velocityQ, frame))

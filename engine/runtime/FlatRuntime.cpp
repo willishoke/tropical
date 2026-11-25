@@ -86,45 +86,44 @@ int64_t trunc_sat_i64(double x)
   return static_cast<int64_t>(x);
 }
 
-// `⌊scale · clk / 2³²⌋` mod 2⁶⁴, exactly as the kernel's `scaleClockQ`
+// The kernel's i64 multiply: it wraps modulo 2⁶⁴ (the emitted `mul` carries
+// no `nsw`). Signed overflow is undefined in C++, so the product is taken on
+// unsigned words and read back as the two's-complement i64 (defined since
+// C++20).
+int64_t wrapping_mul(int64_t a, int64_t b)
+{
+  return static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
+}
+
+int64_t wrapping_add(int64_t a, int64_t b)
+{
+  return static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b));
+}
+
+// `⌊scale · clk / 2³²⌋` mod 2⁶⁴, op for op as the kernel's `scaleClockQ`
 // (lean/Tropical/EmitArrow/Numerics.lean): the clock split at bit 32 and
-// its low word at bit 16, every `>>` arithmetic. The `scale · hi` product
-// wraps like every clock sum, so it is taken on unsigned words.
+// its low word at bit 16, every product wrapping, every `>>` arithmetic.
 int64_t scale_clock_q(int64_t scale, int64_t clk)
 {
   const int64_t hi = clk >> 32;
   const int64_t lo = clk & INT64_C(0xffffffff);
   const int64_t lo_hi = lo >> 16;
   const int64_t lo_lo = lo & INT64_C(0xffff);
-  const uint64_t p_hi =
-    static_cast<uint64_t>(scale) * static_cast<uint64_t>(hi);
-  const int64_t p_lo_lo = (scale * lo_lo) >> 16;
-  const int64_t p_lo = (scale * lo_hi + p_lo_lo) >> 16;
-  return static_cast<int64_t>(p_hi + static_cast<uint64_t>(p_lo));
+  const int64_t p_hi = wrapping_mul(scale, hi);
+  const int64_t p_lo_lo = wrapping_mul(scale, lo_lo) >> 16;
+  const int64_t p_lo = wrapping_add(wrapping_mul(scale, lo_hi), p_lo_lo) >> 16;
+  return wrapping_add(p_hi, p_lo);
 }
 
 // The phasor's phase on ℤ/2³² before its offset, `⌊inc · clk / 2¹⁶⌋ mod
-// 2³²`, as the oscillators compute it (`FixedSinOsc`, `phasorPhaseSig`):
-// `inc · (clk >> 16)` wraps (only its low word survives the mask), the
-// fraction's product `inc · (clk & 0xffff)` is exact.
+// 2³²`, op for op as the oscillators compute it (`FixedSinOsc`,
+// `phasorPhaseSig`): both products wrap, the fraction's is shifted
+// arithmetically, the sum is masked to its low word.
 uint64_t phasor_phase_q32(int64_t inc, int64_t clk)
 {
-  const uint64_t whole =
-    static_cast<uint64_t>(inc) * static_cast<uint64_t>(clk >> 16);
-  const int64_t frac = (inc * (clk & INT64_C(0xffff))) >> 16;
-  return (whole + static_cast<uint64_t>(frac)) & UINT64_C(0xffffffff);
-}
-
-// The origin (`tau_base`) slot a velocity param re-bases: its discipline's
-// companion, or by name.
-std::string velocity_origin_of(const KernelState & state, const std::string & velocity)
-{
-  if (const ParamDiscipline * pd = state.find_discipline(velocity))
-    if (!pd->companions.empty()) return pd->companions.front();
-  std::string tau = velocity;
-  const std::size_t pos = tau.find("velocity");
-  if (pos != std::string::npos) tau.replace(pos, 8, "tau_base");
-  return tau;
+  const int64_t whole = wrapping_mul(inc, clk >> 16);
+  const int64_t frac = wrapping_mul(inc, clk & INT64_C(0xffff)) >> 16;
+  return static_cast<uint64_t>(wrapping_add(whole, frac)) & UINT64_C(0xffffffff);
 }
 
 std::shared_ptr<const ObservationProgramImage>
@@ -1176,7 +1175,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
       touched.insert(touched.end(), pd->companions.begin(), pd->companions.end());
     if (discipline == "glide")
       for (const char * suffix : {"#v0", "#v1", "#t0"}) touched.push_back(name + suffix);
-    else if (discipline == "anchor")
+    else if (discipline == "anchor" || discipline == "anchor_clock")
       touched.push_back(name + "#phase");
     for (const auto & slot_name : touched)
     {
@@ -1218,7 +1217,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     return commit();
   }
 
-  if (discipline == "anchor")
+  if (discipline == "anchor" || discipline == "anchor_clock")
   {
     const uint32_t fi = slot_of("param:" + name);
     if (fi == UINT32_MAX)
@@ -1233,11 +1232,17 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     // sample clock, or (`clock` names a velocity param) the master clock
     // `trunc(tau_base·SR·2¹⁶) + scaleClockQ(trunc(velocity·2³²), now·2¹⁶)`.
     int64_t clk = tropical_clock::clock_of_sample(sample_index);
-    if (!pd->clock.empty())
+    if (discipline == "anchor_clock")
     {
+      // The clock's slots come only from what the plan declares: `clock`
+      // names a param carrying the velocity discipline, whose companion is
+      // the origin. The parser refuses a plan where they do not resolve.
+      const ParamDiscipline * cd = state.find_discipline(pd->clock);
+      if (!cd || cd->discipline != "velocity" || cd->companions.empty())
+        return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
+          + "' is not a velocity param with an origin companion");
       const uint32_t vi = slot_of("param:" + pd->clock);
-      const std::string origin = velocity_origin_of(state, pd->clock);
-      const uint32_t ti = slot_of("param:" + origin);
+      const uint32_t ti = slot_of("param:" + cd->companions.front());
       if (vi == UINT32_MAX || ti == UINT32_MAX)
         return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
           + "' has no velocity/origin slot");
@@ -1245,8 +1250,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
         (read(ti) * state.sample_rate)
           * static_cast<double>(INT64_C(1) << tropical_clock::kClockFracBits));
       const int64_t velocity_q = trunc_sat_i64(read(vi) * 4294967296.0);
-      clk = static_cast<int64_t>(static_cast<uint64_t>(origin_q)
-        + static_cast<uint64_t>(scale_clock_q(velocity_q, clk)));
+      clk = wrapping_add(origin_q, scale_clock_q(velocity_q, clk));
     }
     // Exact on ℤ/2³²: off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C), with the
     // kernel's own truncating conversions. off₁ is a multiple of 2⁻³² in
@@ -1269,7 +1273,14 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     const uint32_t vi = slot_of("param:" + name);
     if (vi == UINT32_MAX)
       return unknown();
-    const std::string tau = velocity_origin_of(state, name);
+    std::string tau;
+    if (!pd->companions.empty()) tau = pd->companions.front();
+    else
+    {
+      tau = name;
+      const std::size_t pos = tau.find("velocity");
+      if (pos != std::string::npos) tau.replace(pos, 8, "tau_base");
+    }
     const uint32_t ti = slot_of("param:" + tau);
     if (ti == UINT32_MAX)
       return fail("set_param: no origin slot '" + tau + "'");

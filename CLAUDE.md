@@ -12,8 +12,10 @@ edit click-free. Phase is `inc·C + φ` on the clock `C`, so a raw frequency
 write jumps it by `Δinc·C`; the `anchor` write discipline moves the
 `#phase` companion so the phase stays continuous
 (`design/host-param-dispatch.md`). A hot-swap starts every slot from the
-fresh plan's defaults, anchored offsets included, with no crossfade; and a
-warped tap steps by `Δinc·shift` on a re-tune, by design.
+fresh plan's defaults, anchored offsets included. The native runtime swaps
+with no crossfade (it fades only on device start, stop and switch); the web
+player fades the old patch out and the new one in at the splice. A warped
+tap steps by `Δinc·shift` on a re-tune, by design.
 
 ## Build
 

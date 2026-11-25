@@ -113,6 +113,17 @@ describe('ParamWriter', () => {
       expect(Object.is(after[0], before[0])).toBe(true)
       expect(after[1]).not.toBe(before[1])
     }
+    // A clock that is missing or names no velocity param is refused when the
+    // writer is built, never resolved at write time.
+    const withClock = (clock: string | undefined) => {
+      const m = structuredClone(manifest) as KernelManifest
+      const port = m.inputs.find((p) => p.name === 'param:osc.freq') as { discipline?: { clock?: string } }
+      if (clock === undefined) delete port.discipline!.clock
+      else port.discipline!.clock = clock
+      return m
+    }
+    expect(() => new ParamWriter(withClock(undefined))).toThrow(/exactly on an anchor_clock/)
+    expect(() => new ParamWriter(withClock('master.gain'))).toThrow(/not a velocity param/)
   })
 
   test('raw: the write is the value; companions and unimplemented disciplines are refused', async () => {

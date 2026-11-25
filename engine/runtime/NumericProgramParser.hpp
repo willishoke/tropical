@@ -472,12 +472,48 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
       pd.name       = d.value("name", std::string{});
       pd.discipline = d.value("discipline", std::string{"raw"});
       pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
-      pd.clock = d.value("clock", std::string{});
+      if (d.contains("clock"))
+      {
+        if (!d["clock"].is_string())
+          throw std::runtime_error(
+            "NumericProgramParser: param '" + pd.name + "': anchor clock must be a string");
+        pd.clock = d["clock"].get<std::string>();
+      }
       if (d.contains("companions"))
         for (const auto & c : d["companions"])
           pd.companions.push_back(c.get<std::string>());
       result.param_disciplines.push_back(std::move(pd));
     }
+  // A discipline this host does not know is refused, never written raw; a
+  // clock is declared exactly on an `anchor_clock`, and names a param that
+  // carries the velocity discipline, whose slot and origin companion's slot
+  // the plan has (host-param-dispatch.md, `anchor`).
+  for (const auto & pd : result.param_disciplines)
+  {
+    const std::string & k = pd.discipline;
+    if (k != "raw" && k != "glide" && k != "anchor" && k != "anchor_clock" && k != "velocity")
+      throw std::runtime_error(
+        "NumericProgramParser: param '" + pd.name + "' has the unknown discipline '" + k
+        + "' (this host knows raw, glide, anchor, anchor_clock and velocity)");
+    if ((k == "anchor_clock") != !pd.clock.empty())
+      throw std::runtime_error(
+        "NumericProgramParser: param '" + pd.name + "': "
+        + (k == "anchor_clock" ? "an anchor_clock discipline must name its clock"
+                               : "only an anchor_clock discipline declares a clock"));
+    if (k != "anchor_clock") continue;
+    auto has_slot = [&](const std::string & n) {
+      return std::find(result.slot_names.begin(), result.slot_names.end(), "param:" + n)
+        != result.slot_names.end();
+    };
+    const auto cd = std::find_if(
+      result.param_disciplines.begin(), result.param_disciplines.end(),
+      [&](const auto & e) { return e.name == pd.clock; });
+    if (cd == result.param_disciplines.end() || cd->discipline != "velocity"
+        || cd->companions.empty() || !has_slot(cd->name) || !has_slot(cd->companions.front()))
+      throw std::runtime_error(
+        "NumericProgramParser: param '" + pd.name + "': anchor clock '" + pd.clock
+        + "' is not a velocity param with an origin companion in this plan");
+  }
 
   if (plan.contains("coeff_array_slots"))
     for (const auto & s : plan["coeff_array_slots"])
