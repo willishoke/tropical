@@ -199,22 +199,35 @@ in-band harmonics `count + 1 … M`. At these pitches the cubic aliases far less
 than the bank drops. Closed form, K = 8, the alias gate's controls, 256
 partials, in dB relative to the in-band power:
 
-| f0 (Hz) | M | Catmull-Rom: bank missing 257…M | Catmull-Rom: cubic alias | B-spline: bank missing | B-spline: cubic alias |
+| f0 (Hz) | M | Catmull-Rom: bank error | Catmull-Rom: cubic alias | B-spline: bank error | B-spline: cubic alias |
 |---|---|---|---|---|---|
 | 20 | 1200 | −117.1 | −150.7 | −156.3 | −203.3 |
 | 50 | 480 | −117.3 | −130.8 | −156.4 | −175.4 |
 | 80 | 300 | −119.8 | −120.6 | −157.9 | −161.4 |
-| 93 | 258 | −134.2 | −117.2 | −177.6 | −156.3 |
+| 93 | 258 | −124.4 | −117.2 | −162.3 | −156.3 |
 
-The two errors cross near 80 Hz for Catmull-Rom and near 85 Hz for the
-B-spline. Below that point the cubic is the more accurate realization as
+The bank error is the missing harmonics `count + 1 … M` plus what the soft
+Nyquist edge fades from the evaluated ones: `Σ_{n ≤ count} (1 − e_n)²·2|F_n|²`,
+with `e_n` the family's edge law, `smooth((Nyquist − n·f0)·10/Nyquist)`. The
+edge touches partials above `0.9·Nyquist`, so with 256 partials it matters
+only above 84.4 Hz. At 93 Hz it fades partials 233–256. Missing harmonics
+alone would be −134.2 dB (Catmull-Rom) and −177.6 dB (B-spline). The fade
+dominates: −124.9 and −162.4 dB.
+
+The two errors cross near 82 Hz for Catmull-Rom and near 85 Hz for the
+B-spline. The edge loss there is below −195 dB, so it does not move the
+crossings. Below that point the cubic is the more accurate realization as
 well as the cheaper one. The `spline-spectrum-vs-cubic` gate uses 1024
 partials so that its 20 Hz comparison is not capacity-limited.
 
 **High pitch: the cubic is alias-limited.** Above the capacity point, the
-bank's own error is the rounding floor, so the step is the cubic's alias,
-which is the staircase above. Measured `cubic − band-limited` on the same
-phase:
+band-limited render matches its own reference (the family with its soft
+edge) at the rounding floor. Against the ideal hard truncation at Nyquist,
+the edge still fades the top in-band harmonics: by −90.4 dB (Catmull-Rom)
+and −116.7 dB (B-spline) at 987.3 Hz, and by nothing at 2966.6 and
+6300.8 Hz, where no harmonic lies in the top 10% below Nyquist. Both are
+well under the cubic's alias, so the step is the alias, which is the
+staircase above. Measured `cubic − band-limited` on the same phase:
 
 | basis | f0 (Hz) | step, rms (dB re signal) | step, peak | signal rms |
 |---|---|---|---|---|

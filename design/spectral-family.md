@@ -481,7 +481,9 @@ used to receive `k`, so `G` is evaluated at `r_k·f0`.
 | `rational #[(n, d), …]` | `⌊m_k·X / 2^(E+F)⌋ mod 2³²` | partials drift against each other, but the bundle recurs exactly |
 | `free #[r, …]` | `⌊inc_k·τ⌋ + off_k mod 2³²` | inharmonic (bells, stiff strings); no recurrence |
 
-**Rational.** `Λ = lcm d_k` and `m_k = n_k·Λ/d_k`, an integer. `X` is
+**Rational.** Each `n/d` is first reduced by its gcd. Then `Λ = lcm d_k`
+and `m_k = n_k·Λ/d_k`, an integer. (So `2/131072` is `1/65536`, and an
+unreduced integer column such as `(4, 2)` is harmonic, bit for bit.) `X` is
 one shared position on a ring whose wrap is `Λ` fundamental cycles:
 `X ≡ (inc·⌊τ⌋ + off)·2^F + inc·frac(τ) (mod 2^(32+E+F))`, with
 `inc = trunc(f0·2^(32+E)/(Λ·rate))` and `off = trunc(phase·2^(32+E)/Λ)`.
@@ -525,7 +527,7 @@ rail like the harmonic one.
 
 **Free.** Partial `k` has its own increment
 `inc_k = trunc(r_k·(f0·2³²/rate))` and offset
-`off_k = trunc(r_k·phase·2³²)`. Its phase is exact on the integer rail
+`off_k = trunc(frac(r_k·phase)·2³²)`. Its phase is exact on the integer rail
 given `inc_k`: no accumulation, the same value at any τ. Against the real
 frequency `r_k·f0`, the truncation costs less than one LSB, `rate/2³²` Hz
 (1.1e-5 Hz at 48 kHz), so the phase drifts from the ideal by under
@@ -535,15 +537,16 @@ ratios happen to be rational are not locked to each other. This is the
 same phase construction a modal mode uses: an increment per mode, reduced
 on ℤ/2³² (`modePhaseQFromIncr`, `Modal/Residue.lean`).
 
-What is refused for a free column, and why:
+The offset is taken mod one cycle, `off_k = trunc(frac(r_k·phase)·2³²)`.
+That equals `trunc(r_k·phase·2³²) mod 2³²` for `r_k·phase ≥ 0`, and no
+ratio or phase can overflow it.
 
-- *A ratio `≥ 2³¹`.* The partial's offset `r·phase·2³²` must stay below
-  `2⁶³`. This assumes `phase` is in `[0, 1)`, as the anchor writes it; a
-  harmonic family makes the same assumption.
-- *The Nyquist edge off.* The cull is what keeps every evaluated
-  partial's increment at or below `2³¹` (`r·|f0| ≤ Nyquist`), whatever
-  value a live `f0` takes. Without it, a large `r·f0` would saturate the
-  float-to-int conversion.
+A free column may turn the Nyquist edge off, like the other columns. A
+large increment then wraps correctly: only bits 16..47 of `inc_k·τ` are
+read, so the partial merely aliases. The one limit, shared with the
+harmonic and rational columns, is the float-to-int conversion of the
+increment. It saturates once `|r_k·f0| ≥ 2³¹·rate`, and this is not
+checked when `f0` is live.
 
 **Retune.** A rational or free family is not phase-continuous under the
 current anchor discipline (`design/host-param-dispatch.md`). The host
@@ -598,8 +601,15 @@ That would break "not evaluated above Nyquist", and the cost would be K
 partials per sample whatever the pitch.
 
 **Weights.** A ratio family takes a weight `table`. A closed form in the
-partial number (`law`, `closedForm`) is refused, because its meaning once
-the column is reordered is a choice nobody has made (index or ratio). The
+partial number (`law`, `closedForm`) is refused. So are `complex` weights,
+because their law reads the partial index and number (for a spline, a DFT
+table at `n mod K`). Once the column is reordered, that number could mean
+the index or the ratio, and nobody has chosen which.
+
+**0 Hz term.** A cosine family's `dc` term is supported on a ratio column
+as on the harmonic one. It is added outside the region as `a₀·Re G(0)`,
+and an empty family plays it alone. The family's own checks (cosine
+only, DC edge off) run before the ratio dispatch. The
 playground `harmonic` kind's tilt/even law is such a closed form, so no
 playground kind was added (below).
 
@@ -614,7 +624,15 @@ playground kind was added (below).
 | `ratio-envelope` | the bell under a lowpass (fc 700 Hz, Q 4) against a per-partial reference with `G(r_k·f0)`: 8.4e-9. Bound: the sine bound × the lowpass peak `Q/√(1 − 1/4Q²)` × √2. The same reference with `G(k·f0)` misses by 7.0 |
 | `ratio-cull` | 40 fundamentals, 50 Hz to 50 kHz, two of them putting a partial exactly on Nyquist: the trip count equals `#{k : r_k·f0 ≤ Nyquist}` (computed independently, as a product) exactly; every render matches the in-band reference with soft edges; families wholly above Nyquist render exact zeros |
 | `ratio-cull-sparse` | columns whose largest ratio far exceeds the partial count (`[1, 2.76, 5.4]` at 440 Hz, `[1, 20]` at 100 Hz, `[1, 1000]` at 24 Hz, …), f0 = 0 included: trip count exact, renders match |
-| `ratio-refusals` | refused by name: `Λ > 2¹⁶` (the near-unity fractions; denominators 1 and 65537), a free column with the Nyquist edge off, a free ratio of 2³¹, a weight law, an empty family whose column does not match its count. `Λ = 2¹⁶` is accepted |
+
+The trip count divides once (`Nyquist/|f0|`) where the gates' expectation
+multiplies (`r·|f0| ≤ Nyquist`). The two can disagree at the last ulp when
+`r·|f0|` is within about 4e-12 of Nyquist. Such a partial has edge weight
+0, so the output does not change, and the cull gates accept either count
+in that band. `ratio-integer-column` also renders the saw on the
+unreduced column `(2k, 2)`: 0 bit-diffs against the harmonic family.
+| `ratio-refusals` | refused by name: `Λ > 2¹⁶` (the near-unity fractions; denominators 1 and 65537), complex weights, a weight law, a 0 Hz term on a sine family, an empty family whose column does not match its count. Accepted: `Λ = 2¹⁶`, an unreduced `2/131072`, a free column with the Nyquist edge off |
+| `ratio-dc` | a cosine chord with `dc = 0.25` under a lowpass, minus the chord without it, is 0.25 to within 1e-14; an empty rational family with the term plays exactly 0.25 |
 | `ratio-realized-pitch` | the realized fundamental, read back from the kernel (`atan2` of the sine and cosine renders far out), against the exact 440 Hz phase: within `Λ·n/2⁴⁸` cycles at `Λ = 60` (n = 2⁴⁰) and at the cap `Λ = 2¹⁶` (n = 2³⁰); free within `n/2³²` |
 | WASM ≡ JIT | `SpectralRatioChord` (rational) and `SpectralBellLowpass` (free, cutoff from an LFO), 512 samples, within 1e-12 (`tests/web/wasm_vs_jit.test.ts`) |
 
@@ -648,7 +666,9 @@ The family is not gated on Metal (neither is the harmonic family).
   to a strike, including periodic strike trains (the periodic relative
   clock in `Modal/Residue.lean`). A voice composes with a room mode by mode
   (`residueComposeEC`, folded over a room chain by `foldRoomsEC` in
-  `Modal/Forest.lean`; bloom when the poles meet), and cascades and
+  `Modal/Forest.lean`). A bloom (`Modal/Bloom.lean`) is a pitch-bloomed
+  mode, read on a warped clock, composed with a room pole through the
+  incomplete gamma. Cascades and
   parallels stay factored (`ModalKernelExpr`). This family has a real weight per
   partial, one shared phase offset, frequencies fixed by data times a
   uniform `f0`, and no time shape except `G(f, τ)`. `G` can express a

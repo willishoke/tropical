@@ -144,6 +144,10 @@ def runIntegerColumn (arena : Arena) : IO Bool := do
     let c ← sawFamily (← litExact 2205.0) none clock 24
     outs := outs.push (← emitTerm (.family c))
     outs := outs.push (← emitTerm (.family { c with ratios := harmonicColumn 24 }))
+    -- (D) the saw of (A) on an UNREDUCED integer column (2k, 2): reduced
+    -- before the lcm, so Λ = 1 and it is harmonic bit for bit
+    outs := outs.push (← emitTerm (.family
+      { a with ratios := .rational ((Array.range 24).map fun i => (2 * (i + 1), 2)) }))
     pure outs) 44100
   let plan ← match built with
     | .ok p => pure p
@@ -155,11 +159,12 @@ def runIntegerColumn (arena : Arena) : IO Bool := do
     ("fractional τ from 2^40 + 7", fracTaus (2 ^ 40 + 7) 4096)]
   let mut ok := true
   for (what, taus) in windows do
-    let out ← renderTaus plan 6 taus
-    let diffs := (Array.range 3).map fun i => bitDiffCount out[2 * i]! out[2 * i + 1]!
+    let out ← renderTaus plan 7 taus
+    let diffs := ((Array.range 3).map fun i => bitDiffCount out[2 * i]! out[2 * i + 1]!)
+      |>.push (bitDiffCount out[0]! out[6]!)
     let audible := (Array.range 3).all fun i => energyOf out[2 * i]! > 0.0
     ok := ok && diffs.all (· == 0) && audible
-    IO.println s!"        {what}: bit-diffs (saw, culled lowpass, partial on Nyquist) = {diffs}{if audible then "" else " (SILENT)"}"
+    IO.println s!"        {what}: bit-diffs (saw, culled lowpass, partial on Nyquist, unreduced (2k, 2) saw) = {diffs}{if audible then "" else " (SILENT)"}"
   if ok then
     passGate label "integer column (k, 1) ≡ the harmonic family bit for bit: 3 pairs × 4 windows (integer, fractional, 2^40 frames) × 4096 samples"
   else
@@ -419,9 +424,15 @@ def runCull (arena : Arena) : IO Bool := do
   let mut silentAbove := 0
   for i in [0:n] do
     let f := cullFundamentals[i]!
+    -- The trip count divides once (Nyquist/|f0|) where this multiplies; the two
+    -- can disagree at the last ulp when r·|f0| is within ~4e-12 of Nyquist.
+    -- Such a partial has edge weight 0, so the output is unaffected; the
+    -- expectation accepts either count in that band.
     let want := (sorted.filter fun r => r * f ≤ nyq).size
+    let wantLo := (sorted.filter fun r => r * f ≤ nyq * (1.0 - 1e-12)).size
+    let wantHi := (sorted.filter fun r => r * f ≤ nyq * (1.0 + 1e-12)).size
     let got := out[i]![0]!
-    ok := ok && got == want.toFloat
+    ok := ok && wantLo.toFloat ≤ got && got ≤ wantHi.toFloat
     if i % 6 == 0 || got != want.toFloat then
       tripsShown := tripsShown.push s!"{fmt f 1} Hz→{got}/{want}"
     let ref := taus.map fun t => bellReference f rate t.toNat (edges := true)
@@ -482,9 +493,12 @@ def runSparseCull (arena : Arena) : IO Bool := do
   let mut worst := 0.0
   for i in [0:n] do
     let (ratios, f) := sparseCases[i]!
+    -- (exact agreement is not relied on within ~ulp of Nyquist; see ratio-cull)
     let want := (ratios.filter fun r => r * f ≤ nyq).size
+    let wantLo := (ratios.filter fun r => r * f ≤ nyq * (1.0 - 1e-12)).size
+    let wantHi := (ratios.filter fun r => r * f ≤ nyq * (1.0 + 1e-12)).size
     let got := out[i]![0]!
-    ok := ok && got == want.toFloat
+    ok := ok && wantLo.toFloat ≤ got && got ≤ wantHi.toFloat
     rows := rows.push s!"{ratios}@{fmt f 1}Hz→{got}/{want}"
     -- the reference with the DC edge off: Nyquist edge only
     let ref := taus.map fun t => Id.run do
@@ -511,10 +525,12 @@ def runSparseCull (arena : Arena) : IO Bool := do
 -- ── ratio-refusals ───────────────────────────────────────────────────────
 
 /-- What is refused at assemble time, each with its message: a common period
-    above 2¹⁶ (the review's near-unity fractions; denominators 1 and 65537), a
-    free column without the Nyquist edge, a free ratio ≥ 2³¹, a weight law, and
-    an empty family whose column does not match its count (validated before
-    the empty family returns silence). Λ = 2¹⁶ exactly is accepted. -/
+    above 2¹⁶ (the review's near-unity fractions; denominators 1 and 65537),
+    complex weights, a weight law, a 0 Hz term on a sine family (the family's
+    own check, ahead of the ratio dispatch), and an empty family whose column
+    does not match its count (validated before the empty family returns its
+    0 Hz term). Accepted: Λ = 2¹⁶ exactly, an unreduced `2/131072` (reduced
+    first, so Λ = 2¹⁶), and a free column with the Nyquist edge off. -/
 def runRefusals (arena : Arena) : IO Bool := do
   let label := "ratio-refusals"
   let attempt : String → (Sig → Clock → BuildM PartialFamily) →
@@ -535,13 +551,21 @@ def runRefusals (arena : Arena) : IO Bool := do
     ("Λ = 2^16 exactly", fun f c => do
       pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .rational #[(1, 1), (3, 65536)] },
       none),
+    ("unreduced (2, 131072) = 1/65536", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .rational #[(1, 1), (2, 131072)] },
+      none),
     ("free column, Nyquist edge off", fun f c => do
       pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .free #[1.0, 2.5],
              edges := { nyquist := .off } },
-      some "needs the Nyquist edge"),
-    ("free ratio 2^31", fun f c => do
-      pure { freq := f, clk := c, count := 1, weights := (← ones 1), ratios := .free #[2147483648.0] },
-      some "not below 2^31"),
+      none),
+    ("complex weights", fun f c => do
+      pure { freq := f, clk := c, count := 2, ratios := .free #[1.0, 2.5],
+             weights := .complex #[] (fun _ _ _ _ => do pure (← lit 1, ← lit 0)) },
+      some "not complex weights"),
+    ("a 0 Hz term on a sine family", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .free #[1.0, 2.5],
+             dc := some (← lit 1), edges := { dc := .off } },
+      some "a 0 Hz term needs the cosine projection"),
     ("a weight law", fun f c => do
       pure { freq := f, clk := c, count := 2, weights := .law (fun k => pure k), ratios := .free #[1.0, 2.5] },
       some "not a weight law"),
@@ -558,7 +582,7 @@ def runRefusals (arena : Arena) : IO Bool := do
       IO.println s!"        {what}: refused{if hit then "" else s!" WITH THE WRONG MESSAGE: {firstLine e}"}"
     | .ok _, some _ => ok := false; IO.println s!"        {what}: ACCEPTED (expected a refusal)"
     | .error e, none => ok := false; IO.println s!"        {what}: REFUSED: {firstLine e}"
-  if ok then passGate label "Λ > 2^16, free without the Nyquist edge, free r ≥ 2^31, a weight law and a mismatched empty column are refused by name; Λ = 2^16 is accepted"
+  if ok then passGate label "Λ > 2^16, complex weights, a weight law, a 0 Hz term on a sine family and a mismatched empty column are refused by name; Λ = 2^16, an unreduced 2/131072 and a free column with the Nyquist edge off are accepted"
   else failGate label "a refusal or an acceptance is wrong"
 
 -- ── ratio-realized-pitch ─────────────────────────────────────────────────
@@ -612,6 +636,42 @@ def runRealizedPitch (arena : Arena) : IO Bool := do
   if ok then passGate label "the realized fundamental is within the documented bound: rational Λ·rate/2^48 Hz (Λ = 60 and 2^16), free rate/2^32 Hz"
   else failGate label "a realized fundamental is outside its documented bound"
 
+-- ── ratio-dc ───────────────────────────────────────────────────────────
+
+/-- The 0 Hz term on a ratio family (as on a harmonic one): a cosine chord
+    with `dc = 0.25` under a lowpass minus the same chord without it is
+    `0.25·Re G(0) = 0.25`; an empty rational family with `dc` plays exactly
+    `0.25·Re G(0)`. -/
+def runDc (arena : Arena) : IO Bool := do
+  let label := "ratio-dc"
+  let built := compileMulti arena "ratio_dc" (do
+    let clock ← clockLit
+    let a0 ← litExact 0.25
+    let base ← chordFamily (← litExact 440.0) none clock
+    let base := { base with wave := .cosine, edges := { dc := .off } }
+    let fc ← litExact 900.0
+    let q ← litExact 2.0
+    let lp := fun (fam : PartialFamily) =>
+      normalize (svfEnvelope .lowpass (.konst fc) (.konst q) (.family fam))
+    let withDc ← emitTerm (lp { base with dc := some a0 })
+    let without ← emitTerm (lp base)
+    let empty : PartialFamily :=
+      { base with count := 0, weights := .table #[], ratios := .rational #[], dc := some a0 }
+    let emptyOut ← emitTerm (lp empty)
+    pure #[withDc, without, emptyOut]) 48000
+  let plan ← match built with
+    | .ok p => pure p
+    | .error e => return ← failGate label s!"build: {firstLine e}"
+  let out ← renderTaus plan 3 (fracTaus (2 ^ 40 + 17) 2048)
+  let diff := (Array.range 2048).foldl (fun m i =>
+    max m ((out[0]![i]! - out[1]![i]! - 0.25).abs)) 0.0
+  let emptyOk := out[2]!.all (· == 0.25)
+  IO.println s!"        (chord + 0.25 at 0 Hz) − chord − 0.25: max {sci diff}; empty family with the term: {if emptyOk then "exactly 0.25" else "WRONG"}"
+  if diff ≤ 1e-14 && emptyOk && energyOf out[1]! > 0.0 then
+    passGate label "a 0 Hz term on a rational family adds a0·Re G(0) outside the region; an empty one plays it alone"
+  else
+    failGate label "the 0 Hz term is lost or wrong on a ratio family"
+
 def runRatios (arena : Arena) : IO (Nat × Nat) := do
   let results := #[
     ← runIntegerColumn arena,
@@ -621,7 +681,8 @@ def runRatios (arena : Arena) : IO (Nat × Nat) := do
     ← runCull arena,
     ← runSparseCull arena,
     ← runRefusals arena,
-    ← runRealizedPitch arena]
+    ← runRealizedPitch arena,
+    ← runDc arena]
   pure (results.size, results.filter (!·) |>.size)
 
 end Tropical.Tropicaltest.SpectralRatios

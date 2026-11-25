@@ -281,10 +281,6 @@ def ratioRingBits (lcm : Nat) : Nat := if lcm == 1 then 0 else 64 - 32 - clockFr
     `Λ` until the increment truncates to 0 and the bundle freezes. -/
 def rationalLcmCap : Nat := 2 ^ 16
 
-/-- The largest free ratio: `r·phase·2³²` (the partial's offset, `phase` in
-    `[0, 1)` as the anchor writes it) stays below `2⁶³`. -/
-def freeRatioCap : Float := 2147483648.0
-
 /-- One partial of a ratio column, as sorted: its ratio as a double, the
     integer ring multiplier `m = n·Λ/d` (rational only), its weight, and a key
     pair that orders it exactly (`n/d`, or the double itself for free ratios,
@@ -350,7 +346,13 @@ def ratioTripCount (column : Sig) (count : Nat) (rMax : Float) (f0abs nyquist : 
       does. The product wraps mod
       2⁶⁴, which keeps bits `E+F..E+F+31` exact (`32+E+F ≤ 64`).
     * **free** `r`: partial `k`'s Q32 phase is `⌊inc_k·τ⌋ + off_k mod 2³²` with
-      its own `inc_k = trunc(r_k·(f0·2³²/rate))`, `off_k = trunc(r_k·phase·2³²)`.
+      its own `inc_k = trunc(r_k·(f0·2³²/rate))`, `off_k = trunc(frac(r_k·phase)·2³²)`.
+      The one unchecked limit (shared with the harmonic and rational columns
+      when the Nyquist edge is off) is the float-to-int conversion of the
+      increment, which saturates once `|r_k·f0| ≥ 2³¹·rate`; below it a large
+      increment wraps correctly and merely aliases.
+
+    A 0 Hz term (`dc`) is added outside the region as in `familySig`.
 
     The column is sorted ascending at assemble time (weights with it), so with a
     uniform `f0` the partials below Nyquist are a prefix and the cull is still a
@@ -363,6 +365,7 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
     | .table ws => pure ws
     | .law _ => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not a weight law in the partial number: once the column is reordered, the partial number could mean the index or the ratio"
     | .closedForm .. => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not closed-form weights over partial-number columns: once the column is reordered, the partial number could mean the index or the ratio"
+    | .complex .. => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not complex weights: their law reads the partial index and number (e.g. a DFT table at n mod K), which once the column is reordered could mean the index or the ratio"
   if weightsIn.size != f.count then
     throw s!"partial family '{f.name}': {weightsIn.size} weights for {f.count} partials"
   unless ← sigIsUniform f.freq do
@@ -382,6 +385,9 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
         for (n, d) in pairs do
           if n == 0 || d == 0 then
             throw s!"partial family '{f.name}': the ratio {n}/{d} is not positive; ratios are positive n/d"
+        -- reduce each n/d first: Λ is the lcm of the REDUCED denominators, so
+        -- (2, 131072) is 1/65536 and an unreduced integer column is harmonic
+        let pairs := pairs.map fun (n, d) => let g := Nat.gcd n d; (n / g, d / g)
         let lcm := pairs.foldl (fun acc (_, d) => Nat.lcm acc d) 1
         if lcm > rationalLcmCap then
           throw s!"partial family '{f.name}': the denominators' common multiple Λ = {lcm} exceeds {rationalLcmCap} (2^16). The ring increment's step is Λ·rate/2^48 Hz of fundamental, so above 2^16 the pitch would be coarser than rate/2^32 (and at large Λ the increment truncates to 0 and the bundle freezes). Use smaller denominators, or a free column for ratios that are not small fractions"
@@ -398,17 +404,19 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
         for r in rs do
           unless r > 0.0 && !r.isNaN && !r.isInf do
             throw s!"partial family '{f.name}': the ratio {r} is not a positive finite number"
-          if r ≥ freeRatioCap then
-            throw s!"partial family '{f.name}': the ratio {r} is not below 2^31, the largest a partial's Q0.32 phase offset carries"
-        if f.edges.nyquist matches .off then
-          throw s!"partial family '{f.name}': a free ratio column needs the Nyquist edge: the cull is what keeps every evaluated partial's increment (r·f0·2^32/rate, truncated) at most 2^31 (r·|f0| ≤ Nyquist), whatever the live fundamental"
         let entries := (rs.zip weightsIn).mapIdx fun i (r, w) =>
           ({ ratio := r, multiplier := 0, weight := w, num := 0, den := 0,
              authored := i } : RatioEntry)
         pure (false, 1, entries)
   let sorted := entries.qsort (RatioEntry.lt rational)
-  -- an empty family is silence, once its column has been validated
-  let some largest := sorted.back? | return ← lit 0
+  -- an empty family plays only its 0 Hz term, once its column is validated
+  let some largest := sorted.back?
+    | return ← match f.dc with
+      | none => lit 0
+      | some a0 => do
+          let laws ← envelopes.mapM fun (law, controls) => do
+            pure (law, ← law.prepare controls f.freq)
+          zeroHzTerm a0 laws
   let ringBits := ratioRingBits lcm
   let ratioTable ← arr (← sorted.mapM fun e => litExact e.ratio)
   let weightTable ← arr (sorted.map (·.weight))
@@ -445,10 +453,9 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
       pure #[hi, lo]
     else do
       let incScale ← div (← mul f.freq (← lit 4294967296)) sr
-      let offScale ← match f.phase with
-        | some phase => mul phase (← lit 4294967296)
-        | none => lit 0
-      pure #[thi, tlo, incScale, offScale]
+      match f.phase with
+        | some phase => pure #[thi, tlo, incScale, phase]
+        | none => pure #[thi, tlo, incScale]
   let f0abs ← absE f.freq
   let half ← lit 5 1
   let nyquist ← mul sr half
@@ -482,9 +489,11 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
   if let some inv := nyquistInv? then invariants := invariants.push nyquist |>.push inv
   if let some inv := dcInv? then invariants := invariants.push inv
   let mut envSlots : Array (EnvelopeLaw × Nat × Nat) := #[]
+  let mut envPrepared : Array (EnvelopeLaw × Array Sig) := #[]
   for (law, controls) in envelopes do
     let prepared ← law.prepare controls f.freq
     envSlots := envSlots.push (law, invariants.size, prepared.size)
+    envPrepared := envPrepared.push (law, prepared)
     invariants := invariants ++ prepared
   let invTables ← invariants.mapM fun value => arr #[value]
   let zeroIdx ← lit 0
@@ -499,7 +508,13 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
         bitAnd (← rshift (← mul m x) (← lit (ringBits + clockFracBits))) mask32
     | none => do
         let incK ← toIntE (← mul rk invReads[2]!)
-        let offK ← toIntE (← mul rk invReads[3]!)
+        -- off_k = trunc(frac(r_k·phase)·2³²): the offset mod one cycle, so no
+        -- ratio or phase can overflow it (≡ trunc(r_k·phase·2³²) mod 2³² for
+        -- r_k·phase ≥ 0)
+        let offK ← if f.phase.isSome then do
+            let cycles ← mul rk invReads[3]!
+            toIntE (← mul (← sub cycles (← unary .floor cycles)) (← lit 4294967296))
+          else litI 0
         let turns ← add (← mul incK (← toIntE invReads[0]!)) offK
         let x ← add (← lshift (← bitAnd turns mask32) fracBits)
           (← mul incK (← toIntE invReads[1]!))
@@ -542,7 +557,12 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
     | none => pure projected
   let contribution ← mul weight shaped
   let tables := #[weightTable, ratioTable] ++ (multTable?.map (#[·])).getD #[] ++ invTables
-  bankSum f.count tables contribution liveCount? familyBinderId
+  let region ← bankSum f.count tables contribution liveCount? familyBinderId
+  match f.dc with
+  | none => pure region
+  | some a0 =>
+    -- the 0 Hz partial, per sample, outside the region (as `familySig`)
+    add region (← zeroHzTerm a0 envPrepared)
 
 /-- The family's region, given its (already warped) clock and the envelopes
     applied to it, each with its control signals already emitted. -/
