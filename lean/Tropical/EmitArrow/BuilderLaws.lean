@@ -590,7 +590,7 @@ def assembledProgram (name : String) (outputs : Array OutputDecl)
   { name
     inputs := body.inputs.map fun decl =>
       { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
-        fracBits := decl.fracBits }
+        fracBits := decl.fracBits, interval? := decl.interval? }
     outputs
     decls := (builder.decls.map fun decl =>
       .inst decl.name decl.programName (decl.inputs.map fun input =>
@@ -605,7 +605,7 @@ def assembledCompleteProgram (name : String)
   { name
     inputs := body.inputs.map fun decl =>
       { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
-        fracBits := decl.fracBits }
+        fracBits := decl.fracBits, interval? := decl.interval? }
     outputs := body.outputs
     decls := (builder.decls.map fun decl =>
       .inst decl.name decl.programName (decl.inputs.map fun input =>

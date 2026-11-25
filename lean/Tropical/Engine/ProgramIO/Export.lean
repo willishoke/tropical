@@ -402,7 +402,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | .ok (eid, exprs') =>
         exprs := exprs'
         default? := some eid
-    inputDecls := inputDecls.push { name := input.name, type?, default?, fracBits }
+    inputDecls := inputDecls.push
+      { name := input.name, type?, default?, fracBits, interval? := tgt.inputs[pos]!.interval? }
   let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
   let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
   for k in [0:outputPairs.size] do

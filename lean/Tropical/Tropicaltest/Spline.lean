@@ -8,19 +8,17 @@ import Tropical.Tropicaltest.Spectral
 `lean/Tropical/EmitArrow/Spline.lean` is the module these gates back.
 
 * **spline-oracle** — the JIT against an independent f64 reference, for both
-  bases, both boundaries and K = 4, 7, 16, over 4096 hashed phases and 4096
-  grid phases each. The grid steps by 2²⁴, so in wrap mode it lands on every
-  knot for K = 4 and 16 (not for K = 7); in phantom-end mode it lands on
-  phase 0, phase 1 and both sides outside them, but on no interior knot. The
-  reference finds the segment by float `floor` on `u·n` and weighs the window
-  by the cardinal basis functions; in phantom-end mode it evaluates phase 1 as
-  segment `K − 2` at `t = 1`, where the kernel reads segment `K − 1` at
-  `t = 0`.
-* **spline-seam** — wrap mode. (1) Rotating the control values by one moves
+  bases and K = 4, 7, 16, over 4096 hashed phases and 4096 grid phases each.
+  The grid steps by 2²⁴, so it lands on every knot for K = 4 and 16 (not for
+  K = 7). The reference finds the segment by float `floor` on `u·n` and weighs
+  the window by the cardinal basis functions.
+* **spline-seam** — (1) Rotating the control values by one moves
   the curve by one knot, bit for bit: the seam of the rotated spline renders
   exactly as an interior knot of the original (K = 8, both bases). (2) Value
   and first derivative are continuous across phase 1 → 0, by one-sided
   finite differences from each side (K = 7 and 8, both bases).
+* **spline-cycle-end** — phase 2³² and its multiples (negative too) read
+  phase 0 bit for bit, K = 1, 2, 3, 5, 7, 12, both bases.
 * **spline-live** — a `PeriodicCatmullRom8` patch whose control values are
   `param:` slots. A `set_param` on the loaded runtime changes the next buffer
   of the audio kernel to the reference at the new value, with no recompile.
@@ -57,48 +55,31 @@ def refWeightsDt (basis : SplineBasis) (t : Float) : Array Float :=
     let u := 1 - t
     #[-u * u / 2, (9 * t2 - 12 * t) / 6, (-9 * t2 + 6 * t + 3) / 6, t2 / 2]
 
-/-- Control `m` of the (wrapped or end-extrapolated) sequence. -/
-def refControl (boundary : SplineBoundary) (cs : Array Float) (m : Int) : Float :=
-  let k := cs.size
-  match boundary with
-  | .wrap => cs[(m % (k : Int)).toNat]!
-  | .phantomEnd =>
-    if m < 0 then 2.0 * cs[0]! - cs[1]!
-    else if m ≥ k then 2.0 * cs[k - 1]! - cs[k - 2]!
-    else cs[m.toNat]!
+/-- Control `m` of the periodic sequence. -/
+def refControl (cs : Array Float) (m : Int) : Float :=
+  cs[(m % (cs.size : Int)).toNat]!
 
 /-- The segment and local coordinate of an integer phase, by float floor. -/
-def refSegment (boundary : SplineBoundary) (k : Nat) (phase : Int) : Int × Float :=
-  let cycle : Float := 4294967296.0
-  match boundary with
-  | .wrap =>
-    let p := phase % 4294967296
-    let x := (Float.ofInt p / cycle) * k.toFloat
-    let i := x.floor
-    (Int.ofNat i.toUInt64.toNat, x - i)
-  | .phantomEnd =>
-    let u := max 0.0 (min 1.0 (Float.ofInt phase / cycle))
-    let n := (k - 1).toFloat
-    let x := u * n
-    let i := min x.floor (n - 1)
-    (Int.ofNat i.toUInt64.toNat, x - i)
+def refSegment (k : Nat) (phase : Int) : Int × Float :=
+  let p := phase % 4294967296
+  let x := (Float.ofInt p / 4294967296.0) * k.toFloat
+  let i := x.floor
+  (Int.ofNat i.toUInt64.toNat, x - i)
 
-def refEval (basis : SplineBasis) (boundary : SplineBoundary) (cs : Array Float)
-    (phase : Int) : Float := Id.run do
-  let (i, t) := refSegment boundary cs.size phase
+def refEval (basis : SplineBasis) (cs : Array Float) (phase : Int) : Float := Id.run do
+  let (i, t) := refSegment cs.size phase
   let w := refWeights basis t
   let mut v := 0.0
   for j in [0:4] do
-    v := v + w[j]! * refControl boundary cs (i - 1 + j)
+    v := v + w[j]! * refControl cs (i - 1 + j)
   return v
 
 /-- `dv/dt` on segment `i` at `t`. -/
-def refEvalDt (basis : SplineBasis) (boundary : SplineBoundary) (cs : Array Float)
-    (i : Int) (t : Float) : Float := Id.run do
+def refEvalDt (basis : SplineBasis) (cs : Array Float) (i : Int) (t : Float) : Float := Id.run do
   let w := refWeightsDt basis t
   let mut v := 0.0
   for j in [0:4] do
-    v := v + w[j]! * refControl boundary cs (i - 1 + j)
+    v := v + w[j]! * refControl cs (i - 1 + j)
   return v
 
 -- ── Fixtures ─────────────────────────────────────────────────────────────
@@ -121,53 +102,41 @@ def hashMul : Nat := 2654435761
 
 /-- The phase laws over the sample index `n`, as kernel signals and as
     integers. `hashed` scatters phases over the cycle; `grid` steps by 2²⁴
-    (256 phases per cycle). In phantom-end mode the laws span
-    `[−2³⁰, 2³² + 2³⁰)` and `[−2³¹, 2³² + 2³¹)`, so the phase is clamped on
-    both sides. -/
+    (256 phases per cycle). -/
 inductive PhaseLaw | hashed | grid
 deriving BEq, Inhabited
 
-def phaseInt (law : PhaseLaw) (boundary : SplineBoundary) (n : Nat) : Int :=
-  match law, boundary with
-  | .hashed, .wrap => Int.ofNat (n * hashMul)
-  | .hashed, .phantomEnd => Int.ofNat ((n * hashMul) % 4294967296 * 3 / 2) - 1073741824
-  | .grid, .wrap => Int.ofNat (n * 16777216)
-  | .grid, .phantomEnd => Int.ofNat ((n * 16777216) % 8589934592) - 2147483648
+def phaseInt (law : PhaseLaw) (n : Nat) : Int :=
+  match law with
+  | .hashed => Int.ofNat (n * hashMul)
+  | .grid => Int.ofNat (n * 16777216)
 
-def phaseSig (law : PhaseLaw) (boundary : SplineBoundary) : BuildM Sig := do
+def phaseSig (law : PhaseLaw) : BuildM Sig := do
   let n ← sampleIndex
-  match law, boundary with
-  | .hashed, .wrap => mul n (← lit hashMul)
-  | .hashed, .phantomEnd =>
-    let p ← bitAnd (← mul n (← lit hashMul)) (← lit 4294967295)
-    sub (← rshift (← mul p (← lit 3)) (← lit 1)) (← lit 1073741824)
-  | .grid, .wrap => mul n (← lit 16777216)
-  | .grid, .phantomEnd =>
-    sub (← bitAnd (← mul n (← lit 16777216)) (← lit 8589934591)) (← lit 2147483648)
+  match law with
+  | .hashed => mul n (← lit hashMul)
+  | .grid => mul n (← lit 16777216)
 
 structure Config where
   basis : SplineBasis
-  boundary : SplineBoundary
   k : Nat
   law : PhaseLaw
 deriving Inhabited
 
 def Config.label (c : Config) : String :=
   let b := if c.basis.scale == 2 then "catmull-rom" else "b-spline"
-  let m := if c.boundary == .wrap then "wrap" else "phantom-end"
   let l := if c.law == .hashed then "hashed" else "grid"
-  s!"{b}/{m}/K={c.k}/{l}"
+  s!"{b}/K={c.k}/{l}"
 
 def configs : Array Config := Id.run do
   let mut out := #[]
   for basis in #[catmullRomBasis, uniformBSplineBasis] do
-    for boundary in #[SplineBoundary.wrap, .phantomEnd] do
-      for k in #[4, 7, 16] do
-        for law in #[PhaseLaw.hashed, .grid] do
-          out := out.push { basis, boundary, k, law }
+    for k in #[4, 7, 16] do
+      for law in #[PhaseLaw.hashed, .grid] do
+        out := out.push { basis, k, law }
   return out
 
-def seedOf (c : Config) : Nat := c.k * 7919 + (if c.boundary == .wrap then 0 else 31)
+def seedOf (c : Config) : Nat := c.k * 7919
 
 -- ── spline-oracle ────────────────────────────────────────────────────────
 
@@ -177,7 +146,7 @@ def runOracle (arena : Arena) : IO Bool := do
   let label := "spline-oracle"
   let outs : BuildM (Array Sig) := configs.mapM fun c => do
     let cs ← (controlsOf (seedOf c) c.k).mapM controlSig
-    splineSig c.basis c.boundary cs (← phaseSig c.law c.boundary)
+    splineSig c.basis cs (← phaseSig c.law)
   let plan ← match compileMulti arena "spline_oracle" outs 48000 with
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile: {firstLine e}"
@@ -188,7 +157,7 @@ def runOracle (arena : Arena) : IO Bool := do
   for ci in [0:configs.size] do
     let c := configs[ci]!
     let cs := (controlsOf (seedOf c) c.k).map controlFloat
-    let want := ns.map fun n => refEval c.basis c.boundary cs (phaseInt c.law c.boundary n)
+    let want := ns.map fun n => refEval c.basis cs (phaseInt c.law n)
     let err := maxAbsDiff got[ci]! want
     -- A NaN error sticks: `≤` and `>` are false against NaN.
     if !worst.isNaN && (err.isNaN || err > worst || worstLabel == "") then
@@ -222,8 +191,8 @@ def runSeam (arena : Arena) : IO Bool := do
       let rotated := (Array.range 8).map fun j => base[(j + 1) % 8]!
       let q ← seamPhaseSig half 4096
       let shifted ← add q (← lit 536870912)
-      outs := outs.push (← splineSig basis .wrap (← rotated.mapM controlSig) q)
-      outs := outs.push (← splineSig basis .wrap (← base.mapM controlSig) shifted)
+      outs := outs.push (← splineSig basis (← rotated.mapM controlSig) q)
+      outs := outs.push (← splineSig basis (← base.mapM controlSig) shifted)
     pure outs
   let rotPlan ← match compileMulti arena "spline_rotation" rotOuts 48000 with
     | .ok plan => pure plan
@@ -238,7 +207,7 @@ def runSeam (arena : Arena) : IO Bool := do
     #[(catmullRomBasis, 7), (catmullRomBasis, 8), (uniformBSplineBasis, 7),
       (uniformBSplineBasis, 8)]
   let fdOuts : BuildM (Array Sig) := fdConfigs.mapM fun (basis, k) => do
-    splineSig basis .wrap (← (controlsOf (k * 13) k).mapM controlSig) (← seamPhaseSig 3 h)
+    splineSig basis (← (controlsOf (k * 13) k).mapM controlSig) (← seamPhaseSig 3 h)
   let fdPlan ← match compileMulti arena "spline_seam_fd" fdOuts 48000 with
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile seam: {firstLine e}"
@@ -260,7 +229,7 @@ def runSeam (arena : Arena) : IO Bool := do
     let leftSlope : Float := (3.0 * v[3]! - 4.0 * v[2]! + v[1]!) / (2.0 * dt)
     let rightSlope : Float := (-3.0 * v[3]! + 4.0 * v[4]! - v[5]!) / (2.0 * dt)
     let cs := (controlsOf (k * 13) k).map controlFloat
-    let exact := refEvalDt basis .wrap cs 0 0.0
+    let exact := refEvalDt basis cs 0 0.0
     worstValue := max worstValue (max (leftValue - v[3]!).abs (rightValue - v[3]!).abs)
     worstSlope := max worstSlope (leftSlope - rightSlope).abs
     slopeScale := max slopeScale exact.abs
@@ -306,7 +275,7 @@ def runLive : IO Bool := do
       pure rt
   let reference := fun (cs : Array Int) (start : Nat) =>
     (range start frames).map fun n =>
-      refEval catmullRomBasis .wrap (cs.map controlFloat) (Int.ofNat (n * liveInc))
+      refEval catmullRomBasis (cs.map controlFloat) (Int.ofNat (n * liveInc))
   rt.process
   let buffer0 := decodeF64LE (← rt.outputBytes)
   if (← rt.setParam "k3" (controlFloat written)).isNone then
@@ -323,8 +292,38 @@ def runLive : IO Bool := do
   else
     failGate label s!"before {sci err0}, after {sci err1}, moved {sci moved}"
 
+-- ── spline-cycle-end ─────────────────────────────────────────────────────
+
+/-- Phase 2³² (and every multiple of it, negative ones too) reads exactly what
+    phase 0 reads, for K = 1, 2, 3 and K not a power of two: sample `n` reads
+    phase `(n − 2) · 2³²`. -/
+def runCycleEnd (arena : Arena) : IO Bool := do
+  let label := "spline-cycle-end"
+  let ks := #[1, 2, 3, 5, 7, 12]
+  let cfgs : Array (SplineBasis × Nat) :=
+    (#[catmullRomBasis, uniformBSplineBasis].map fun b => ks.map (b, ·)).flatten
+  let outs : BuildM (Array Sig) := cfgs.mapM fun (basis, k) => do
+    let phase ← mul (← sub (← sampleIndex) (← lit 2)) (← lit 4294967296)
+    splineSig basis (← (controlsOf (k * 31 + 5) k).mapM controlSig) phase
+  let plan ← match compileMulti arena "spline_cycle_end" outs 48000 with
+    | .ok plan => pure plan
+    | .error e => return ← failGate label s!"compile: {firstLine e}"
+  let got ← renderAt plan cfgs.size (range 0 7)
+  let mut bad := 0
+  let mut worst := 0.0
+  for c in [0:cfgs.size] do
+    let (basis, k) := cfgs[c]!
+    let v := got[c]!
+    let at0 := v[2]!
+    if v.size != 7 || v.any (·.toBits != at0.toBits) then bad := bad + 1
+    worst := max worst (at0 - refEval basis ((controlsOf (k * 31 + 5) k).map controlFloat) 0).abs
+  if bad == 0 && worst ≤ 1e-12 then
+    passGate label s!"phases −2·2³² … 4·2³² read phase 0 bit for bit, K ∈ {ks} × both bases; phase 0 ≡ reference ({sci worst})"
+  else
+    failGate label s!"{bad} configurations differ across multiples of 2³²; reference gap {sci worst}"
+
 def runSpline (arena : Arena) : IO (Nat × Nat) := do
-  let results := #[← runOracle arena, ← runSeam arena, ← runLive]
+  let results := #[← runOracle arena, ← runSeam arena, ← runLive, ← runCycleEnd arena]
   pure (results.size, results.filter (!·) |>.size)
 
 end Tropical.Tropicaltest.Spline

@@ -94,7 +94,7 @@ def registerResolved (name : String)
   pure (entry, rawIdx)
 
 /-- The boot chain: register the stdlib, the arrow-builder chain
-    (`Tropical.EmitArrow.stdlibBuilders`), the 21 live programs authored
+    (`Tropical.EmitArrow.stdlibBuilders`), the 20 live programs authored
     directly as `Sig`/`assemble` builders — no `.md` source, no parsed
     bridge, no elaboration. Each builder appends its raw program to the
     arena, linking sub-programs by name against the chain built so far (deps

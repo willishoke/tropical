@@ -4,25 +4,25 @@ import Tropical.EmitArrow.Sig
 # EmitArrow.Spline — a uniform cubic spline read by a phase
 
 A spline here is a shape read by a phase: a function of one phase coordinate,
-not a parametric curve. The same object is a single-cycle waveform at audio
-rate, an LFO at a low rate, or an envelope when the phase clamps instead of
-wrapping. The spline does not own a clock; its phase is any integer phase
-signal (Q0.32, one cycle = 2³²), such as the DDS phase every exact oscillator
-computes.
+not a parametric curve. Every spline is periodic. The same object is a
+single-cycle waveform at audio rate, an LFO at a low rate, or an envelope when
+the phase that reads it stops at the end of the cycle (`EmitArrow/PhaseClip.lean`):
+phase 1 and phase 0 are the same point, so an envelope ends where it starts.
+The spline does not own a clock; its phase is any integer phase signal (Q0.32,
+one cycle = 2³²), such as the DDS phase every exact oscillator computes.
 
 * **Knots** are uniform over one cycle, so the segment is found by arithmetic,
   with no search.
 * **K control values** are signals. Wired from `param:` slots they are live: a
   control move is a parameter write, not a recompile. K is structural.
-* **The boundary** is structural (`SplineBoundary`).
 * **The basis** is structural: a 4×4 integer matrix and a divisor, plain
   host data (`SplineBasis`). Catmull-Rom and the uniform cubic B-spline are
   provided.
 
 ## Index arithmetic
 
-With `n` segments over the cycle and `p` the phase in `[0, 2³²]`,
-`s = p · n` is exact in `int` (`n < 2³¹`), and
+With `n = K` segments over the cycle and `p` the phase reduced to
+`[0, 2³²)`, `s = p · n` is exact in `int` (`n < 2³¹`), and
 
     i = s >> 32,   t = (s & (2³² − 1)) / 2³²
 
@@ -39,18 +39,11 @@ Segment `i` reads four consecutive entries of an extended table `T` of
 `K + 3` signals, `T[i] … T[i + 3]`. The extension is built here, at assemble
 time, so the kernel does no index wrapping or clamping:
 
-* `wrap` (periodic): `T[j] = c[(j − 1) mod K]`. The control values on either
-  side of the seam are the same signals as anywhere else, so phase 1 → 0 is an
-  ordinary knot by construction. `n = K`.
-* `phantomEnd`: the phase is clamped to `[0, 2³²]` and `n = K − 1`, so
-  `c[0]` sits at phase 0 and `c[K − 1]` at phase 1. The two end neighbours are
-  phantom points, linear extrapolations `2·c[0] − c[1]` and
-  `2·c[K−1] − c[K−2]`, so both bases pass through the end values (for the
-  B-spline this is also the natural end condition, zero second derivative).
-  This is not the open-uniform (knot-multiplicity) B-spline. The last entry is
-  read only at phase exactly 1, where its weight is zero.
+`T[j] = c[(j − 1) mod K]`. The control values on either side of the seam are
+the same signals as anywhere else, so phase 1 → 0 is an ordinary knot by
+construction.
 
-`i ∈ [0, n]` holds for every phase by construction, so every table read is in
+`i ∈ [0, K)` holds for every phase by construction, so every table read is in
 range. The `index` node still carries its generic bounds check; this module
 does not change it.
 -/
@@ -80,36 +73,10 @@ def uniformBSplineBasis : SplineBasis where
   scale := 6
   rows := #[#[1, 4, 1, 0], #[-3, 0, 3, 0], #[3, -6, 3, 0], #[-1, 3, -3, 1]]
 
-/-- What the phase does at the cycle boundary. -/
-inductive SplineBoundary where
-  /-- Periodic: the phase wraps modulo one cycle and the curve is closed. -/
-  | wrap
-  /-- Phantom-end: the phase clamps to `[0, 1]`; the curve runs from `c[0]`
-      to `c[K − 1]`, with linearly extrapolated phantom end points. -/
-  | phantomEnd
-deriving BEq, Repr, Inhabited
-
-/-- The segment count over one cycle for `k` control values. -/
-def SplineBoundary.segments : SplineBoundary → Nat → Nat
-  | .wrap, k => k
-  | .phantomEnd, k => k - 1
-
-/-- The fewest control values a boundary admits. -/
-def SplineBoundary.minControls : SplineBoundary → Nat
-  | .wrap => 1
-  | .phantomEnd => 2
-
 /-- The extended table `T` of `K + 3` signals (see the module doc). -/
-def splineTable (boundary : SplineBoundary) (controls : Array Sig) :
-    BuildM (Array Sig) := do
+def splineTable (controls : Array Sig) : Array Sig :=
   let k := controls.size
-  match boundary with
-  | .wrap =>
-    pure ((Array.range (k + 3)).map fun j => controls[(j + k - 1) % k]!)
-  | .phantomEnd =>
-    let first ← sub (← add controls[0]! controls[0]!) controls[1]!
-    let last ← sub (← add controls[k - 1]! controls[k - 1]!) controls[k - 2]!
-    pure (#[first] ++ controls ++ #[last, last])
+  (Array.range (k + 3)).map fun j => controls[(j + k - 1) % k]!
 
 /-- `Σⱼ row[j] · window[j]`, skipping zero coefficients and multiplying by
     no ±1. -/
@@ -128,28 +95,26 @@ private def splineCombo (row : Array Int) (window : Array Sig) : BuildM Sig := d
   | some a => pure a
   | none => lit 0
 
-/-- The spline of `controls` under `basis` and `boundary`, read at the integer
-    phase `phaseQ` (Q0.32: one cycle is 2³²). Refused at build time for too few
-    control values, too many (`n ≥ 2³¹` would overflow `p · n`), or a basis
-    that is not 4×4. -/
-def splineSig (basis : SplineBasis) (boundary : SplineBoundary)
-    (controls : Array Sig) (phaseQ : Sig) : BuildM Sig := do
+/-- The periodic spline of `controls` under `basis`, read at the integer phase
+    `phaseQ` (Q0.32: one cycle is 2³², taken modulo the cycle). Refused at
+    build time for no control values, too many (`K ≥ 2³¹` would overflow
+    `p · K`), or a basis that is not 4×4. -/
+def splineSig (basis : SplineBasis) (controls : Array Sig) (phaseQ : Sig) :
+    BuildM Sig := do
   let k := controls.size
-  if k < boundary.minControls then
-    throw s!"spline: {k} control values; this boundary needs at least {boundary.minControls}"
-  let segments := boundary.segments k
+  if k == 0 then
+    throw "spline: no control values"
+  let segments := k
   if segments ≥ 2 ^ 31 then
     throw s!"spline: {k} control values; at most 2^31 segments fit the phase product"
   if basis.rows.size != 4 || basis.rows.any (·.size != 4) || basis.scale == 0 then
     throw s!"spline: the {basis.name} basis is not a 4×4 matrix with a positive divisor"
   let mask ← lit 4294967295
-  let p ← match boundary with
-    | .wrap => bitAnd phaseQ mask
-    | .phantomEnd => clamp phaseQ (← litI 0) (← litI 4294967296)
+  let p ← bitAnd phaseQ mask
   let s ← mul p (← lit segments)
   let i ← rshift s (← lit 32)
   let t ← div (← toFloatE (← bitAnd s mask)) (← lit 4294967296)
-  let table ← arr (← splineTable boundary controls)
+  let table ← arr (splineTable controls)
   let window ← (Array.range 4).mapM fun (j : Nat) => do
     if j == 0 then index table i else index table (← add i (← lit (Int.ofNat j)))
   let a ← basis.rows.mapM (splineCombo · window)

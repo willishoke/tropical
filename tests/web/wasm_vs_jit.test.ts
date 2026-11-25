@@ -271,12 +271,17 @@ async function expectBitIdentical(name: string, prog: ProgramFile, N: number,
 }
 
 // The registered splines (`lean/Tropical/EmitArrow/Spline.lean`): a periodic
-// Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times a phantom-end B-spline
-// envelope read by an 8 Hz one. The wave's control values are params, so a
-// written control is a param write into the same artifact.
+// Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times a periodic B-spline
+// envelope read through `PhaseClip` (`EmitArrow/PhaseClip.lean`) from an 8 Hz one:
+// clock → pulse-width warp → spline. The wave's control values and the
+// envelope's width are params, so a written control or width is a param
+// write into the same artifact.
 const SPLINE_WAVE = [0, 0.5, 0.6, 0.2, -0.1, -0.5, -0.4, -0.2]
-const SPLINE_ENV = [0, 1, 0.8, 0.6, 0.45, 0.3, 0.15, 0]
-function splineProgram(wave: number[]): ProgramFile {
+// The envelope rests at 0: (c7 + 4·c0 + c1)/6 = 0, with c1 = c7 so the
+// curve is flat at phase 0 and the start and the hold join smoothly.
+const SPLINE_ENV = [-0.1, 0.2, 1, 0.8, 0.6, 0.4, 0.25, 0.2]
+const SPLINE_WIDTH = 0.4
+function splineProgram(wave: number[], width = SPLINE_WIDTH): ProgramFile {
   const phaseOf = (instance: string) => ({ op: 'toInt', args: [
     { op: 'mul', args: [{ op: 'ref', instance, output: 'phase' }, 4294967296] }] })
   const controls = (prefix: string | null, values: number[]) => Object.fromEntries(
@@ -286,12 +291,15 @@ function splineProgram(wave: number[]): ProgramFile {
     name: 'eq_spline',
     body: { op: 'block', decls: [
       ...wave.map((value, j) => ({ op: 'paramDecl', name: `w${j}`, value })),
+      { op: 'paramDecl', name: 'width', value: width },
       { op: 'instanceDecl', name: 'ph', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 220 } },
       { op: 'instanceDecl', name: 'wave', program: 'PeriodicCatmullRom8', inputs: {
         phase: phaseOf('ph'), ...controls('w', wave) } },
       { op: 'instanceDecl', name: 'ev', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 8 } },
-      { op: 'instanceDecl', name: 'env', program: 'PhantomEndBSpline8', inputs: {
-        phase: phaseOf('ev'), ...controls(null, SPLINE_ENV) } },
+      { op: 'instanceDecl', name: 'gate', program: 'PhaseClip', inputs: {
+        phase: phaseOf('ev'), width: { op: 'param', name: 'width' } } },
+      { op: 'instanceDecl', name: 'env', program: 'PeriodicBSpline8', inputs: {
+        phase: { op: 'ref', instance: 'gate', output: 'phase' }, ...controls(null, SPLINE_ENV) } },
       { op: 'instanceDecl', name: 'vca', program: 'VCA', inputs: {
         audio: { op: 'ref', instance: 'wave', output: 'out' },
         cv: { op: 'ref', instance: 'env', output: 'out' } } },
@@ -428,8 +436,9 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
-  test('spline wave × spline envelope (param controls) — WASM ≡ JIT bit for bit', async () => {
-    await expectBitIdentical('spline', splineProgram(SPLINE_WAVE), 2048)
+  test('spline wave × clock → PhaseClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
+    // 6000 samples: one 8 Hz cycle, past the gate's fall at width 0.4.
+    await expectBitIdentical('spline', splineProgram(SPLINE_WAVE), 6000)
   })
 
   test('spline: a written control value ≡ the JIT compiled at that value', async () => {
@@ -439,6 +448,20 @@ describe('wasm vs native JIT', () => {
     const wasm = await runWasm(splineProgram(SPLINE_WAVE), '', 2048, [['param:w3', -0.7]])
     expect(wasm.length).toBe(nat.length)
     for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  })
+
+  test('clock → PhaseClip → spline: a written width ≡ the JIT compiled at that width', async () => {
+    // 6000 samples cover one 8 Hz cycle at 48 kHz, so the gate falls inside
+    // the window at both widths.
+    const nat = runNative(compileViaLean(splineProgram(SPLINE_WAVE, 0.75)), 6000)
+    expectAudible('phaseclip written', nat)
+    const wasm = await runWasm(splineProgram(SPLINE_WAVE), '', 6000, [['param:width', 0.75]])
+    const before = runNative(compileViaLean(splineProgram(SPLINE_WAVE)), 6000)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+    let moved = 0
+    for (let i = 0; i < nat.length; i++) moved = Math.max(moved, Math.abs(nat[i]! - before[i]!))
+    expect(moved).toBeGreaterThan(1e-3)
   })
 
   test('FixedSin with an int param (i64 word) — WASM ≡ JIT, seeded and written', async () => {
@@ -482,8 +505,8 @@ describe('wasm vs native JIT', () => {
     await expectBitIdentical('SpectralSaw f32', spectralSawProgram(110), 512, 'f32')
   })
 
-  test('f32: spline wave × spline envelope — WASM ≡ JIT bit for bit', async () => {
-    await expectBitIdentical('spline f32', splineProgram(SPLINE_WAVE), 2048, 'f32')
+  test('f32: spline wave × clock → PhaseClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('spline f32', splineProgram(SPLINE_WAVE), 6000, 'f32')
   })
 
   test('f32: a float param, seeded and written — WASM ≡ JIT bit for bit', async () => {

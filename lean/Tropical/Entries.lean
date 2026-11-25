@@ -117,8 +117,11 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
         if hw : arena.exprs.wf then literalDefault arena.exprs hw d.name e
         else .error "entry render: expression arena failed its well-formedness sweep"
       | none => pure jsonNull
-    .ok <| Json.mkObj [("name", Json.str d.name), ("type", t),
-      ("type_obj", tObj), ("default", dflt)]
+    let interval := match d.interval? with
+      | some i => [("interval", Json.str i.label)]
+      | none => []
+    .ok <| Json.mkObj ([("name", Json.str d.name), ("type", t),
+      ("type_obj", tObj), ("default", dflt)] ++ interval)
   let outputs := prog.outputs.map fun d =>
     let (t, tObj) := match d.type? with
       | some pt => (Json.str (portTypeStr pt), portTypeObjF d.fracBits pt)
