@@ -507,6 +507,26 @@ describe('wasm vs native JIT', () => {
     })
   }
 
+  // The spline oscillator (`EmitArrow/SplineOsc.lean`, a stdlib type family):
+  // the time-domain cubic below its band, a crossfade inside it (both
+  // realizations run), the band-limited bank above it. Same ports as the
+  // band-limited fixtures plus `phase` and `clk`, left at their defaults.
+  for (const [program, f0] of [
+    ['SplineOscCatmullRom8', 220], ['SplineOscCatmullRom8', 470], ['SplineOscCatmullRom8', 3100],
+    ['SplineOscBSpline8', 850], ['SplineOscBSpline8', -2500],
+  ] as const) {
+    test(`${program} at ${f0} Hz (spline oscillator) — WASM matches JIT`, async () => {
+      const prog = splineSpectrumProgram(program, f0)
+      const wire = compileViaLean(prog)
+      const N = 512
+      const nat = runNative(wire, N)
+      expectAudible(program, nat)
+      const wasm = await runWasm(prog, wire, N)
+      expect(wasm.length).toBe(nat.length)
+      for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    })
+  }
+
   test('FixedSinOscQ15 (int32 datapath, int32 output) — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('FixedSinOscQ15', q15Program(1234.567, 0.3), 512)
   })

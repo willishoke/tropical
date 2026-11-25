@@ -257,11 +257,23 @@ describe('type families — refusals', () => {
     expect(env.suggestion).toBe('PeriodicCatmullRom12')
   })
 
-  test('an unregistered name: unknown_program, and the message lists the families', async () => {
-    const env = await client.callError('add_instance', { program: 'PeriodicHermite12', instance_name: unique('x') })
+  test('an unregistered name: unknown_program, and the message lists the families or a suggestion', async () => {
+    const env = await client.callError('add_instance', { program: 'Qzxw12', instance_name: unique('x') })
     expect(env.code).toBe('unknown_program')
-    expect(env.message).toContain('PeriodicCatmullRom (1 to 1024 control points)')
+    const listed = env.message.includes('Type families (a member is <family><size>): PeriodicCatmullRom, PeriodicBSpline')
+    expect(listed || env.message.includes('Did you mean')).toBe(true)
   })
+
+  // The envelope caps a message at 200 characters: the family list is dropped
+  // when a suggestion is present or it would not fit.
+  for (const program of ['PeriodicCatmullRomm1024', 'SplineOscCatmullRomX64', 'SplineOscCatmullRomSplineOscCatmullRomSplineOscCatmullRomXyz16',
+    'A'.repeat(70) + '12']) {
+    test(`an unregistered long name stays within 200 characters: ${program.slice(0, 24)}`, async () => {
+      const env = await client.callError('add_instance', { program, instance_name: unique('x') })
+      expect(env.code).toBe('unknown_program')
+      expect(env.message.length).toBeLessThanOrEqual(200)
+    })
+  }
 
   test('load of a refused spelling: internal_error with the reason', async () => {
     const env = await client.callError('load', { program: patch([

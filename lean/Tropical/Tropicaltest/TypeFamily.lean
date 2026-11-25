@@ -303,7 +303,10 @@ def runRefusals : IO Bool := do
       -- The tool message carries the same reason (the ingest-only
       -- "Unknown program type" wording aside).
       let reasonShown := (r.fragment.startsWith "Unknown program type" || has message r.fragment)
-        && (r.code != "unknown_program" || has message "Type families")
+        -- an unknown name lists the families, or (to stay within the
+        -- envelope's 200 characters) carries a suggestion instead
+        && (r.code != "unknown_program" || has message "Type families" || has message "Did you mean")
+        && message.length ≤ 200
       if got != r.code || (r.predicate && kind != "predicate") || (!r.anySuggestion && suggestion != r.suggestion)
           || !reasonShown then
         return ← failGate label s!"add_instance of '{shown}': {(j.compress.take 400).toString} (want {r.code}{if r.predicate then ", a predicate" else ""}, suggestion {r.suggestion})"

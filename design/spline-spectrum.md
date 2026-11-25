@@ -172,9 +172,9 @@ window, and the measured energy agrees with the closed form to 0.1 dB.
 
 ## Not built
 
-- **Crossover.** Nothing switches between the two realizations during a
-  pitch sweep. The step at a switch is the band-limited render's missing
-  tail plus the cubic's alias, both bounded above; see the measurement below.
+- **Crossover.** Built in `design/spline-osc.md`: the cubic below a band of
+  fundamentals, this bank above it, a crossfade derived from an alias budget
+  between them.
 - **Moving fundamental.** The family needs `freq` uniform within a kernel
   call, so the partial count and edges are fixed for the call. A spline read
   by a phase-modulated or swept clock within one call is the time-domain

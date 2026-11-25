@@ -7,6 +7,7 @@ import Tropical.EmitArrow.Spectral
 import Tropical.EmitArrow.Spline
 import Tropical.EmitArrow.PhaseClip
 import Tropical.EmitArrow.SplineSpectrum
+import Tropical.EmitArrow.SplineOsc
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
@@ -44,6 +45,9 @@ The modules:
   periodic spline read through it is an envelope (`design/spline.md`).
 * `SplineSpectrum` — the periodic spline as its harmonics below Nyquist, a
   partial family with complex weights (`design/spline-spectrum.md`).
+* `SplineOsc` — one spline oscillator: the cubic at low fundamentals, the
+  band-limited bank at high ones, a crossfade derived from a declared alias
+  budget between them (`design/spline-osc.md`).
 * `Modal` / `Patch` / `Gong` — the ID-valued modal
   compiler, graph lowering seam, and struck-register authoring.
 The recursive authoring representation has been retired; this is the single
