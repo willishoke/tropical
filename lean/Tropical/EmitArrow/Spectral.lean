@@ -21,9 +21,10 @@ uniform): a partial's frequency `k·f0` is then a constant the envelope can be
 evaluated at. A moving fundamental (phase-modulated partials) is a later slice.
 
 Soft edges: a partial whose frequency nears Nyquist or 0 Hz fades with a
-smoothstep edge instead of a hard cut, and partials at or above Nyquist are
-not evaluated at all (the region's trip count is `⌊Nyquist/|f0|⌋`, clamped to
-`K`; a skipped partial's edge weight is exactly 0).
+smoothstep edge instead of a hard cut, and partials above Nyquist are not
+evaluated at all (the region's trip count is `⌊Nyquist/|f0|⌋`, clamped to
+`K`; a skipped partial's edge weight is exactly 0). A partial exactly on
+Nyquist is evaluated, with edge weight 0.
 
 This module holds the data types and the bank lowering; the `ArrowTerm`
 constructors that carry them live in `Term`.
@@ -128,8 +129,12 @@ inductive PartialRatios where
       reads one shared ring position `X` whose wrap is `Λ = lcm d_k`
       fundamental cycles; partial `k`'s phase is `m_k·X` with
       `m_k = n_k·Λ/d_k`, an integer. The partials drift against each other but
-      stay locked: the bundle recurs exactly every `Λ` fundamental cycles. An
-      integer column (`Λ = 1`) is the harmonic construction, bit for bit. -/
+      stay locked, and the bundle recurs exactly whenever `X` returns: once per
+      ring wrap (`Λ` cycles of the realized fundamental). In samples the period
+      is the smallest `T` with `inc·T ≡ 0 (mod 2⁴⁸)`, which is a whole number of
+      samples only when `inc` has enough factors of 2. `Λ ≤ 2¹⁶`
+      (`rationalLcmCap`). An integer column (`Λ = 1`) is the harmonic
+      construction, bit for bit. -/
   | rational (ratios : Array (Nat × Nat))
   /-- `r_k` any positive finite real. Partial `k` runs on its own Q0.32
       increment `trunc(r_k · f0·2³²/rate)`. -/
@@ -262,10 +267,23 @@ private def zeroHzTerm (a0 : Sig) (laws : Array (EnvelopeLaw × Array Sig)) :
   | none => pure a0
 
 /-- The extra ring bits `E` of a rational family: 0 when every ratio is an
-    integer (`Λ = 1`, the harmonic construction exactly), else 16, the most a
-    wrapping 64-bit product holds next to the clock's fraction bits
-    (`32 + E + F = 64`). -/
+    integer (`Λ = 1`, the harmonic construction exactly), else 16. Any
+    `E ≥ 0` is exact; `E` sets only the ring's resolution, and 16 is the most
+    for which `X` (`32 + E + F` bits) fits a 64-bit word next to the clock's
+    16 fraction bits. -/
 def ratioRingBits (lcm : Nat) : Nat := if lcm == 1 then 0 else 64 - 32 - clockFracBits
+
+/-- The largest common period `Λ` a rational column may have. The ring
+    increment's LSB is `Λ·rate/2⁴⁸` Hz of fundamental (`E = 16`), so at
+    `Λ = 2¹⁶` the realized fundamental is within `rate/2³²` Hz of `f0`, the
+    harmonic family's (and each free partial's) own precision. Above it the
+    rational regime would be coarser than the free one; the error grows with
+    `Λ` until the increment truncates to 0 and the bundle freezes. -/
+def rationalLcmCap : Nat := 2 ^ 16
+
+/-- The largest free ratio: `r·phase·2³²` (the partial's offset, `phase` in
+    `[0, 1)` as the anchor writes it) stays below `2⁶³`. -/
+def freeRatioCap : Float := 2147483648.0
 
 /-- One partial of a ratio column, as sorted: its ratio as a double, the
     integer ring multiplier `m = n·Λ/d` (rational only), its weight, and a key
@@ -306,10 +324,15 @@ def countAtMost (column : Sig) (count : Nat) (t : Sig) : BuildM Sig := do
   pure lo
 
 /-- The Nyquist trip count of a family with an ascending ratio column `column`
-    (`count` entries): `#{k : r_k ≤ Nyquist/max(|f0|, Nyquist/(K+1))}`, an
-    `int`. The floor on `|f0|` keeps the threshold finite at `f0 = 0`. -/
-def ratioTripCount (column : Sig) (count : Nat) (f0abs nyquist : Sig) : BuildM Sig := do
-  let floorF0 ← div nyquist (← lit (count + 1))
+    (`count` entries, largest `rMax`): `#{k : r_k ≤ Nyquist/max(|f0|, f_lo)}`
+    with `f_lo = Nyquist/(2·rMax)`, an `int`. The floor keeps the threshold
+    finite at `f0 = 0`; it is harmless because below it every partial is under
+    Nyquist/2 and the threshold `2·rMax` counts them all. Above it the
+    threshold is `Nyquist/|f0|` exactly, so the count is
+    `#{k : r_k·|f0| ≤ Nyquist}` up to the one rounding of that division. -/
+def ratioTripCount (column : Sig) (count : Nat) (rMax : Float) (f0abs nyquist : Sig) :
+    BuildM Sig := do
+  let floorF0 ← div nyquist (← litExact (2.0 * rMax))
   let f0floor ← selectE (← gt f0abs floorF0) f0abs floorF0
   countAtMost column count (← div nyquist f0floor)
 
@@ -321,8 +344,10 @@ def ratioTripCount (column : Sig) (count : Nat) (f0abs nyquist : Sig) : BuildM S
       per `Λ` fundamental cycles, `X ≡ (inc·⌊τ⌋ + off)·2^F + inc·frac(τ)` with
       `inc = trunc(f0·2^(32+E)/(Λ·rate))`, `off = trunc(phase·2^(32+E)/Λ)`.
       Partial `k`'s Q32 phase is `⌊m_k·X / 2^(E+F)⌋ mod 2³²`: one floor, every
-      partial on the same `X`, so the lock `d_k·θ_k/n_k = d_j·θ_j/n_j` holds at
-      every τ and the bundle recurs whenever `X` does. The product wraps mod
+      partial on the same `X`, so the frequencies are locked exactly
+      (`m_k/m_j = n_k·d_j/(n_j·d_k)`) and the phases to within the one Q32
+      unit each partial's own floor costs; the bundle recurs whenever `X`
+      does. The product wraps mod
       2⁶⁴, which keeps bits `E+F..E+F+31` exact (`32+E+F ≤ 64`).
     * **free** `r`: partial `k`'s Q32 phase is `⌊inc_k·τ⌋ + off_k mod 2³²` with
       its own `inc_k = trunc(r_k·(f0·2³²/rate))`, `off_k = trunc(r_k·phase·2³²)`.
@@ -330,13 +355,14 @@ def ratioTripCount (column : Sig) (count : Nat) (f0abs nyquist : Sig) : BuildM S
     The column is sorted ascending at assemble time (weights with it), so with a
     uniform `f0` the partials below Nyquist are a prefix and the cull is still a
     trip count: `#{k : r_k ≤ Nyquist/|f0|}`, found by a binary search per
-    sample. -/
+    sample (`ratioTripCount`). A live count keeps the LOWEST-ratio partials
+    (sorted order), not the first authored. -/
 private def ratioFamilySig (f : PartialFamily) (clock : Clock)
     (envelopes : Array (EnvelopeLaw × Array Sig)) : BuildM Sig := do
-  let some weightsIn := (match f.weights with
-      | .table ws => some ws
-      | _ => none)
-    | throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio); a closed form in the partial number has no meaning once the column is reordered"
+  let weightsIn ← match f.weights with
+    | .table ws => pure ws
+    | .law _ => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not a weight law in the partial number: once the column is reordered, the partial number could mean the index or the ratio"
+    | .closedForm .. => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not closed-form weights over partial-number columns: once the column is reordered, the partial number could mean the index or the ratio"
   if weightsIn.size != f.count then
     throw s!"partial family '{f.name}': {weightsIn.size} weights for {f.count} partials"
   unless ← sigIsUniform f.freq do
@@ -357,6 +383,8 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
           if n == 0 || d == 0 then
             throw s!"partial family '{f.name}': the ratio {n}/{d} is not positive; ratios are positive n/d"
         let lcm := pairs.foldl (fun acc (_, d) => Nat.lcm acc d) 1
+        if lcm > rationalLcmCap then
+          throw s!"partial family '{f.name}': the denominators' common multiple Λ = {lcm} exceeds {rationalLcmCap} (2^16). The ring increment's step is Λ·rate/2^48 Hz of fundamental, so above 2^16 the pitch would be coarser than rate/2^32 (and at large Λ the increment truncates to 0 and the bundle freezes). Use smaller denominators, or a free column for ratios that are not small fractions"
         let entries ← (pairs.zip weightsIn).mapIdxM fun i ((n, d), w) => do
           let m := n * (lcm / d)
           if m ≥ 2 ^ 53 then
@@ -370,11 +398,17 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
         for r in rs do
           unless r > 0.0 && !r.isNaN && !r.isInf do
             throw s!"partial family '{f.name}': the ratio {r} is not a positive finite number"
+          if r ≥ freeRatioCap then
+            throw s!"partial family '{f.name}': the ratio {r} is not below 2^31, the largest a partial's Q0.32 phase offset carries"
+        if f.edges.nyquist matches .off then
+          throw s!"partial family '{f.name}': a free ratio column needs the Nyquist edge: the cull is what keeps every evaluated partial's increment (r·f0·2^32/rate, truncated) at most 2^31 (r·|f0| ≤ Nyquist), whatever the live fundamental"
         let entries := (rs.zip weightsIn).mapIdx fun i (r, w) =>
           ({ ratio := r, multiplier := 0, weight := w, num := 0, den := 0,
              authored := i } : RatioEntry)
         pure (false, 1, entries)
   let sorted := entries.qsort (RatioEntry.lt rational)
+  -- an empty family is silence, once its column has been validated
+  let some largest := sorted.back? | return ← lit 0
   let ringBits := ratioRingBits lcm
   let ratioTable ← arr (← sorted.mapM fun e => litExact e.ratio)
   let weightTable ← arr (sorted.map (·.weight))
@@ -432,7 +466,7 @@ private def ratioFamilySig (f : PartialFamily) (clock : Clock)
   let nyquistCount? ← match nyquistInv? with
     | none => pure none
     | some _ => do
-        pure (some (← toFloatE (← ratioTripCount ratioTable f.count f0abs nyquist)))
+        pure (some (← toFloatE (← ratioTripCount ratioTable f.count largest.ratio f0abs nyquist)))
   let tripF? ← match nyquistCount?, f.liveCount with
     | some a, some b => pure (some (← selectE (← gt a b) b a))
     | some a, none => pure (some a)

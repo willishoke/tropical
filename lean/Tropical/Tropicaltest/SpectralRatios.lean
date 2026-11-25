@@ -31,6 +31,12 @@ partial).
   `#{k : r_k·|f0| ≤ Nyquist}` (so no partial above Nyquist is evaluated), every
   family render matches the in-band reference with its soft edges, and a
   family wholly above Nyquist renders exact zeros.
+* **ratio-cull-sparse** — the same on columns whose largest ratio is far above
+  the partial count, f0 = 0 included.
+* **ratio-refusals** — `Λ > 2¹⁶`, a free column without the Nyquist edge, a
+  free ratio ≥ 2³¹, a weight law, and a mismatched empty column are refused.
+* **ratio-realized-pitch** — the realized fundamental, read back from the
+  kernel's phase far out, is within the documented bound of the ideal.
 -/
 
 namespace Tropical.Tropicaltest.SpectralRatios
@@ -252,30 +258,45 @@ def runRationalExact (arena : Arena) : IO Bool := do
 
 /-- The bell's per-partial increments, as the kernel computes them:
     `trunc(r_k·(f0·2³²/rate))`, authored order. -/
-def bellIncs (f0 rate : Float) : Array Nat :=
-  bellRatios.map fun r => truncNat (r * (f0 * 4294967296.0 / rate))
+def bellIncs (f0 rate : Float) (ratios : Array Float := bellRatios) : Array Nat :=
+  ratios.map fun r => truncNat (r * (f0 * 4294967296.0 / rate))
 
 /-- Independent f64 reference, authored order: `Σ w_k·sin(2π·θ_k)` with the
     integer phase `θ_k = ⌊inc_k·τ / 2¹⁶⌋ mod 2³²` and libm `sin`. `edges` and
     `gain` (the complex gain at the partial's frequency) are optional. -/
 def bellReference (f0 rate : Float) (tau : Nat)
-    (gain : Float → Float × Float := fun _ => (1.0, 0.0)) (edges : Bool := false) :
+    (gain : Float → Float × Float := fun _ => (1.0, 0.0)) (edges : Bool := false)
+    (ratios : Array Float := bellRatios) (weights : Array Float := bellWeights) :
     Float := Id.run do
-  let incs := bellIncs f0 rate
+  let incs := bellIncs f0 rate ratios
   let mut acc := 0.0
-  for i in [0:bellRatios.size] do
-    let r := bellRatios[i]!
+  for i in [0:ratios.size] do
+    let r := ratios[i]!
     let f := r * f0
     if edges && f > nyquistOf rate then continue
     let theta := twoPi * ((incs[i]! * tau / clockOne) % 2 ^ 32).toFloat / 4294967296.0
     let (gre, gim) := gain f
     let e := if edges then edgeOf rate f else 1.0
-    acc := acc + bellWeights[i]! * e * (gre * Float.sin theta + gim * Float.cos theta)
+    acc := acc + weights[i]! * e * (gre * Float.sin theta + gim * Float.cos theta)
   return acc
 
-/-- The fixed-point sine's error bound used by the free and envelope gates,
-    per unit weight (it is the Q30 polynomial's, measured well below this). -/
-def sinBound : Float := 1e-8
+/-- The fixed-point sine's largest error against libm `sin`, MEASURED (not
+    proved) over a dense sweep of 2¹⁸ Q32 phases spread across the whole
+    circle (a stride coprime to 2³², plus the quarter points). -/
+def sinMeasuredError : Float := Id.run do
+  let mut worst := 0.0
+  let probes : Array Nat := ((Array.range 262144).map fun i => (i * 16381 * 997) % 2 ^ 32)
+    ++ #[0, 2 ^ 30, 2 ^ 31, 3 * 2 ^ 30, 2 ^ 32 - 1]
+  for p in probes do
+    let fixed := intToFloat (sinCycModel (p : Int)) / 1073741824.0
+    let exact := Float.sin (twoPi * p.toFloat / 4294967296.0)
+    worst := max worst (fixed - exact).abs
+  return worst
+
+/-- The per-unit-weight bound the free, envelope and cull gates use: twice the
+    measured sine error (margin for phases the sweep missed), plus 1e-15 for
+    the f64 sums. -/
+def sinBound : Float := 2.0 * sinMeasuredError + 1e-15
 
 def runFree (arena : Arena) : IO Bool := do
   let label := "ratio-free"
@@ -353,8 +374,10 @@ def runEnvelope (arena : Arena) : IO Bool := do
   let wrong := taus.map fun t => bellReference f0 rate t.toNat indexGain
   let d := maxAbsDiff out[0]! ref
   let dWrong := maxAbsDiff out[0]! wrong
-  let gMax := 4.0  -- |G| ≤ Q·(1 + small) for the lowpass at Q 4 near fc
-  let tol := sinBound * gMax * sumAbs bellWeights
+  -- the lowpass peak: |G|max = Q/√(1 − 1/(4Q²)) (≈ 4.03 at Q 4); the gain
+  -- rotates the (sin, cos) error pair, so it can grow by √2
+  let gMax := q / Float.sqrt (1.0 - 1.0 / (4.0 * q * q))
+  let tol := sinBound * gMax * Float.sqrt 2.0 * sumAbs bellWeights
   IO.println s!"        G at r_k·f0: max |kernel − reference| = {sci d} ≤ {sci tol}; G at k·f0 (the index) would miss by {sci dWrong}"
   if d ≤ tol && dWrong > 1e-3 && energyOf out[0]! > 0.0 then
     passGate label s!"lowpass (fc 700 Hz, Q 4) on the bell: each partial's gain at its true frequency, {sci d} from the per-partial reference"
@@ -378,7 +401,7 @@ def runCull (arena : Arena) : IO Bool := do
     let table ← arr (← sorted.mapM litExact)
     let nyquist ← mul (← sampleRate) (← lit 5 1)
     cullFundamentals.mapM fun f => do
-      toFloatE (← ratioTripCount table sorted.size (← absE (← litExact f)) nyquist)) 44100
+      toFloatE (← ratioTripCount table sorted.size sorted.back! (← absE (← litExact f)) nyquist)) 44100
   let renders := compileMulti arena "ratio_cull_renders" (do
     let clock ← clockLit
     cullFundamentals.mapM fun f => do
@@ -396,7 +419,7 @@ def runCull (arena : Arena) : IO Bool := do
   let mut silentAbove := 0
   for i in [0:n] do
     let f := cullFundamentals[i]!
-    let want := (sorted.filter fun r => r ≤ nyq / f).size
+    let want := (sorted.filter fun r => r * f ≤ nyq).size
     let got := out[i]![0]!
     ok := ok && got == want.toFloat
     if i % 6 == 0 || got != want.toFloat then
@@ -416,13 +439,189 @@ def runCull (arena : Arena) : IO Bool := do
   else
     failGate label "the cull admits a partial above Nyquist or drops one below"
 
+/-- Sparse columns, where the largest ratio is far above the partial count
+    (the case a floor of `Nyquist/(K+1)` on `|f0|` would cull wrongly): the
+    trip count against `#{k : r_k·|f0| ≤ Nyquist}` (all of them at f0 = 0),
+    and the family renders against the in-band reference, at 48 kHz. -/
+def sparseCases : Array (Array Float × Float) := #[
+  (#[1.0, 2.76, 5.4], 440.0), (#[1.0, 20.0], 100.0), (#[1.0, 20.0], 1000.0),
+  (#[1.0, 20.0], 1200.0), (#[3.0, 40.0, 0.5], 37.0), (#[1.0, 2.76, 5.4], 0.0),
+  (#[1.0, 1000.0], 23.9), (#[1.0, 1000.0], 24.0), (#[1.0, 1000.0], 24.1)]
+
+def runSparseCull (arena : Arena) : IO Bool := do
+  let label := "ratio-cull-sparse"
+  let rate := 48000.0
+  let nyq := nyquistOf rate
+  let built := compileMulti arena "ratio_cull_sparse" (do
+    let clock ← clockLit
+    let nyquist ← mul (← sampleRate) (← lit 5 1)
+    let mut outs : Array Sig := #[]
+    for (ratios, f) in sparseCases do
+      let sorted := ratios.qsort (· < ·)
+      let table ← arr (← sorted.mapM litExact)
+      outs := outs.push (← toFloatE (← ratioTripCount table sorted.size sorted.back!
+        (← absE (← litExact f)) nyquist))
+    for (ratios, f) in sparseCases do
+      let ws ← ratios.mapM fun _ => litExact 1.0
+      -- the DC edge is off so the f0 = 0 case evaluates its partials (each
+      -- contributes sin 0 = 0); the Nyquist edge stays on
+      let freq ← litExact f
+      let fam : PartialFamily :=
+        { name := "sparse", freq, clk := clock, count := ratios.size, weights := .table ws,
+          ratios := .free ratios, edges := { dc := .off } }
+      outs := outs.push (← emitTerm (.family fam))
+    pure outs) 48000
+  let plan ← match built with
+    | .ok p => pure p
+    | .error e => return ← failGate label s!"build: {firstLine e}"
+  let n := sparseCases.size
+  let taus := fracTaus (2 ^ 40 + 3) 1024
+  let out ← renderTaus plan (2 * n) taus
+  let mut ok := true
+  let mut rows : Array String := #[]
+  let mut worst := 0.0
+  for i in [0:n] do
+    let (ratios, f) := sparseCases[i]!
+    let want := (ratios.filter fun r => r * f ≤ nyq).size
+    let got := out[i]![0]!
+    ok := ok && got == want.toFloat
+    rows := rows.push s!"{ratios}@{fmt f 1}Hz→{got}/{want}"
+    -- the reference with the DC edge off: Nyquist edge only
+    let ref := taus.map fun t => Id.run do
+      let incs := bellIncs f rate ratios
+      let mut acc := 0.0
+      for j in [0:ratios.size] do
+        let fr := ratios[j]! * f
+        if fr > nyq then continue
+        let v := (nyq - fr) * (10.0 / nyq)
+        let tt := if v < 0.0 then 0.0 else if v > 1.0 then 1.0 else v
+        let theta := twoPi * ((incs[j]! * t.toNat / clockOne) % 2 ^ 32).toFloat / 4294967296.0
+        acc := acc + tt * tt * (3.0 - 2.0 * tt) * Float.sin theta
+      return acc
+    worst := max worst (maxAbsDiff out[n + i]! ref)
+  let tol := sinBound * 3.0
+  ok := ok && worst ≤ tol
+  IO.println s!"        trip (got/want): {rows}"
+  IO.println s!"        renders vs in-band reference: worst {sci worst} ≤ {sci tol}"
+  if ok then
+    passGate label s!"{n} sparse columns (r_max ≫ K, f0 = 0 included): trip = #(r_k·f0 ≤ Nyquist) exactly; renders ≡ reference"
+  else
+    failGate label "a sparse column's cull drops a partial below Nyquist or keeps one above"
+
+-- ── ratio-refusals ───────────────────────────────────────────────────────
+
+/-- What is refused at assemble time, each with its message: a common period
+    above 2¹⁶ (the review's near-unity fractions; denominators 1 and 65537), a
+    free column without the Nyquist edge, a free ratio ≥ 2³¹, a weight law, and
+    an empty family whose column does not match its count (validated before
+    the empty family returns silence). Λ = 2¹⁶ exactly is accepted. -/
+def runRefusals (arena : Arena) : IO Bool := do
+  let label := "ratio-refusals"
+  let attempt : String → (Sig → Clock → BuildM PartialFamily) →
+      Except String Tropical.Plan.FlatPlan := fun name mk =>
+    compileMulti arena name (do
+      let fam ← mk (← litExact 440.0) (← clockLit)
+      pure #[← emitTerm (.family fam)]) 48000
+  let ones : Nat → BuildM PartialWeights := fun n => do
+    pure (PartialWeights.table (← (Array.range n).mapM fun _ => litExact 1.0))
+  let cases : Array (String × (Sig → Clock → BuildM PartialFamily) × Option String) := #[
+    ("near-unity fractions (Λ ≈ 9.4e11)", fun f c => do
+      let rs := #[(1, 1), (998, 997), (992, 991), (984, 983), (978, 977)]
+      pure { freq := f, clk := c, count := 5, weights := (← ones 5), ratios := .rational rs },
+      some "exceeds 65536"),
+    ("denominators 1 and 65537", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .rational #[(1, 1), (1, 65537)] },
+      some "exceeds 65536"),
+    ("Λ = 2^16 exactly", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .rational #[(1, 1), (3, 65536)] },
+      none),
+    ("free column, Nyquist edge off", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := (← ones 2), ratios := .free #[1.0, 2.5],
+             edges := { nyquist := .off } },
+      some "needs the Nyquist edge"),
+    ("free ratio 2^31", fun f c => do
+      pure { freq := f, clk := c, count := 1, weights := (← ones 1), ratios := .free #[2147483648.0] },
+      some "not below 2^31"),
+    ("a weight law", fun f c => do
+      pure { freq := f, clk := c, count := 2, weights := .law (fun k => pure k), ratios := .free #[1.0, 2.5] },
+      some "not a weight law"),
+    ("empty family, one ratio", fun f c => do
+      pure { freq := f, clk := c, count := 0, weights := .table #[], ratios := .rational #[(1, 2)] },
+      some "1 ratios for 0 partials")]
+  let mut ok := true
+  for (what, mk, needle?) in cases do
+    match attempt s!"refusal_{what.length}" mk, needle? with
+    | .ok _, none => IO.println s!"        {what}: accepted"
+    | .error e, some needle =>
+      let hit := (e.splitOn needle).length > 1
+      ok := ok && hit
+      IO.println s!"        {what}: refused{if hit then "" else s!" WITH THE WRONG MESSAGE: {firstLine e}"}"
+    | .ok _, some _ => ok := false; IO.println s!"        {what}: ACCEPTED (expected a refusal)"
+    | .error e, none => ok := false; IO.println s!"        {what}: REFUSED: {firstLine e}"
+  if ok then passGate label "Λ > 2^16, free without the Nyquist edge, free r ≥ 2^31, a weight law and a mismatched empty column are refused by name; Λ = 2^16 is accepted"
+  else failGate label "a refusal or an acceptance is wrong"
+
+-- ── ratio-realized-pitch ─────────────────────────────────────────────────
+
+/-- The realized fundamental against the ideal frequency, measured from the
+    kernel: a family whose only weighted partial has ratio 1 is rendered as
+    sine and cosine, its phase read back with `atan2` at sample `n`, and
+    compared with the exact `frac(440·n/48000)`. The documented bounds:
+    rational `Λ·rate/2⁴⁸` Hz (phase `Λ·n/2⁴⁸` cycles), free `rate/2³²` Hz
+    (`n/2³²` cycles), each with 4% slack for the double that computes the
+    increment, plus 1e-8 cycles for the sine and the floors. The rational
+    regime's bound is checked at `Λ = 60` (n = 2⁴⁰) and at the cap
+    `Λ = 2¹⁶` (n = 2³⁰). -/
+def runRealizedPitch (arena : Arena) : IO Bool := do
+  let label := "ratio-realized-pitch"
+  let cases : Array (String × PartialRatios × Nat × Float) := #[
+    ("rational, Λ = 60", .rational #[(1, 1), (1, 60)], 2 ^ 40, 60.0 / 281474976710656.0),
+    ("rational, Λ = 2^16", .rational #[(1, 1), (1, 65536)], 2 ^ 30, 65536.0 / 281474976710656.0),
+    ("free", .free #[1.0, 0.01], 2 ^ 30, 1.0 / 4294967296.0)]
+  let built := compileMulti arena "ratio_pitch" (do
+    let clock ← clockLit
+    let mut outs : Array Sig := #[]
+    for (_, ratios, _, _) in cases do
+      for wave in #[PartialWave.sine, .cosine] do
+        let ws := #[← litExact 1.0, ← litExact 0.0]
+        let freq ← litExact 440.0
+        let fam : PartialFamily :=
+          { name := "pitch", freq, clk := clock, count := 2, weights := .table ws, ratios, wave }
+        outs := outs.push (← emitTerm (.family fam))
+    pure outs) 48000
+  let plan ← match built with
+    | .ok p => pure p
+    | .error e => return ← failGate label s!"build: {firstLine e}"
+  let mut ok := true
+  for i in [0:cases.size] do
+    let (what, _, n, perSample) := cases[i]!
+    let taus := wholeTaus n 4
+    let out ← renderTaus plan (2 * cases.size) taus
+    let mut worst := 0.0
+    for j in [0:taus.size] do
+      let s := out[2 * i]![j]!
+      let c := out[2 * i + 1]![j]!
+      let meas := Float.atan2 s c / twoPi
+      let ideal := ((440 * (n + j)) % 48000).toFloat / 48000.0
+      let d0 := meas - ideal
+      let d := (d0 - d0.round).abs
+      worst := max worst d
+    let bound := perSample * (n + 4).toFloat * 1.04 + 1e-8
+    ok := ok && worst ≤ bound
+    IO.println s!"        {what}: phase vs ideal 440 Hz at n = {n}: {sci worst} cycles ≤ {sci bound} (frequency error ≤ {sci (perSample * 48000.0)} Hz)"
+  if ok then passGate label "the realized fundamental is within the documented bound: rational Λ·rate/2^48 Hz (Λ = 60 and 2^16), free rate/2^32 Hz"
+  else failGate label "a realized fundamental is outside its documented bound"
+
 def runRatios (arena : Arena) : IO (Nat × Nat) := do
   let results := #[
     ← runIntegerColumn arena,
     ← runRationalExact arena,
     ← runFree arena,
     ← runEnvelope arena,
-    ← runCull arena]
+    ← runCull arena,
+    ← runSparseCull arena,
+    ← runRefusals arena,
+    ← runRealizedPitch arena]
   pure (results.size, results.filter (!·) |>.size)
 
 end Tropical.Tropicaltest.SpectralRatios

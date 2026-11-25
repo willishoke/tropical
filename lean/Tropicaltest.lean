@@ -394,8 +394,8 @@ def main (args : List String) : IO UInt32 := do
   IO.println "spectral ratio columns:"
   match Tropical.Playground.stdlib with
   | .error error =>
-      total := total + 5
-      failed := failed + 5
+      total := total + 8
+      failed := failed + 8
       IO.println s!"  FAIL  spectral-ratios  stdlib: {error}"
   | .ok (arena, _) =>
       let (n, bad) ← Tropical.Tropicaltest.SpectralRatios.runRatios arena
