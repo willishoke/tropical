@@ -8,8 +8,12 @@ Date: 2026-11-25. Code: `RatioClock` and `ClockMultDivQ15` in
 `tests/web/wasm_vs_jit.test.ts`.
 
 A rational clock runs at `n/d` of a master frequency. Two of them drift
-against each other audibly and still recur exactly: they share one master
+against each other audibly and stay locked exactly: they share one master
 position, so their phase relation is a fixed integer relation, forever.
+
+Status: a draft. Its surface (the `freq` format, the nibble knobs, one ring
+position shared with the spectral `ratios` column, where `ClockMultDivQ15`
+lives) is open; see PR #262.
 
 ## `RatioClock`
 
@@ -17,7 +21,7 @@ position, so their phase relation is a fixed integer relation, forever.
 |---|---|---|
 | `clk` | τ | the clock, Q48.16 |
 | `freq` | `int32` Q16.16 | master frequency in Hz |
-| `n`, `d` | `int32` | the ratio; the low four bits are read, so `n, d ∈ [0, 15]` |
+| `n`, `d` | `int32` | the ratio; only the low four bits are read, so 16 reads as 0 (the clock stops) and −1 reads as 15 |
 | `offset` | `int32` Q0.32 | phase offset in cycles |
 | `phase` (out) | `int` | the phase on the Q0.32 rail, in `[0, 2³²)` |
 
@@ -28,45 +32,93 @@ into a spline bare: `{"phase": {"op": "ref", "instance": "clk1", "output":
 ## Construction
 
 - The master position is `Ψ ∈ ℤ/2⁶⁴`, `Ψ = ⌊I · τ / 2¹⁶⌋`. One wrap of the
-  ring is `Λ = lcm(1..15) = 360360` master cycles, so the increment is
+  ring is the common period `Λ = lcm(1..15) = 360360` master cycles, so the increment is
   `I = ⌊F · K / 2¹⁶⌋` with `K = round(2⁶⁴ / (Λ · rate))`.
 - The phase is the top word of `m·Ψ + offset·2³²` with `m = n · (Λ / d)`,
   an integer below 2²³. `Λ / d` is a table of 15 constants. The ring product
   divides nothing and drops nothing.
 - Ψ depends on `clk` and `freq` only. Every `RatioClock` on the same clock
-  and master computes the same Ψ, so separate instances are locked.
+  and the same `freq` word computes the same Ψ, so separate instances are
+  locked (see "The lock").
 - `d = 0` or `n = 0` stops the clock at its offset.
+
+## The lock
+
+The lock holds on the full Q0.64 phases `Pᵢ = mᵢ·Ψ + oᵢ·2³²`:
+`nⱼ·dᵢ·(Pᵢ − oᵢ·2³²) = nᵢ·dⱼ·(Pⱼ − oⱼ·2³²)` on ℤ/2⁶⁴, at every Ψ, for every
+`freq`. The `phase` output is the top word of `Pᵢ`, so the observed 32-bit
+words satisfy the relation only up to each word's floor.
+
+The ratio must go in `n` and `d`. Two clocks share Ψ only if they read the
+same `freq` word: a clock at `freq` 2F and one at `freq` F with `n = 2` are
+not locked, because `I(2F)` and `2·I(F)` can differ by one LSB.
 
 ## What is proved and what is gated
 
-Proved over the model (no `sorry`, standard axioms):
+Proved in `Testing/ClockMultDivLaws.lean` (no `sorry`, standard axioms):
 
-- `multiplier_exact`: `d · m = n · Λ`, so `m` is exact.
-- `phase_recurs`, `cycles_per_universal`: one wrap of Ψ returns every
-  clock to its phase, and clock `i` turns exactly `mᵢ` cycles in it.
-- `lock`: `nⱼ·dᵢ·(Pᵢ − oᵢ) = nᵢ·dⱼ·(Pⱼ − oⱼ)` on ℤ/2⁶⁴ at every Ψ.
-- The 32-bit limb identities (`mulWideU32_eq`, `mulLo64_eq`, …) and the
-  clock split of `ringPosition64`.
+- `multiplier_exact`: `d · (n · (Λ / d)) = n · Λ` for `d ∈ [1, 15]`, and
+  `multiplier_lt`: the multiplier is below 2²³.
+- `lock`: a generic identity on `BitVec 64` over free variables: if
+  `dᵢ·mᵢ = nᵢ·Λ` and `dⱼ·mⱼ = nⱼ·Λ`, then
+  `nⱼ·dᵢ·((mᵢ·Ψ + oᵢ) − oᵢ) = nᵢ·dⱼ·((mⱼ·Ψ + oⱼ) − oⱼ)`. It is not
+  instantiated for the model's `phase` and `multiplier`; `multiplier_exact`
+  supplies the hypothesis.
+- `phase_recurs`: `m·(Ψ + 2⁶⁴) + o ≡ m·Ψ + o`. It is about Ψ only and
+  says nothing about τ. `cycles_per_universal`: in one wrap of Ψ, clock
+  `n/d` turns exactly `m` cycles.
+- The limb identities (`mulWideU32_eq`, `mulLoU32By64_eq`, `mulLo64_eq`,
+  `hiWord_of_limbs`, `mulTop_eq`) over natural numbers, assuming each limb
+  product is exact, and `position_split`, the clock split of
+  `ringPosition64`. They do not cover a signed `F` in `hzQ16ToInc64`; the
+  gate does.
 
-Gated against the JIT: the kernel's phase words equal the model over live
-writes, the full Q16.16 range and τ to ±2⁶². A spline read by a
-`RatioClock` equals the same spline read at that phase word through an
-`int` param, bit for bit. All channels repeat after one wrap. WASM equals
-the JIT bit for bit.
+Gated against the JIT (`tropicaltest --clock-mult-div-only`, at the
+Lean runtime's 44.1 kHz):
 
-## Recurrence in τ
+- The kernel's phase words equal the model over live writes, `freq` over the
+  whole Q16.16 word, knob words outside 0..15, and τ out to ±2⁶².
+- A spline read by a `RatioClock` equals, bit for bit, the same spline read
+  at that phase word by a reference patch whose phase is a computing wire on
+  the clock (`τ >> 16`, rendered at `τ = word·2¹⁶`). The phase words are
+  observed through a gain-1 `VCA` on `toFloat(phase)`, which is exact in f64
+  (below 2³²) and only there.
+- At a master whose increment has `v₂(I) ≥ 18`, every channel repeats bit for
+  bit after `2^(64 − v₂(I))` samples.
+- WASM equals the JIT bit for bit (`tests/web/wasm_vs_jit.test.ts`).
 
-The lock is exact for every `freq`. Recurrence in samples is exact when
-`2⁶⁴ / I` is a whole number of samples, that is when the 2-adic valuation
-of `I` is at least 18 at 48 kHz. Otherwise Ψ recurs in ring units but not
-on a sample boundary. The realized master frequency differs from `F` by at
-most `|F|·2⁻¹⁷` plus one increment LSB (9.4e-7 Hz at 48 kHz). The
-universal cycle is `Λ / f` seconds: 100 hours at 1 Hz, 6 minutes at 1 kHz.
+At `--float f32` the constant `K` is computed on the float lane, and
+model/JIT equality is not gated there. Computing `K` as an exact integer at
+assemble time would remove the question.
 
-## Why 64 bits
+## Recurrence
 
-A 32-bit ring would have an increment LSB of `Λ · 48000 / 2³² ≈ 4 kHz`.
-With 64 bits it is 9.4e-7 Hz, finer than the Q16.16 knob's own step.
+The lock is exact. Recurrence is a separate matter:
+
+- **Exact recurrence.** The sampled position `Ψ(s) = I·s mod 2⁶⁴` always
+  recurs exactly, with a period of `2^(64 − v₂(I))` samples, where `v₂` is
+  the 2-adic valuation. For most masters that period is far beyond τ's
+  range. The gate picks a master with `v₂(I) ≥ 18` only to bring the period
+  inside it. Its masters (at 44.1 kHz) are word 147087 (2.244 Hz,
+  `v₂ = 19`, a period of 2⁴⁵ samples, 25 years, 4969 wraps of Ψ) and word
+  294174 (`v₂ = 20`, 2⁴⁴ samples, again 4969 wraps). The period is not one
+  wrap of Ψ.
+- **Near-recurrence.** After one common period, `Λ / f` seconds (100 hours
+  at 1 Hz, 6 minutes at 1 kHz), Ψ is back at 0 to within half a sample's
+  advance. Each clock is then within half a sample's phase advance of its
+  offset: `(n/d)·f / (2·rate)` cycles, 4.6e-3 cycles for the master at
+  440 Hz and 48 kHz. That is sub-sample.
+
+## Precision
+
+- **Increment LSB:** `Λ·rate/2⁶⁴` Hz of master. That is 9.4e-10 Hz at
+  48 kHz and 8.6e-10 Hz at 44.1 kHz.
+- **The realized master** is `I·Λ·rate/2⁶⁴`. It differs from `F` by at most
+  `|F|·Λ·rate/2⁶⁵` (a relative error of 4.7e-10 at 48 kHz, from rounding
+  `K`) plus one LSB (from the floor).
+- **The error a user meets is the Q16.16 knob's own truncation,** up to
+  2⁻¹⁶ Hz = 1.5e-5 Hz. It dominates both terms above.
+- **Why 64 bits:** a 32-bit ring's LSB would be `Λ·48000/2³²` = 4.03 Hz.
 
 ## Realization
 
@@ -89,7 +141,8 @@ output element type. A `phaseN` output is `int32`, so it reaches the spline's
 
 ## Not built
 
-- Glide-to-lock, snap, and a held phase at `n = 0`. Each needs an integer
-  anchor discipline at the param port: the host captures the phase
-  difference and write time, and the kernel reads them as two more params.
+- Click-free retune, glide-to-lock, snap, and a held phase at `n = 0`.
+  `freq`, `n` and `d` are integer typed slots, so they take only raw writes.
+  A ring anchor needs a 64-bit Ψ-shift companion shared per master param. A
+  per-clock Q0.32 offset would break the exact lock.
 - Ratios with `d` above 15 (they need a larger `Λ`).
