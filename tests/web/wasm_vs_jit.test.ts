@@ -272,7 +272,7 @@ async function expectBitIdentical(name: string, prog: ProgramFile, N: number,
 
 // The registered splines (`lean/Tropical/EmitArrow/Spline.lean`): a periodic
 // Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times a periodic B-spline
-// envelope read through `PdClip` (`EmitArrow/PdClip.lean`) from an 8 Hz one:
+// envelope read through `PhaseClip` (`EmitArrow/PhaseClip.lean`) from an 8 Hz one:
 // clock → pulse-width warp → spline. The wave's control values and the
 // envelope's width are params, so a written control or width is a param
 // write into the same artifact.
@@ -296,7 +296,7 @@ function splineProgram(wave: number[], width = SPLINE_WIDTH): ProgramFile {
       { op: 'instanceDecl', name: 'wave', program: 'PeriodicCatmullRom8', inputs: {
         phase: phaseOf('ph'), ...controls('w', wave) } },
       { op: 'instanceDecl', name: 'ev', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 8 } },
-      { op: 'instanceDecl', name: 'gate', program: 'PdClip', inputs: {
+      { op: 'instanceDecl', name: 'gate', program: 'PhaseClip', inputs: {
         phase: phaseOf('ev'), width: { op: 'param', name: 'width' } } },
       { op: 'instanceDecl', name: 'env', program: 'PeriodicBSpline8', inputs: {
         phase: { op: 'ref', instance: 'gate', output: 'phase' }, ...controls(null, SPLINE_ENV) } },
@@ -436,7 +436,7 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
-  test('spline wave × clock → PdClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
+  test('spline wave × clock → PhaseClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
     // 6000 samples: one 8 Hz cycle, past the gate's fall at width 0.4.
     await expectBitIdentical('spline', splineProgram(SPLINE_WAVE), 6000)
   })
@@ -450,11 +450,11 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
-  test('clock → PdClip → spline: a written width ≡ the JIT compiled at that width', async () => {
+  test('clock → PhaseClip → spline: a written width ≡ the JIT compiled at that width', async () => {
     // 6000 samples cover one 8 Hz cycle at 48 kHz, so the gate falls inside
     // the window at both widths.
     const nat = runNative(compileViaLean(splineProgram(SPLINE_WAVE, 0.75)), 6000)
-    expectAudible('pdclip written', nat)
+    expectAudible('phaseclip written', nat)
     const wasm = await runWasm(splineProgram(SPLINE_WAVE), '', 6000, [['param:width', 0.75]])
     const before = runNative(compileViaLean(splineProgram(SPLINE_WAVE)), 6000)
     expect(wasm.length).toBe(nat.length)
@@ -505,7 +505,7 @@ describe('wasm vs native JIT', () => {
     await expectBitIdentical('SpectralSaw f32', spectralSawProgram(110), 512, 'f32')
   })
 
-  test('f32: spline wave × clock → PdClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
+  test('f32: spline wave × clock → PhaseClip → spline envelope — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('spline f32', splineProgram(SPLINE_WAVE), 6000, 'f32')
   })
 

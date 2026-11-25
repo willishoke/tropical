@@ -1,38 +1,46 @@
 import Tropical.Session.Compile
-import Tropical.EmitArrow.PdClip
+import Tropical.EmitArrow.PhaseClip
 import Tropical.Tropicaltest.Spline
 
 /-!
-# PdClip gates: the pulse width as a phase warp, and the envelope it makes
+# PhaseClip gates: the pulse width as a phase warp, and the envelope it makes
 
-`lean/Tropical/EmitArrow/PdClip.lean` is the module these gates back.
+`lean/Tropical/EmitArrow/PhaseClip.lean` is the module these gates back.
 
-* **pdclip-oracle** — the JIT's clipped phase and gate against an exact
+* **phaseclip-oracle** — the JIT's clipped phase and gate against an exact
   integer reference (`⌊p · 2³² / W⌋` in `Int`, `W` from IEEE `round(w · 2³²)`
   clamped to `[1, 2³²]`), bit for bit, for 58 widths: decimal and dyadic
   widths across `(0, 1]`, both ends (2⁻²⁰, 1), and moving widths outside the
   interval (−½, 0, 10⁻¹², 3·10⁻¹⁰, 1.5, 2), which clamp. Every width is
   rendered at every phase of the set: 4096 hashed phases, the cycle's ends,
   and `W − 1`, `W`, `W + 1` of every width. The phase arrives as
-  `n − 2³³`, so the kernel's reduction to the cycle is exercised too. The
-  width is computed in the kernel per sample (not folded at compile time).
-* **pdclip-envelope** — a periodic spline read through the clip. Catmull-Rom
+  `n − 2³³` for half the widths and `n + 3·2³²` for the other half, so the
+  kernel's reduction to the cycle is exercised on both sides. The width is
+  computed in the kernel per sample (not folded at compile time).
+* **phaseclip-static** — `widthWord` on known decimals (1, ½, 0.3, ¼,
+  2⁻³³, 2·10⁻¹⁰, 0.999999999, 7·10⁻⁶), and the kernel of
+  `PulseWidth.static` for those widths, bit for bit against the exact
+  reference at `W − 1`, `W`, `W + 1` and hashed phases.
+* **phaseclip-envelope** — a periodic spline read through the clip. Catmull-Rom
   starts at `c0` and holds at `c0` for the rest of the cycle, bit for bit;
   the B-spline holds at its own phase-0 value. The read reaches phase 1
   exactly when the gate falls (at `p = W`), one step after the last sweep
   sample, for every width. With `c1 = c7` (an extremum at phase 0) the left
   slope at the hold point is 0, matching the held side; without it the gate
   measures the slope jump the reference predicts, so the slope check is not
-  vacuous. Values match the f64 reference everywhere.
-* **pdclip-live** — a patch `phase → PdClip → PeriodicCatmullRom8` with the
+  vacuous. A Catmull-Rom at K = 5 and a B-spline at K = 3 hold at their
+  phase-0 value too (phase 2³² at K not a power of two). Values match the
+  f64 reference everywhere.
+* **phaseclip-live** — a patch `phase → PhaseClip → PeriodicCatmullRom8` with the
   width a `param:` slot. A `set_param` on the width changes the next buffer
   of the loaded kernel to the reference at the new width, with no recompile.
-* **pdclip-refusal** — a static width outside `(0, 1]` is refused: as a bare
-  literal at the patch bay (`0`, `1.5`, `-0.25`), and as `PulseWidth.static`
-  at assemble time; `1` and `0.25` are accepted.
+* **phaseclip-refusal** — a static width outside `[2⁻³³, 1]` is refused: as a
+  bare literal at session compile (`0`, `1.5`, `-0.25`, `1e-10`), and as
+  `PulseWidth.static` at assemble time (`0`, `1.5`, `10⁻¹⁰`, `10⁻¹²`, whose
+  words would round to 0); `1`, `0.25` and `2e-10` are accepted.
 -/
 
-namespace Tropical.Tropicaltest.PdClip
+namespace Tropical.Tropicaltest.PhaseClip
 
 open Tropical
 open Tropical.Ir
@@ -73,11 +81,20 @@ def widthSig (m d : Int) : BuildM Sig := do
 
 def widthFloat (m d : Int) : Float := Float.ofInt m / Float.ofInt d
 
-/-- The phase input `n − 2³³`: the same cycle position as `n`, negative. -/
-def rawPhaseSig : BuildM Sig := do
-  sub (← sampleIndex) (← lit 8589934592)
+/-- The phase input `n + offset` with `offset` a multiple of 2³²: the same
+    cycle position as `n`. `lowOffset` makes it negative, `highOffset` puts it
+    at or above 2³². -/
+def lowOffset : Int := -8589934592
+def highOffset : Int := 12884901888
 
-def rawPhase (n : Nat) : Int := Int.ofNat n - 8589934592
+def rawPhaseSig (offset : Int := lowOffset) : BuildM Sig := do
+  add (← sampleIndex) (← lit offset)
+
+def rawPhase (n : Nat) (offset : Int := lowOffset) : Int := Int.ofNat n + offset
+
+/-- Even-numbered widths read a negative raw phase, odd ones a raw phase at or
+    above 2³². -/
+def offsetOf (c : Nat) : Int := if c % 2 == 0 then lowOffset else highOffset
 
 def oracleWidths : Array (Int × Int) := Id.run do
   let mut out : Array (Int × Int) := #[(1, 1), (1, 2), (1, 3), (2, 3), (3, 10), (1, 10),
@@ -104,19 +121,20 @@ def oraclePhases (words : Array Int) : Array Nat := Id.run do
     out := out.push (n * hashMul % 4294967296)
   return out
 
--- ── pdclip-oracle ────────────────────────────────────────────────────────
+-- ── phaseclip-oracle ────────────────────────────────────────────────────────
 
 def runOracle (arena : Arena) : IO Bool := do
-  let label := "pdclip-oracle"
+  let label := "phaseclip-oracle"
   let widths := oracleWidths
   if let some (m, d) := widths.find? fun (m, d) => isTie (widthFloat m d) then
     return ← failGate label s!"fixture: width {m}/{d} is a rounding tie"
   -- One channel per width (a plan has at most 64): the clipped phase plus
   -- the gate times 2³⁴, exact in f64.
-  let outs : BuildM (Array Sig) := widths.mapM fun (m, d) => do
-    let clip ← pdClipSig (← rawPhaseSig) (.live (← widthSig m d))
+  let outs : BuildM (Array Sig) := (Array.range widths.size).mapM fun c => do
+    let (m, d) := widths[c]!
+    let clip ← phaseClipSig (← rawPhaseSig (offsetOf c)) (.live (← widthSig m d))
     add (← toFloatE clip.phase) (← mul clip.gate (← lit 17179869184))
-  let plan ← match compileMulti arena "pdclip_oracle" outs 48000 with
+  let plan ← match compileMulti arena "phaseclip_oracle" outs 48000 with
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile: {firstLine e}"
   let words := widths.map fun (m, d) => refWord (widthFloat m d)
@@ -130,7 +148,7 @@ def runOracle (arena : Arena) : IO Bool := do
     if gotCh.size != ns.size then
       return ← failGate label s!"rendered {gotCh.size} samples, want {ns.size}"
     for i in [0:ns.size] do
-      let (q, high) := refClip (rawPhase ns[i]!) W
+      let (q, high) := refClip (rawPhase ns[i]! (offsetOf c)) W
       let want := Float.ofInt q + (if high then 17179869184.0 else 0.0)
       if gotCh[i]!.toBits != want.toBits then
         if bad == 0 then
@@ -142,7 +160,7 @@ def runOracle (arena : Arena) : IO Bool := do
   else
     failGate label s!"{bad} mismatches; first: {firstBad}"
 
--- ── pdclip-envelope ──────────────────────────────────────────────────────
+-- ── phaseclip-envelope ──────────────────────────────────────────────────────
 
 /-- Catmull-Rom controls with `c1 = c7` (an extremum at phase 0), the same
     with `c7` moved (no extremum), and B-spline controls. Values are `m/64`. -/
@@ -158,23 +176,24 @@ def envelopeWidths : Array (Int × Int) :=
 def fdStep (W : Int) : Int := max 1 (W / 16384)
 
 def runEnvelope (arena : Arena) : IO Bool := do
-  let label := "pdclip-envelope"
+  let label := "phaseclip-envelope"
   let widths := envelopeWidths
   let words := widths.map fun (m, d) => refWord (widthFloat m d)
   let sets : Array (SplineBasis × Array Int) :=
     #[(catmullRomBasis, extremumControls), (catmullRomBasis, slopedControls),
-      (uniformBSplineBasis, bsplineControls)]
+      (uniformBSplineBasis, bsplineControls), (catmullRomBasis, #[10, 40, 64, 30, 5]),
+      (uniformBSplineBasis, #[-6, 50, 12])]
   -- Channels: for each width, the clipped phase, then one envelope per set.
   let perWidth := 1 + sets.size
   let outs : BuildM (Array Sig) := do
     let mut out := #[]
     for (m, d) in widths do
-      let clip ← pdClipSig (← rawPhaseSig) (.live (← widthSig m d))
+      let clip ← phaseClipSig (← rawPhaseSig) (.live (← widthSig m d))
       out := out.push (← toFloatE clip.phase)
       for (basis, cs) in sets do
         out := out.push (← splineSig basis (← cs.mapM controlSig) clip.phase)
     pure out
-  let plan ← match compileMulti arena "pdclip_envelope" outs 48000 with
+  let plan ← match compileMulti arena "phaseclip_envelope" outs 48000 with
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile: {firstLine e}"
   let mut ns : Array Nat := (Array.range 4097).map (· * 1048576)
@@ -221,7 +240,7 @@ def runEnvelope (arena : Arena) : IO Bool := do
         if (p == 0 || p ≥ W) && v[i]!.toBits != held.toBits then holdBad := holdBad + 1
         if basis.scale == 2 && p == 0 && v[i]!.toBits != start.toBits then holdBad := holdBad + 1
       -- One-sided slope at the hold point, in value per cycle of the read.
-      if basis.scale == 2 then
+      if si < 2 then
         let h := fdStep W
         let valueAt := fun (target : Int) =>
           match (Array.range ns.size).find? fun (i : Nat) => Int.ofNat ns[i]! == target with
@@ -229,7 +248,7 @@ def runEnvelope (arena : Arena) : IO Bool := do
           | none => 0.0 / 0.0
         let du : Float := Float.ofInt (h * cycle / W) / 4294967296.0
         let left := (3.0 * valueAt W - 4.0 * valueAt (W - h) + valueAt (W - 2 * h)) / (2.0 * du)
-        let expected := refEvalDt basis csF 0 0.0 * 8.0
+        let expected := refEvalDt basis csF 0 0.0 * cs.size.toFloat
         if si == 0 then
           worstExtremumSlope := max worstExtremumSlope left.abs
         else
@@ -242,7 +261,7 @@ def runEnvelope (arena : Arena) : IO Bool := do
   else
     failGate label s!"reference {sci worstRef}, hold {holdBad}, end {endBad}, extremum slope {sci worstExtremumSlope}, sloped gap {sci worstSlopedGap}"
 
--- ── pdclip-live ──────────────────────────────────────────────────────────
+-- ── phaseclip-live ──────────────────────────────────────────────────────────
 
 private def frames : Nat := 64
 
@@ -255,10 +274,10 @@ private def livePatch (values : Array Int) (width : Float) : String :=
       toString (controlFloat values[j]!) ++ "}"
   let inputs := (Array.range 8).toList.map fun j =>
     "\"c" ++ toString j ++ "\":{\"op\":\"param\",\"name\":\"k" ++ toString j ++ "\"}"
-  "{\"schema\":\"tropical_program_2\",\"name\":\"pdclip_live\",\"body\":{\"op\":\"block\",\"decls\":[" ++
+  "{\"schema\":\"tropical_program_2\",\"name\":\"phaseclip_live\",\"body\":{\"op\":\"block\",\"decls\":[" ++
   ",".intercalate params ++ "," ++
   "{\"op\":\"paramDecl\",\"name\":\"w\",\"value\":" ++ toString width ++ "}," ++
-  "{\"op\":\"instanceDecl\",\"name\":\"clip\",\"program\":\"PdClip\",\"inputs\":{" ++
+  "{\"op\":\"instanceDecl\",\"name\":\"clip\",\"program\":\"PhaseClip\",\"inputs\":{" ++
   "\"phase\":{\"op\":\"mul\",\"args\":[{\"op\":\"sampleIndex\"}," ++ toString liveInc ++ "]}," ++
   "\"width\":{\"op\":\"param\",\"name\":\"w\"}}}," ++
   "{\"op\":\"instanceDecl\",\"name\":\"sp\",\"program\":\"PeriodicCatmullRom8\",\"inputs\":{" ++
@@ -268,7 +287,7 @@ private def livePatch (values : Array Int) (width : Float) : String :=
   "{\"op\":\"ref\",\"instance\":\"sp\",\"output\":\"out\"}}]}}"
 
 def runLive : IO Bool := do
-  let label := "pdclip-live"
+  let label := "phaseclip-live"
   let cs := extremumControls
   let before := 0.3
   let after := 0.6
@@ -301,22 +320,23 @@ def runLive : IO Bool := do
   else
     failGate label s!"before {sci err0}, after {sci err1}, moved {sci moved}"
 
--- ── pdclip-refusal ───────────────────────────────────────────────────────
+-- ── phaseclip-refusal ───────────────────────────────────────────────────────
 
 private def literalPatch (width : String) : String :=
-  "{\"schema\":\"tropical_program_2\",\"name\":\"pdclip_literal\",\"body\":{\"op\":\"block\",\"decls\":[" ++
-  "{\"op\":\"instanceDecl\",\"name\":\"clip\",\"program\":\"PdClip\",\"inputs\":{" ++
+  "{\"schema\":\"tropical_program_2\",\"name\":\"phaseclip_literal\",\"body\":{\"op\":\"block\",\"decls\":[" ++
+  "{\"op\":\"instanceDecl\",\"name\":\"clip\",\"program\":\"PhaseClip\",\"inputs\":{" ++
   "\"phase\":{\"op\":\"mul\",\"args\":[{\"op\":\"sampleIndex\"},1000]},\"width\":" ++ width ++ "}}]," ++
   "\"assigns\":[{\"op\":\"outputAssign\",\"name\":\"dac.out\",\"expr\":" ++
   "{\"op\":\"ref\",\"instance\":\"clip\",\"output\":\"gate\"}}]}}"
 
 def runRefusal (arena : Arena) : IO Bool := do
-  let label := "pdclip-refusal"
+  let label := "phaseclip-refusal"
   let registry ← match Tropical.Session.bootRegistry with
     | .error f => return ← failGate label s!"stdlib boot failed: {f.toJson.compress}"
     | .ok st => pure st
   let mut problems : Array String := #[]
-  for (width, refused) in #[("0", true), ("1.5", true), ("-0.25", true), ("1", false), ("0.25", false)] do
+  for (width, refused) in #[("0", true), ("1.5", true), ("-0.25", true), ("1e-10", true),
+      ("1", false), ("0.25", false), ("2e-10", false)] do
     match (Tropical.Session.compilePatch (literalPatch width)).runOn registry with
     | (.error f, _) =>
       let msg := f.toJson.compress
@@ -325,22 +345,56 @@ def runRefusal (arena : Arena) : IO Bool := do
         problems := problems.push s!"literal {width} refused for another reason: {msg}"
     | (.ok _, _) => if refused then problems := problems.push s!"literal {width} accepted"
   let staticBuild := fun (w : Lean.JsonNumber) =>
-    assemble arena "pdclip_static" #[{ name := "out", type? := some (.scalar .float) }] #[] do
-      let clip ← pdClipSig (← sampleIndex) (.static w)
+    assemble arena "phaseclip_static" #[{ name := "out", type? := some (.scalar .float) }] #[] do
+      let clip ← phaseClipSig (← sampleIndex) (.static w)
       pure { inputs := #[], assigns := #[(.port ⟨0⟩, clip.gate)] }
-  for (w, refused) in #[((⟨0, 0⟩ : Lean.JsonNumber), true), (⟨15, 1⟩, true), (⟨1, 0⟩, false),
-      (⟨25, 2⟩, false)] do
+  for (w, refused) in #[((⟨0, 0⟩ : Lean.JsonNumber), true), (⟨15, 1⟩, true), (⟨1, 10⟩, true),
+      (⟨1, 12⟩, true), (⟨1, 0⟩, false), (⟨25, 2⟩, false), (⟨116415321826934814453125, 33⟩, false)] do
     match staticBuild w, refused with
     | .ok _, true => problems := problems.push s!"static width {w} accepted at assemble"
     | .error e, false => problems := problems.push s!"static width {w} refused: {e}"
     | _, _ => pure ()
   if problems.isEmpty then
-    passGate label "a static width outside (0, 1] is refused (bare literal at ingest: 0, 1.5, -0.25; PulseWidth.static at assemble: 0, 1.5); 1 and 0.25 accepted"
+    passGate label "a static width outside [2^-33, 1] is refused (bare literal at session compile: 0, 1.5, -0.25, 1e-10; PulseWidth.static at assemble: 0, 1.5, 1e-10, 1e-12); 1, 0.25, 2e-10 and 2^-33 accepted"
   else
     failGate label (String.intercalate "; " problems.toList)
 
-def runPdClip (arena : Arena) : IO (Nat × Nat) := do
-  let results := #[← runOracle arena, ← runEnvelope arena, ← runLive, ← runRefusal arena]
+-- ── phaseclip-static ─────────────────────────────────────────────────────
+
+/-- Decimals and the word `round(w · 2³²)` each must give, worked by hand. -/
+def staticWords : Array (Lean.JsonNumber × Int) := #[
+  (⟨1, 0⟩, 4294967296), (⟨5, 1⟩, 2147483648), (⟨3, 1⟩, 1288490189),
+  (⟨25, 2⟩, 1073741824), (⟨116415321826934814453125, 33⟩, 1), (⟨2, 10⟩, 1),
+  (⟨999999999, 9⟩, 4294967292), (⟨7, 6⟩, 30065)]
+
+def runStatic (arena : Arena) : IO Bool := do
+  let label := "phaseclip-static"
+  let wrong := staticWords.filter fun (w, word) => widthWord w != word
+  unless wrong.isEmpty do
+    return ← failGate label s!"widthWord: {wrong.map fun (w, word) => s!"{w} gave {widthWord w}, want {word}"}"
+  let outs : BuildM (Array Sig) := (Array.range staticWords.size).mapM fun c => do
+    let clip ← phaseClipSig (← rawPhaseSig (offsetOf c)) (.static staticWords[c]!.1)
+    add (← toFloatE clip.phase) (← mul clip.gate (← lit 17179869184))
+  let plan ← match compileMulti arena "phaseclip_static" outs 48000 with
+    | .ok plan => pure plan
+    | .error e => return ← failGate label s!"compile: {firstLine e}"
+  let ns := oraclePhases (staticWords.map (·.2))
+  let got ← renderAt plan staticWords.size ns
+  let mut bad := 0
+  for c in [0:staticWords.size] do
+    let W := staticWords[c]!.2
+    for i in [0:ns.size] do
+      let (q, high) := refClip (rawPhase ns[i]! (offsetOf c)) W
+      let want := Float.ofInt q + (if high then 17179869184.0 else 0.0)
+      if got[c]!.size != ns.size || got[c]![i]!.toBits != want.toBits then bad := bad + 1
+  if bad == 0 then
+    passGate label s!"widthWord ≡ the hand-worked word for {staticWords.size} decimals (2^-33 → 1); PulseWidth.static renders ≡ exact reference over {ns.size} phases each"
+  else
+    failGate label s!"{bad} mismatches"
+
+def runPhaseClip (arena : Arena) : IO (Nat × Nat) := do
+  let results := #[← runOracle arena, ← runStatic arena, ← runEnvelope arena, ← runLive,
+    ← runRefusal arena]
   pure (results.size, results.filter (!·) |>.size)
 
-end Tropical.Tropicaltest.PdClip
+end Tropical.Tropicaltest.PhaseClip

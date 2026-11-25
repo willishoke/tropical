@@ -40,7 +40,7 @@ import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
 import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.TypeFamily
-import Tropical.Tropicaltest.PdClip
+import Tropical.Tropicaltest.PhaseClip
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -125,7 +125,7 @@ def main (args : List String) : IO UInt32 := do
     | .ok (arena, _) =>
         let (_, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
         let (_, familyBad) ← Tropical.Tropicaltest.TypeFamily.runTypeFamily
-        let (_, badClip) ← Tropical.Tropicaltest.PdClip.runPdClip arena
+        let (_, badClip) ← Tropical.Tropicaltest.PhaseClip.runPhaseClip arena
         return if bad + familyBad + badClip == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
@@ -373,15 +373,15 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + bad
 
   -- ── (g′) The uniform cubic spline read by a phase (EmitArrow/Spline.lean) ──
-  IO.println "spline (oracle, seam, live control; pdclip oracle, envelope, live width, refusal):"
+  IO.println "spline (oracle, seam, live control, cycle end; phase clip oracle, static, envelope, live width, refusal):"
   match Tropical.Playground.stdlib with
   | .error error =>
-      total := total + 7
-      failed := failed + 7
+      total := total + 9
+      failed := failed + 9
       IO.println s!"  FAIL  spline  stdlib: {error}"
   | .ok (arena, _) =>
       let (n, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
-      let (nClip, badClip) ← Tropical.Tropicaltest.PdClip.runPdClip arena
+      let (nClip, badClip) ← Tropical.Tropicaltest.PhaseClip.runPhaseClip arena
       total := total + n + nClip
       failed := failed + bad + badClip
 

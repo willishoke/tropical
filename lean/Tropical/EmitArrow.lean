@@ -5,7 +5,7 @@ import Tropical.EmitArrow.BankOrder
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spectral
 import Tropical.EmitArrow.Spline
-import Tropical.EmitArrow.PdClip
+import Tropical.EmitArrow.PhaseClip
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
@@ -39,7 +39,7 @@ The modules:
   constructors (`design/spectral-family.md`).
 * `Spline` — a uniform periodic cubic spline read by an integer phase
   (Catmull-Rom or B-spline; `design/spline.md`).
-* `PdClip` — the pulse width of a clock as a phase warp, and its gate: a
+* `PhaseClip` — the pulse width of a clock as a phase warp, and its gate: a
   periodic spline read through it is an envelope (`design/spline.md`).
 * `Modal` / `Patch` / `Gong` — the ID-valued modal
   compiler, graph lowering seam, and struck-register authoring.

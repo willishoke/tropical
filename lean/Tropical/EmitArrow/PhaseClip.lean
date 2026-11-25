@@ -1,17 +1,18 @@
 import Tropical.EmitArrow.Sig
 
 /-!
-# EmitArrow.PdClip — the pulse width of a clock, as a phase warp
+# EmitArrow.PhaseClip — the pulse width of a clock, as a phase warp
 
 A gate is a clock with a pulse width. Given a phase `p` (Q0.32, one cycle is
 2³²) and a width `w ∈ (0, 1]`, the clipped phase sweeps one full cycle over
 the first `w` of the input cycle, then holds at the end of the cycle:
 
-    pdclip(p, w) = min(p / w, 1)        (in cycles)
+    phaseclip(p, w) = min(p / w, 1)        (in cycles)
 
-This is the linear phase clip that phase-distortion synthesis applies to a
-phasor (Csound's `pdclip`, here with the unclipped window at the start of the
-cycle). Read through a periodic spline it is an envelope that always fits its
+It is the unipolar special case of the linear phase clip that Csound's
+`pdclip` applies to a phasor for phase-distortion synthesis, with the window
+at the start of the cycle and `width` the unclipped fraction (`pdclip`'s
+`kWidth` is the clipped one). Read through a periodic spline it is an envelope that always fits its
 gate: the read starts at phase 0 and reaches phase 1 exactly when the gate
 falls, and since phase 1 and phase 0 are the same point of a periodic spline,
 the held value is the start value. The gate itself, high for the first `w` of
@@ -22,20 +23,28 @@ the cycle, is the comparison the clip already makes.
 The phase is reduced to the cycle, `p = phase & (2³² − 1)`. The width is an
 integer word `W ∈ [1, 2³²]`, the width in units of 2⁻³² of a cycle. Then
 
-    pdclip = ⌊p · 2³² / W⌋   if p < W,     2³²   otherwise
+    phaseclip = ⌊p · 2³² / W⌋   if p < W,     2³²   otherwise
     gate   = p < W
 
 The quotient is exact on the integer rail: `p · 2³²` does not fit an `int`,
 so it is two steps of long division in base 2¹⁶ (`x₁ = p · 2¹⁶ < 2⁴⁸`,
 `q₁ = ⌊x₁ / W⌋`, `r₁ = x₁ − q₁W < W`, `q₂ = ⌊r₁ · 2¹⁶ / W⌋`, result
-`q₁ · 2¹⁶ + q₂`), every operand below 2⁴⁹ and every divide between
-non-negative integers. The held value 2³² is phase 1, which a periodic
-spline reads as phase 0 (`splineSig` masks its phase), bit for bit.
+`q₁ · 2¹⁶ + q₂`), every divide between non-negative integers. In the lane
+the final select keeps (`p < W`) every operand is below 2⁴⁹; in the lane it
+discards (`p ≥ W`, e.g. `W = 1`, `p = 2³² − 1`) `q₁ · 2¹⁶` can wrap, which
+is defined (two's-complement) and never read. The held value 2³² is phase 1,
+which a periodic spline reads as phase 0 (`splineSig` masks its phase), bit
+for bit; so does anything else that reduces its phase mod 2³², including a
+second `PhaseClip`, whose gate is then high for the whole of the first one's
+hold.
 
 The width word is where rounding can happen, and only there:
 
 * a static width (`PulseWidth.static`, a decimal) is `round(w · 2³²)` in
-  exact integer arithmetic at assemble time, and refused outside `(0, 1]`;
+  exact integer arithmetic at assemble time. It is refused outside
+  `[2⁻³³, 1]` (`pulseWidthInterval`): at or below 0, above 1, or narrower
+  than half a phase unit, where the word would round to 0 and divide by
+  zero;
 * a live width (`PulseWidth.live`, a float signal) is
   `clamp(toInt(round(w · 2³²)), 1, 2³²)` per sample. `w · 2³²` is exact in
   f64 and f32 (a power-of-two scale), and `round` is half away from zero, so
@@ -54,9 +63,11 @@ namespace Tropical.EmitArrow
 
 open Tropical.Ir
 
-/-- The interval a pulse width is defined on, `(0, 1]`. -/
+/-- The interval a static pulse width must lie in, `[2⁻³³, 1]`: the widths in
+    `(0, 1]` whose word `round(w · 2³²)` is at least 1. A narrower one would
+    be less than half a phase unit and its word 0. -/
 def pulseWidthInterval : Tropical.PortInterval :=
-  { lo := 0, loOpen := true, hi := 1, hiOpen := false }
+  { lo := ⟨116415321826934814453125, 33⟩, loOpen := false, hi := 1, hiOpen := false }
 
 /-- A pulse width: a decimal fixed at assemble time, or a float signal. -/
 inductive PulseWidth where
@@ -72,18 +83,18 @@ def widthWord (w : Lean.JsonNumber) : Int :=
 
 /-- The clipped phase (an `int`, `[0, 2³²]`) and the gate (a float, 1 for the
     first `w` of the cycle, else 0). -/
-structure PdClipOut where
+structure PhaseClipOut where
   phase : Sig
   gate : Sig
 
-/-- `pdclip(phaseQ, width)` and its gate (see the module doc). A static width
-    outside `(0, 1]` is refused here. -/
-def pdClipSig (phaseQ : Sig) (width : PulseWidth) : BuildM PdClipOut := do
+/-- `phaseclip(phaseQ, width)` and its gate (see the module doc). A static width
+    outside `[2⁻³³, 1]` is refused here. -/
+def phaseClipSig (phaseQ : Sig) (width : PulseWidth) : BuildM PhaseClipOut := do
   let cycle ← litI 4294967296
   let word ← match width with
     | .static w =>
       if pulseWidthInterval.contains w then litI (widthWord w)
-      else throw s!"pdclip: width {w} is outside {pulseWidthInterval.label}"
+      else throw s!"phaseclip: width {w} is outside [2^-33, 1]: at or below 0, above 1, or narrower than half a phase unit (its word would round to 0)"
     | .live w =>
       let raw ← toIntE (← roundE (← mul w (← lit 4294967296)))
       clamp raw (← litI 1) cycle

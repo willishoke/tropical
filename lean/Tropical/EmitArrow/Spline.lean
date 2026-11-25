@@ -6,7 +6,7 @@ import Tropical.EmitArrow.Sig
 A spline here is a shape read by a phase: a function of one phase coordinate,
 not a parametric curve. Every spline is periodic. The same object is a
 single-cycle waveform at audio rate, an LFO at a low rate, or an envelope when
-the phase that reads it stops at the end of the cycle (`EmitArrow/PdClip.lean`):
+the phase that reads it stops at the end of the cycle (`EmitArrow/PhaseClip.lean`):
 phase 1 and phase 0 are the same point, so an envelope ends where it starts.
 The spline does not own a clock; its phase is any integer phase signal (Q0.32,
 one cycle = 2³²), such as the DDS phase every exact oscillator computes.

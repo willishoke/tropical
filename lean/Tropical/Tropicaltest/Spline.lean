@@ -17,6 +17,8 @@ import Tropical.Tropicaltest.Spectral
   exactly as an interior knot of the original (K = 8, both bases). (2) Value
   and first derivative are continuous across phase 1 → 0, by one-sided
   finite differences from each side (K = 7 and 8, both bases).
+* **spline-cycle-end** — phase 2³² and its multiples (negative too) read
+  phase 0 bit for bit, K = 1, 2, 3, 5, 7, 12, both bases.
 * **spline-live** — a `PeriodicCatmullRom8` patch whose control values are
   `param:` slots. A `set_param` on the loaded runtime changes the next buffer
   of the audio kernel to the reference at the new value, with no recompile.
@@ -290,8 +292,38 @@ def runLive : IO Bool := do
   else
     failGate label s!"before {sci err0}, after {sci err1}, moved {sci moved}"
 
+-- ── spline-cycle-end ─────────────────────────────────────────────────────
+
+/-- Phase 2³² (and every multiple of it, negative ones too) reads exactly what
+    phase 0 reads, for K = 1, 2, 3 and K not a power of two: sample `n` reads
+    phase `(n − 2) · 2³²`. -/
+def runCycleEnd (arena : Arena) : IO Bool := do
+  let label := "spline-cycle-end"
+  let ks := #[1, 2, 3, 5, 7, 12]
+  let cfgs : Array (SplineBasis × Nat) :=
+    (#[catmullRomBasis, uniformBSplineBasis].map fun b => ks.map (b, ·)).flatten
+  let outs : BuildM (Array Sig) := cfgs.mapM fun (basis, k) => do
+    let phase ← mul (← sub (← sampleIndex) (← lit 2)) (← lit 4294967296)
+    splineSig basis (← (controlsOf (k * 31 + 5) k).mapM controlSig) phase
+  let plan ← match compileMulti arena "spline_cycle_end" outs 48000 with
+    | .ok plan => pure plan
+    | .error e => return ← failGate label s!"compile: {firstLine e}"
+  let got ← renderAt plan cfgs.size (range 0 7)
+  let mut bad := 0
+  let mut worst := 0.0
+  for c in [0:cfgs.size] do
+    let (basis, k) := cfgs[c]!
+    let v := got[c]!
+    let at0 := v[2]!
+    if v.size != 7 || v.any (·.toBits != at0.toBits) then bad := bad + 1
+    worst := max worst (at0 - refEval basis ((controlsOf (k * 31 + 5) k).map controlFloat) 0).abs
+  if bad == 0 && worst ≤ 1e-12 then
+    passGate label s!"phases −2·2³² … 4·2³² read phase 0 bit for bit, K ∈ {ks} × both bases; phase 0 ≡ reference ({sci worst})"
+  else
+    failGate label s!"{bad} configurations differ across multiples of 2³²; reference gap {sci worst}"
+
 def runSpline (arena : Arena) : IO (Nat × Nat) := do
-  let results := #[← runOracle arena, ← runSeam arena, ← runLive]
+  let results := #[← runOracle arena, ← runSeam arena, ← runLive, ← runCycleEnd arena]
   pure (results.size, results.filter (!·) |>.size)
 
 end Tropical.Tropicaltest.Spline

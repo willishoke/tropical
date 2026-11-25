@@ -1,9 +1,9 @@
 # Uniform cubic spline read by a phase
 
 Date: 2026-11-24, envelopes 2026-11-25. Code:
-`lean/Tropical/EmitArrow/Spline.lean`, `lean/Tropical/EmitArrow/PdClip.lean`.
+`lean/Tropical/EmitArrow/Spline.lean`, `lean/Tropical/EmitArrow/PhaseClip.lean`.
 Gates: `lean/Tropical/Tropicaltest/Spline.lean`,
-`lean/Tropical/Tropicaltest/PdClip.lean` and, for the families,
+`lean/Tropical/Tropicaltest/PhaseClip.lean` and, for the families,
 `Tropicaltest/TypeFamily.lean` (`tropicaltest --spline-only`).
 
 A spline is a shape read by a phase. It is a function of one phase
@@ -48,56 +48,71 @@ clock: its phase is any integer phase signal.
 There are no triggers. A gate is a clock with a pulse width `w ∈ (0, 1]`,
 and the pulse width is a warp of the clock's phase:
 
-    pdclip(p, w) = min(p / w, 1)      (p in cycles, reduced to [0, 1))
+    phaseclip(p, w) = min(p / w, 1)      (p in cycles, reduced to [0, 1))
 
 The read sweeps one full cycle over the first `w` of the input cycle, then
 holds at phase 1. Read through a periodic spline, that is an envelope that
 always fits its gate: it starts at phase 0, reaches phase 1 exactly when
 the gate falls, and holds there; phase 1 is phase 0, so it ends where it
-started (at `c0` for Catmull-Rom, which interpolates; at the curve's
-phase-0 value `(c₇ + 4c₀ + c₁)/6` for the B-spline). The value is
-continuous at the hold point, and so is the slope when phase 0 is an
-extremum of the spline (`c1 = c7` for both bases); otherwise the slope
-jumps there. A closed C¹ curve leaves phase 0 with the slope it arrives at
-phase 1 with, so an envelope from rest whose start is not flat dips past
-its rest value just before the gate falls; `c1 = c7` makes the seam flat,
-which removes the dip and the slope jump together.
+started (at `c₀` for Catmull-Rom, which interpolates; at the curve's
+phase-0 value `(c_{K−1} + 4c₀ + c₁)/6` for the B-spline). The value is
+continuous at the hold point, and so is the slope when the spline's slope
+at phase 0 is zero (`c₁ = c_{K−1}` for both bases: a stationary point, not
+necessarily an extremum); otherwise the slope jumps there. A closed C¹
+curve leaves phase 0 with the slope it arrives at phase 1 with, so an
+envelope from rest whose start is not flat dips past its rest value just
+before the gate falls; `c₁ = c_{K−1}` makes the seam flat, which removes
+the dip and the slope jump together.
 
-- **Name.** This is the linear phase clip of phase-distortion synthesis
-  (Csound's `pdclip`, "useful for remapping phasors for phase distortion
-  synthesis"), with the unclipped window at the start of the cycle. The
-  registered type is `PdClip`; the builder is `pdClipSig`.
-- **Ports.** `PdClip` takes `phase` (int, Q0.32, any integer: it is
+- **Name.** The registered type is `PhaseClip`; the builder is
+  `phaseClipSig`. It is the unipolar special case of Csound's `pdclip`
+  (linear phase clipping for phase-distortion synthesis) with the window at
+  the start of the cycle and `width` the unclipped fraction; `pdclip`'s
+  `kWidth` is the clipped fraction, so the two read in opposite senses. No
+  single standard term names this special case.
+- **Ports.** `PhaseClip` takes `phase` (int, Q0.32, any integer: it is
   reduced to the cycle) and `width` (float, default 1). It outputs `phase`
   (int, `[0, 2³²]`, wired straight into a spline's `phase`) and `gate`
   (float, 1 for the first `w` of the cycle, else 0). The gate is the
-  comparison the clip makes anyway; there is no other gate mechanism.
+  comparison the clip makes anyway; there is no other gate mechanism. The
+  held output 2³² reads as phase 0 to anything that reduces its phase mod
+  2³²: in a `PhaseClip → PhaseClip` chain the second gate is high for the
+  whole of the first one's hold.
 - **Width carrier.** The width is a float, so a knob is an ordinary
   `param:` slot and a `set_param` moves it without a recompile. Inside, it
   becomes an integer word `W`, the width in units of 2⁻³² of a cycle.
-- **Out of range.** `width`'s interval `(0, 1]` is declared on the port
-  (`InputDecl.interval?`). A bare literal outside it is refused at ingest,
-  the same crossing rule as a fixed-point format (`bareLiteralAtPort`). In a
-  builder, `PulseWidth.static` is refused at assemble time. A width that
-  moves (a param, an output, arithmetic) clamps: `W ∈ [1, 2³²]`, so a width
-  at or below 0 is the narrowest gate (one phase unit) and a width above 1
-  is the full cycle, where the clip is the identity.
+- **Out of range.** A static width must lie in `[2⁻³³, 1]`: `(0, 1]` less
+  the widths narrower than half a phase unit, whose word would round to 0.
+  The interval is declared on the port (`InputDecl.interval?`).
+  - Refused: a bare numeric literal outside it, when the session compiles
+    the patch (`bareLiteralAtPort`, called from `sessionToResolvedRoot`,
+    the same crossing rule as a fixed-point format); and
+    `PulseWidth.static` outside it, at assemble time in a builder.
+  - Clamped: everything else, because only a bare numeric literal is
+    checked. `neg(0.25)`, a `paramDecl` of 0, `set_param width 0`, or
+    another instance's output all reach the kernel, which clamps
+    `W ∈ [1, 2³²]`: a width below half a phase unit is the narrowest gate
+    (one phase unit), a width above 1 is the full cycle, where the clip is
+    the identity.
 
 ### Exactness
 
 With `p = phase mod 2³²`:
 
-    pdclip = ⌊p · 2³² / W⌋  if p < W,   2³²  otherwise;   gate = p < W
+    phaseclip = ⌊p · 2³² / W⌋  if p < W,   2³²  otherwise;   gate = p < W
 
 - **Exact on the integer rail, given `W`.** `p · 2³²` overflows an `int`,
   so the quotient is two steps of long division in base 2¹⁶: `q₁ =
   ⌊p·2¹⁶ / W⌋`, `r₁ = p·2¹⁶ − q₁W`, `q₂ = ⌊r₁·2¹⁶ / W⌋`, result `q₁·2¹⁶ +
-  q₂`. Every operand is below 2⁴⁹ and every divide is of non-negative
-  integers, so the result is the exact floor on every target. The gate
+  q₂`. Every divide is of non-negative integers and, in the lane the final
+  select keeps (`p < W`), every operand is below 2⁴⁹, so the result is the
+  exact floor on every target. In the discarded lane (`p ≥ W`, e.g.
+  `W = 1`, `p = 2³² − 1`) `q₁·2¹⁶` can wrap; that is defined two's-complement
+  arithmetic and the value is never read. The gate
   edge `p < W` is exact. The held value 2³² is phase 1, read by the spline
   as phase 0 bit for bit.
 - **Where it rounds: the width word.** A static width is `round(w · 2³²)`
-  in exact integer arithmetic at assemble time. A live width is
+  in exact integer arithmetic at assemble time, at least 1 by the interval. A live width is
   `clamp(toInt(round(w · 2³²)), 1, 2³²)` per sample; `w · 2³²` is exact in
   f64 and f32 (a power-of-two scale) and `round` is half away from zero,
   so `|W − w · 2³²| ≤ ½`. Hence the clip is exact for every width that is

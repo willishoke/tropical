@@ -1,7 +1,7 @@
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spline
 import Tropical.Family
-import Tropical.EmitArrow.PdClip
+import Tropical.EmitArrow.PhaseClip
 
 /-!
 # EmitArrow.Stdlib — ID-native standard-library authoring
@@ -645,18 +645,19 @@ def buildPeriodicBSpline8 (arena : Arena) (resolved : Array (String × ProgramId
     Except String (Arena × ProgramIdx) :=
   periodicBSplineFamily.build "PeriodicBSpline8" stdlibSplineControls arena resolved
 
-/-- `PdClip` (`pdClipSig`): an integer `phase` (Q0.32) and a float `width`
-    in `(0, 1]` (live when wired from a `param:` slot; a bare literal outside
-    the interval is refused at ingest, a moving value clamps), to the clipped
+/-- `PhaseClip` (`phaseClipSig`): an integer `phase` (Q0.32) and a float `width`
+    in `(0, 1]` (live when wired from a `param:` slot; a bare numeric literal
+    outside `[2⁻³³, 1]` is refused when the session compiles, anything else
+    clamps), to the clipped
     `phase` (int, `[0, 2³²]`, for a spline's `phase`) and the `gate` (float,
     1 for the first `width` of the cycle, else 0). -/
-def buildPdClip (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+def buildPhaseClip (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
-  assemble arena "PdClip"
+  assemble arena "PhaseClip"
       #[{ name := "phase", type? := some (.scalar .int) }, floatOut "gate"] #[] do
     let phase ← inputRef ⟨0⟩
     let width ← inputRef ⟨1⟩
-    let clipped ← pdClipSig phase (.live width)
+    let clipped ← phaseClipSig phase (.live width)
     let zero ← lit 0
     let one ← lit 1
     pure {
@@ -679,7 +680,7 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("SinOscQ15", buildSinOscQ15),
   ("PeriodicCatmullRom8", buildPeriodicCatmullRom8),
   ("PeriodicBSpline8", buildPeriodicBSpline8),
-  ("PdClip", buildPdClip)]
+  ("PhaseClip", buildPhaseClip)]
 
 def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
   let mut arena : Arena := {}
