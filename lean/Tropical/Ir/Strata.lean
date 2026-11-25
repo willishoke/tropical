@@ -67,9 +67,8 @@ def runToEArena (opts : Options) (arena : Arena) (root : ProgramIdx) :
   let (postRoot, ea) ← passes.run ea
   return (ea, postRoot)
 
-/-- The tree exit: the lowered root as a tree `Program`. Kept for the
-    registration/codec path, which round-trips the lowered instance
-    type through `tropical_resolved_1`. -/
+/-- The arena exit: the lowered root as a `Program` in the arena. The
+    registration path adopts it into the session store as is. -/
 def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
   let (ea, postRoot) ← runToEArena opts arena root

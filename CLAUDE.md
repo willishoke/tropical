@@ -352,7 +352,7 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
       Stdlib.lean       the stdlib as 21 arrow-combinator builders (`stdlibBuilders`) — the boot chain
     Ir/               lower → emit (authoring assembles directly; no elaborate)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
-      Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram, ConstFold
+      Core, Nodes, Cycles, Emit, CompileResolved, WireProgram, ConstFold
       Stage0 (binding-time split: audio + coefficient kernel), EmitLlvm, EmitMsl
     Session/          the session as a pure state transformer (`SessionM`): Registry,
                         Ingest (the patch-bay walk), Compile (the session compile)

@@ -1,6 +1,5 @@
 import Tropical.Ffi
 import Tropical.Toolchain.Wasm
-import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved

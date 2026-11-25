@@ -2,7 +2,7 @@ import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Expr
 import Tropical.WireExpr
-import Tropical.Ir.Codec
+import Tropical.Ir.Nodes
 import Tropical.Plan
 
 /-!
@@ -131,12 +131,12 @@ structure SessionSt where
       (`Kernel.encodeWord`). -/
   paramTypes   : Array (String × Tropical.PortFormat) := #[]
   nameCounters : Std.HashMap String Nat := {}
-  /-- The typed store (Phase 4 stage 4a): every adopted catalog entry's
-      post-strata resolved IR, appended via `decodeResolvedInto`. The
-      arena only ever grows; indices stay valid for the session's life. -/
+  /-- The typed store: every registered program's post-strata resolved IR,
+      left where strata appended it (`adoptResolved`). The arena only ever
+      grows; indices stay valid for the session's life. -/
   arena        : Tropical.Ir.Arena := {}
-  /-- Current name → store index, keyed by the stored program's `name`
-      (the decoded `prog.name`). Redefinition overwrites; instances are
+  /-- Current name → store index, keyed by the stored program's own
+      `name`. Redefinition overwrites; instances are
       insulated by their `resolvedIdx` snapshots. -/
   resolvedByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
   /-- Registered program name → resolved arena index. The historical field
@@ -192,24 +192,16 @@ def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
   | some i => { st with params := st.params.set! i (name, value) }
   | none   => { st with params := st.params.push (name, value) }
 
-/-- Decode a catalog entry's `resolved` field (when present and
-    non-null) into the typed store, recording the program under its own
-    decoded `name`. Returns `none` when an entry carries no resolved program;
-    current registered production entries do carry one. The bridge from
-    `Lean.Json` to the codec's ordered `JsonV` is a re-parse of the
-    compressed string (lossless: `JsonNumber` decimals survive, and the
-    resolved wire has no order-sensitive objects). -/
-def adoptResolved (st : SessionSt) (entry : Json) :
-    Except String (SessionSt × Option Tropical.Ir.ProgramIdx) :=
-  match Tropical.Expr.getField? entry "resolved" with
-  | none | some .null => .ok (st, none)
-  | some r => do
-    let jv ← (Tropical.Parse.JsonV.parse r.compress).mapError
-      (s!"entry.resolved: JSON re-parse failed: {·}")
-    let (arena, idx) ← Tropical.Ir.Codec.decodeResolvedInto st.arena jv
-    let some p := arena.program? idx
-      | .error "entry.resolved: decodeResolvedInto returned an out-of-range root"
-    .ok ({ st with arena, resolvedByName := st.resolvedByName.insert p.name idx }, some idx)
+/-- Adopt a post-strata program into the typed store: `arena` (the store's
+    arena plus what strata appended to it) becomes the store's arena, and the
+    program at `idx` is recorded under its own `name`. The program is not
+    copied: strata only appends to the arena and nothing in it is ever
+    mutated, so the entry at `idx` is already a stable snapshot. -/
+def adoptResolved (st : SessionSt) (arena : Tropical.Ir.Arena)
+    (idx : Tropical.Ir.ProgramIdx) : Except String SessionSt :=
+  match arena.program? idx with
+  | none => .error s!"adopt: program pool index {idx.idx} out of range"
+  | some p => .ok { st with arena, resolvedByName := st.resolvedByName.insert p.name idx }
 
 end SessionSt
 

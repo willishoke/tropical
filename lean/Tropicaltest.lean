@@ -30,6 +30,7 @@ import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.KernelType
+import Tropical.Tropicaltest.BootStore
 import Tropical.Tropicaltest.FractionalTau
 import Tropical.Tropicaltest.LongHorizon
 import Tropical.Tropicaltest.ParamOrder
@@ -206,6 +207,10 @@ def main (args : List String) : IO UInt32 := do
   IO.println "typed kernel (the port: tau/params/out, tropical_kernel_1 round trip):"
   total := total + 1
   if !(← Tropical.Tropicaltest.KernelType.runKernelType) then failed := failed + 1
+
+  IO.println "stdlib boot store (adopted in place, well-formed, indexed by name):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.BootStore.runBootStore) then failed := failed + 1
 
   -- ── (b⁗′) Fractional τ at the port: the closed form at half-sample instants ──
   IO.println "fractional tau (scrub(½) on the grid ≡ τ at k+½, byte-exact):"
