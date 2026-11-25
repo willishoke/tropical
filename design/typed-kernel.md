@@ -109,7 +109,8 @@ expressions as foldable, so this is the existing behaviour made explicit.
 
 τ is passed, not derived. The audio host fills `τ[s] = (origin + s) << 16`,
 a trivially vectorized fill. The scope fills whatever coordinates it wants,
-including a backward scrub at a fractional speed. One kernel, two callers;
+including a backward scrub at a fractional speed (in the browser,
+`WasmKernel.renderAt`, which the player's curve display uses). One kernel, two callers;
 `render_window` stops being a second entry point and becomes a host that
 constructs a τ array. The compiler specializes on the **static shape** `[N]`
 (a known trip count), never on τ's values; there is no range fast path. If a

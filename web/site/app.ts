@@ -3,6 +3,7 @@
  */
 
 import { startHost, type TropicalHost } from '../host/context.js'
+import type { CycleDisplay, Curve } from '../worker/curve.js'
 import {
   kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
 } from '../runtime/index.js'
@@ -16,6 +17,10 @@ type ManifestEntry = {
   title: string
   description: string
   knobs?: Knob[]
+  /** The kernel channels that are sound, in host order; the rest are taps. */
+  audio: number[]
+  /** Curves to draw: one cycle of an output channel each (`worker/curve.ts`). */
+  displays?: CycleDisplay[]
   wasmPath: string
   manifestPath: string
 }
@@ -34,6 +39,7 @@ const statusEl = $('status')
 const infoEl = $('info')
 const errorEl = $('error')
 const knobsEl = $('knobs')
+const curvesEl = $('curves')
 
 let host: TropicalHost | null = null
 let manifest: ManifestEntry[] = []
@@ -124,6 +130,76 @@ function sendKnobs(patch: ManifestEntry): void {
   for (const [name, v] of values) host.setParam(name, v)
 }
 
+// ── the curves ───────────────────────────────────────────────────────────
+// Every point is the kernel's own output at a chosen τ, evaluated in the
+// renderer Worker (`WasmKernel.renderAt`); the page only draws it. Each
+// curve's vertical scale follows its peak, falling back slowly.
+const CURVE_POINTS = 512
+type CurveView = { canvas: HTMLCanvasElement; caption: HTMLElement; display: CycleDisplay; scale: number }
+let curveViews: CurveView[] = []
+
+/** Build a canvas per display of `patch` (none: the panel is cleared) and
+ *  ask the renderer for its curves. */
+function showDisplays(patch: ManifestEntry | undefined): void {
+  curvesEl.innerHTML = ''
+  curveViews = (patch?.displays ?? []).map((display) => {
+    const fig = document.createElement('figure')
+    fig.className = 'curve'
+    const canvas = document.createElement('canvas')
+    const caption = document.createElement('figcaption')
+    caption.textContent = display.label ?? `channel ${display.channel}`
+    fig.append(canvas, caption)
+    curvesEl.appendChild(fig)
+    return { canvas, caption, display, scale: 0 }
+  })
+  if (!host) return
+  host.onCurve = drawCurve
+  host.setDisplay(patch?.displays ?? [], CURVE_POINTS)
+}
+
+function drawCurve(c: Curve): void {
+  const v = curveViews[c.index]
+  if (!v) return
+  const { canvas } = v
+  const dpr = window.devicePixelRatio || 1
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr)
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h }
+  const g = canvas.getContext('2d')
+  if (!g || w === 0 || h === 0) return
+  let peak = 0
+  for (const x of c.data) if (Number.isFinite(x)) peak = Math.max(peak, Math.abs(x))
+  v.scale = Math.max(peak, v.scale * 0.97, 1e-6)
+  const css = getComputedStyle(document.documentElement)
+  g.clearRect(0, 0, w, h)
+  g.strokeStyle = css.getPropertyValue('--border').trim()
+  g.lineWidth = dpr
+  g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke()
+  g.strokeStyle = css.getPropertyValue('--accent').trim()
+  g.lineWidth = 1.5 * dpr
+  g.beginPath()
+  // Point j sits at phase j/n of the cycle, so the n points span (n−1)/n of
+  // the width; the cycle's end (phase 1, which is the next cycle's phase 0)
+  // is the right edge, not drawn.
+  const n = c.data.length
+  for (let j = 0; j < n; j++) {
+    const x = (j / n) * w
+    const y = h / 2 - (c.data[j]! / v.scale) * (h / 2 - 4 * dpr)
+    if (j === 0) g.moveTo(x, y); else g.lineTo(x, y)
+  }
+  g.stroke()
+  v.caption.textContent =
+    `${v.display.label ?? `channel ${v.display.channel}`} — ${c.freq.toFixed(2)} Hz in kernel time, ` +
+    `cycle ${c.cycle} from its phase 0; ${n} points, each the kernel itself; peak ${peak.toFixed(3)}. ` +
+    'Drawn with the newest knob values at the renderer\'s estimate of the next frame to play, ' +
+    'so it leads what you hear by the knob margin plus the device latency.'
+}
+
+function clearDisplays(): void {
+  curvesEl.innerHTML = ''
+  curveViews = []
+  host?.setDisplay([], CURVE_POINTS)
+}
+
 function currentPatch(): ManifestEntry | undefined {
   return manifest.find((p) => p.slug === patchSelect.value)
 }
@@ -132,6 +208,7 @@ patchSelect.addEventListener('change', async () => {
   const p = currentPatch()
   patchMeta.textContent = p?.description ?? ''
   knobsEl.innerHTML = ''
+  clearDisplays()
   if (p?.knobs?.length) {
     try {
       const kernel = await fetch(`./${p.manifestPath}`).then((r) => r.json() as Promise<KernelManifest>)
@@ -166,9 +243,10 @@ playBtn.addEventListener('click', async () => {
       `audioCtx: ${host.context.sampleRate}Hz ${host.context.state}`,
     )
 
-    host.loadPatch(wasm, manifestJson)
+    host.loadPatch(wasm, manifestJson, patch.audio)
     renderKnobs(patch, manifestJson)
     sendKnobs(patch)
+    showDisplays(patch)
     host.fadeIn()
     setStatus(`playing — ${patch.title}`)
     stopBtn.disabled = false
@@ -182,6 +260,7 @@ playBtn.addEventListener('click', async () => {
 stopBtn.addEventListener('click', async () => {
   stopBtn.disabled = true
   setStatus('stopping…')
+  clearDisplays()
   const h = host
   host = null
   if (h) {

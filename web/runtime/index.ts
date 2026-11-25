@@ -13,5 +13,5 @@ export {
 } from './manifest.js'
 export type { KernelLayout } from './layout.js'
 export { computeLayout } from './layout.js'
-export { WasmKernel, importedMemoryMinPages, FADE_FRAMES } from './kernel.js'
+export { WasmKernel, importedMemoryMinPages, FADE_FRAMES, tauOfFrame } from './kernel.js'
 export { ParamWriter } from './params.js'

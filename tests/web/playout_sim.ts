@@ -56,13 +56,14 @@ function newAheadProcessor(hostPort: SimPort): SimProcessor {
  *  write lands at the next block, the kernel renders in place. */
 class DirectProcessor {
   private writes = new Map<string, number>()
-  private pending: { k: WasmKernel; m: KernelManifest; inQuanta: number } | null = null
-  constructor(private kernel: WasmKernel | null, private writer: ParamWriter | null) {}
+  private pending: { k: WasmKernel; m: KernelManifest; inQuanta: number; audio?: number[] } | null = null
+  constructor(private kernel: WasmKernel | null, private writer: ParamWriter | null,
+      private audio?: number[]) {}
   onMessage(msg: SimControl): void {
     if (msg.type === 'param') this.writes.set(msg.name, msg.value)
     else if (msg.type === 'load') {
       // instantiate is async: silence until the new kernel arrives
-      this.pending = { k: msg.kernel, m: msg.manifest, inQuanta: msg.instantiateQuanta }
+      this.pending = { k: msg.kernel, m: msg.manifest, inQuanta: msg.instantiateQuanta, audio: msg.audio }
       this.kernel = null
       this.writes.clear()
     }
@@ -71,13 +72,14 @@ class DirectProcessor {
     if (this.pending && this.pending.inQuanta-- <= 0) {
       this.kernel = this.pending.k
       this.writer = new ParamWriter(this.pending.m)
+      this.audio = this.pending.audio
       this.kernel.beginFadeIn()
       this.pending = null
     }
     if (!this.kernel) { for (const c of output) c.fill(0); return }
     for (const [name, value] of this.writes) this.writer!.write(this.kernel, name, value, this.kernel.frame)
     this.writes.clear()
-    this.kernel.process(output, output[0]!.length)
+    this.kernel.process(output, output[0]!.length, this.audio)
   }
 }
 
@@ -87,12 +89,15 @@ export type Stall = { at: number; ms: number }
 
 export type SimControl =
   | { type: 'param'; name: string; value: number }
-  | { type: 'load'; kernel: WasmKernel; manifest: KernelManifest; instantiateQuanta: number }
+  | { type: 'load'; kernel: WasmKernel; manifest: KernelManifest; instantiateQuanta: number; audio?: number[] }
 
 export type SimConfig = {
   variant: 'direct' | 'ahead'
   kernel: WasmKernel
   manifest: KernelManifest
+  /** The kernel channels that are sound (default: all), as the player
+   *  passes them from the patch's index entry. */
+  audio?: number[]
   durationMs: number
   /** Stalls of the thread that renders the kernel. */
   stalls?: Stall[]
@@ -116,6 +121,8 @@ export type SimConfig = {
 export type SimResult = {
   /** Channel 0 as the device played it, one sample per device frame. */
   out: Float32Array
+  /** Every host channel as the device played it. */
+  outs: Float32Array[]
   rate: number
   /** Device frame at which the kernel's τ = 0 played. */
   origin: number
@@ -143,7 +150,8 @@ export function simulate(cfg: SimConfig): SimResult {
   const stalls = [...(cfg.stalls ?? [])].sort((a, b) => a.at - b.at)
   const qMs = (Q / rate) * 1000
   const slots = Math.ceil(cfg.durationMs / qMs)
-  const out = new Float32Array(slots * Q)
+  const outs = Array.from({ length: H }, () => new Float32Array(slots * Q))
+  const out = outs[0]!
   const controls = [...(cfg.controls ?? [])].sort((a, b) => a.at - b.at)
 
   // ── players ──
@@ -163,7 +171,7 @@ export function simulate(cfg: SimConfig): SimResult {
   let totalRendered = 0
 
   if (cfg.variant === 'direct') {
-    const p = new DirectProcessor(cfg.kernel, new ParamWriter(cfg.manifest))
+    const p = new DirectProcessor(cfg.kernel, new ParamWriter(cfg.manifest), cfg.audio)
     cfg.kernel.seek(0)
     cfg.kernel.beginFadeIn()
     for (const c of controls) toWorklet.push({ arrival: c.at + L, run: () => p.onMessage(c.msg) })
@@ -192,14 +200,14 @@ export function simulate(cfg: SimConfig): SimResult {
     hostPort.deliver({ type: 'init', port: workletSide })
     const token = ra.beginLoad()
     cfg.kernel.seek(0)
-    toWorker.push({ arrival: L, run: () => ra.adopt(token, cfg.kernel, cfg.manifest) })
+    toWorker.push({ arrival: L, run: () => ra.adopt(token, cfg.kernel, cfg.manifest, cfg.audio) })
     for (const c of controls) {
       const m = c.msg
       if (m.type === 'param') toWorker.push({ arrival: c.at + L, run: () => ra.setParam(m.name, m.value) })
       else {
         let t = 0
         toWorker.push({ arrival: c.at + L, run: () => { t = ra.beginLoad() } })
-        toWorker.push({ arrival: c.at + L + (cfg.instantiateMs ?? 10), run: () => ra.adopt(t, m.kernel, m.manifest) })
+        toWorker.push({ arrival: c.at + L + (cfg.instantiateMs ?? 10), run: () => ra.adopt(t, m.kernel, m.manifest, m.audio) })
       }
     }
     toWorker.sort((a, b) => a.arrival - b.arrival)
@@ -209,7 +217,7 @@ export function simulate(cfg: SimConfig): SimResult {
     const msPerFrame = cfg.renderMsPerFrame ?? 0
     const cost = (k: WasmKernel) => {
       const process = k.process.bind(k)
-      k.process = (o, n) => { process(o, n); workerClock += n * msPerFrame }
+      k.process = (o, n, ch) => { process(o, n, ch); workerClock += n * msPerFrame }
     }
     cost(cfg.kernel)
     for (const c of controls) if (c.msg.type === 'load') cost(c.msg.kernel)
@@ -240,7 +248,7 @@ export function simulate(cfg: SimConfig): SimResult {
   // ── the device ──
   const audioStalls = cfg.variant === 'direct' ? stalls : []
   const ready: number[] = []              // ready time per produced quantum
-  const data: Float32Array[] = []         // channel 0 per produced quantum
+  const data: Float32Array[][] = []       // every host channel per produced quantum
   const consumed: number[] = []           // play time per played quantum
   let threadFree = 0
   let played = 0
@@ -261,19 +269,19 @@ export function simulate(cfg: SimConfig): SimResult {
       // the direct processor renders on this thread; render-ahead only copies
       const done = start + (cfg.variant === 'direct' ? Q * (cfg.renderMsPerFrame ?? 0) : 0)
       ready.push(done)
-      data.push(output[0]!.slice())
+      data.push(output.map((c) => c.slice()))
       threadFree = done
     }
     if (played < ready.length && ready[played]! <= T) {
-      out.set(data[played]!, j * Q)
+      data[played]!.forEach((c, h) => outs[h]!.set(c, j * Q))
       if (directOrigin < 0) directOrigin = j * Q
-      data[played] = undefined as unknown as Float32Array
+      data[played] = undefined as unknown as Float32Array[]
       consumed.push(T)
       played++
     } else deviceUnderruns++
   }
   return {
-    out, rate, deviceUnderruns, processor, splices, rendered: totalRendered,
+    out, outs, rate, deviceUnderruns, processor, splices, rendered: totalRendered,
     origin: cfg.variant === 'direct' ? directOrigin : origin,
   }
 }

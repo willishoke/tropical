@@ -19,6 +19,17 @@ const WASM_PAGE = 65536
 /** The anti-click fade's length in frames (smoothstep, `beginFadeIn`/`Out`). */
 export const FADE_FRAMES = 2048
 
+/** The Q48.16 clock word of a (possibly fractional) frame, for `renderAt`.
+ *  Exact or refused: `frame · 2¹⁶` must be a safe integer, i.e. `frame` is a
+ *  multiple of 2⁻¹⁶ below 2³⁷ in magnitude; a clock beyond that is built as a
+ *  BigInt word directly. */
+export function tauOfFrame(frame: number): bigint {
+  const word = frame * 2 ** CLOCK_FRAC_BITS
+  if (!Number.isSafeInteger(word))
+    throw new RangeError(`frame ${frame} is not a multiple of 2^-${CLOCK_FRAC_BITS} below 2^${53 - CLOCK_FRAC_BITS}`)
+  return BigInt(word)
+}
+
 /** `C` — the device-boundary output bound, applied in `process` (the worklet
  *  feed) and never in `render` (the equivalence surface). Must equal
  *  `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp, which carries the
@@ -216,6 +227,12 @@ export class WasmKernel {
     else this.writeFloat(index, port, value)
   }
 
+  /** The port-order index (after `tau`) of the param input `name`
+   *  (`param:<name>`), or -1. */
+  paramIndex(name: string): number {
+    return this.params.findIndex((p) => p.name === name)
+  }
+
   /** Read a param input's current value (port order after `tau`): for an
    *  integer port, the real value its word means. */
   getParam(index: number): number {
@@ -228,38 +245,28 @@ export class WasmKernel {
     return new Float64Array(this.memory.buffer)[cell >> 3]!
   }
 
-  /** Run the kernel once over its static block, with `tau` the clock of each
-   *  frame from `frameIdx`, and return the frame-major output view. Each τ is
-   *  written as its two little-endian u32 words of `idx << CLOCK_FRAC_BITS`:
-   *  the low word holds the index's low bits above a zero fraction, the high
-   *  word the rest (a u32 store wraps mod 2³², which is the i64's own wrap at
-   *  the rail's horizon). The same 64 bits a `BigInt64Array` stores, without a
-   *  BigInt per frame on the audio thread. */
-  private renderBlock(frameIdx: number): Float64Array {
+  /** Views of tau and the output over the current memory buffer. */
+  private bindViews(): void {
     const L = this.layout
-    if (this.tauWords?.buffer !== this.memory.buffer) {
-      this.tauWords = new Uint32Array(this.memory.buffer, L.tau, 2 * L.frames)
-      if (this.outElem === 'f32') {
-        this.outBinary32 = new Float32Array(
-          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
-        this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
-      } else if (this.outScale === null) {
-        this.outView = new Float64Array(
-          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
-      } else {
-        this.outWords = new Int32Array(
-          this.memory.buffer, L.output, L.frames * this.outputChannelCount)
-        this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
-      }
+    if (this.tauWords?.buffer === this.memory.buffer) return
+    this.tauWords = new Uint32Array(this.memory.buffer, L.tau, 2 * L.frames)
+    if (this.outElem === 'f32') {
+      this.outBinary32 = new Float32Array(
+        this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+      this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
+    } else if (this.outScale === null) {
+      this.outView = new Float64Array(
+        this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+    } else {
+      this.outWords = new Int32Array(
+        this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+      this.outView ??= new Float64Array(L.frames * this.outputChannelCount)
     }
-    const words = this.tauWords!
-    const lowSpan = 2 ** (32 - CLOCK_FRAC_BITS)
-    const one = 2 ** CLOCK_FRAC_BITS
-    for (let s = 0; s < L.frames; s++) {
-      const idx = frameIdx + s
-      words[2 * s] = (idx % lowSpan) * one
-      words[2 * s + 1] = Math.floor(idx / lowSpan) // a u32 store wraps mod 2³²
-    }
+  }
+
+  /** Call the kernel on the tau already in memory and return the frame-major
+   *  output view, an `f32` or `i32` output widened exactly to f64. */
+  private runBlock(): Float64Array {
     this.kernel(...this.argv)
     if (this.outElem === 'f32') {
       // An f32 output: every binary32 is a binary64, so the copy is exact.
@@ -270,6 +277,52 @@ export class WasmKernel {
       for (let k = 0; k < words.length; k++) out[k] = words[k]! * scale
     }
     return this.outView!
+  }
+
+  /** Run the kernel once over its static block, with `tau` the clock of each
+   *  frame from `frameIdx`, and return the frame-major output view. Each τ is
+   *  written as its two little-endian u32 words of `idx << CLOCK_FRAC_BITS`:
+   *  the low word holds the index's low bits above a zero fraction, the high
+   *  word the rest (a u32 store wraps mod 2³², which is the i64's own wrap at
+   *  the rail's horizon). The same 64 bits a `BigInt64Array` stores, without a
+   *  BigInt per frame on the audio thread. */
+  private renderBlock(frameIdx: number): Float64Array {
+    this.bindViews()
+    const words = this.tauWords!
+    const lowSpan = 2 ** (32 - CLOCK_FRAC_BITS)
+    const one = 2 ** CLOCK_FRAC_BITS
+    for (let s = 0; s < this.layout.frames; s++) {
+      const idx = frameIdx + s
+      words[2 * s] = (idx % lowSpan) * one
+      words[2 * s + 1] = Math.floor(idx / lowSpan) // a u32 store wraps mod 2³²
+    }
+    return this.runBlock()
+  }
+
+  /** Evaluate the kernel at caller-chosen clock values and return a
+   *  frame-major copy of `taus.length * outputChannelCount` f64 samples, one
+   *  frame per τ, in order. Each τ is the port's own word: a Q48.16 clock
+   *  (`tauOfFrame`), passed to the kernel unchanged, so a fractional frame is
+   *  exact to 2⁻¹⁶ of a frame and the result is `f(τ)` itself, not an
+   *  interpolation of neighbouring frames. At whole frames (`n << 16`) the
+   *  kernel sees exactly what `render` writes for frame `n`, so the two agree
+   *  bit for bit. `taus` need not be ordered or evenly spaced; the frame
+   *  counter, the fade and the params are untouched (the output carries no
+   *  fade, like `render`). */
+  renderAt(taus: BigInt64Array): Float64Array {
+    const C = this.outputChannelCount, F = this.layout.frames
+    const out = new Float64Array(taus.length * C)
+    this.bindViews()
+    const words = this.tauWords!
+    const tauView = new BigInt64Array(words.buffer, words.byteOffset, F)
+    for (let done = 0; done < taus.length; done += F) {
+      const take = Math.min(F, taus.length - done)
+      tauView.set(taus.subarray(done, done + take))
+      // The static block's tail is computed and discarded, as in `render`.
+      if (take < F) tauView.fill(taus[done + take - 1]!, take)
+      out.set(this.runBlock().subarray(0, take * C), done * C)
+    }
+    return out
   }
 
   /** Render `n` frames and return a frame-major, interleaved copy of
@@ -316,8 +369,13 @@ export class WasmKernel {
   get frame(): number { return this.frameIdx }
 
   /** Render `n` frames into planar host outputs (f32 audio) with the anti-click
-   *  fade and the device-boundary clamp. Mono kernels are upmixed to every host
-   *  channel; wider kernels map each compact channel independently.
+   *  fade and the device-boundary clamp. `channels` picks the kernel channels
+   *  to play, in host order; a patch's observation channels (taps) are left
+   *  out, so they never reach a host output. One played channel is upmixed
+   *  to every host channel; more map one to one. This is the low-level
+   *  primitive: omitting `channels` plays every channel, taps included. A
+   *  host that plays a patch passes its audio list; `RenderAhead.adopt` and
+   *  `startHost`'s `loadPatch` refuse a multichannel kernel without one.
    *
    *  The clamp lives HERE and not in `render` on purpose: `render` returns the
    *  kernel's own f64 output — the value of `f(τ)` — and that is the surface the
@@ -332,21 +390,25 @@ export class WasmKernel {
    *
    *  It runs on the audio thread, so it reads each block's output view in
    *  place rather than going through `render`'s copy, and allocates nothing. */
-  process(outputs: readonly Float32Array[], n: number): void {
+  process(outputs: readonly Float32Array[], n: number, channels?: readonly number[]): void {
     if (outputs.length === 0)
       throw new RangeError('process requires at least one host output channel')
-    if (this.outputChannelCount > 1
-        && outputs.length < this.outputChannelCount)
+    const A = channels ? channels.length : this.outputChannelCount
+    if (A === 0) throw new RangeError('process requires at least one kernel channel to play')
+    for (const c of channels ?? [])
+      if (!Number.isInteger(c) || c < 0 || c >= this.outputChannelCount)
+        throw new RangeError(`no kernel output channel ${c}`)
+    if (A > 1 && outputs.length < A)
       throw new RangeError(
-        `kernel requires ${this.outputChannelCount} host output channels; got ${outputs.length}`)
+        `kernel requires ${A} host output channels; got ${outputs.length}`)
     for (const output of outputs)
       if (output.length < n)
         throw new RangeError('host output channel is shorter than the frame count')
 
     const C = this.outputChannelCount
-    if (C > 1)
-      for (let channel = C; channel < outputs.length; channel++)
-        outputs[channel]!.fill(0, 0, n)
+    if (A > 1)
+      for (let h = A; h < outputs.length; h++)
+        outputs[h]!.fill(0, 0, n)
 
     // A block's tail past `n` is discarded and recomputed by the next call,
     // as in `render`: the closed form has no state to keep in step.
@@ -357,17 +419,17 @@ export class WasmKernel {
       for (let s = 0; s < take; s++, frame++) {
         const gain = steady >= 0 ? steady : this.gainAt(this.frameIdx + s)
 
-        if (C === 1) {
-          const v = block[s]! * gain
+        if (A === 1) {
+          const v = block[s * C + (channels ? channels[0]! : 0)]! * gain
           const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
           const sample = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
           for (const output of outputs) output[frame] = sample
           continue
         }
-        for (let channel = 0; channel < C; channel++) {
-          const v = block[s * C + channel]! * gain
+        for (let h = 0; h < A; h++) {
+          const v = block[s * C + (channels ? channels[h]! : h)]! * gain
           const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
-          outputs[channel]![frame] =
+          outputs[h]![frame] =
             lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
         }
       }

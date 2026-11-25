@@ -1,0 +1,331 @@
+{
+ "schema": "tropical_program_2",
+ "name": "spline_tremolo",
+ "body": {
+  "op": "block",
+  "decls": [
+   {
+    "op": "paramDecl",
+    "name": "pitch",
+    "value": 165
+   },
+   {
+    "op": "paramDecl",
+    "name": "c0",
+    "value": 0
+   },
+   {
+    "op": "paramDecl",
+    "name": "c1",
+    "value": 0.8
+   },
+   {
+    "op": "paramDecl",
+    "name": "c2",
+    "value": 0.5
+   },
+   {
+    "op": "paramDecl",
+    "name": "c3",
+    "value": 0.9
+   },
+   {
+    "op": "paramDecl",
+    "name": "c4",
+    "value": 0.2
+   },
+   {
+    "op": "paramDecl",
+    "name": "c5",
+    "value": 0.4
+   },
+   {
+    "op": "paramDecl",
+    "name": "c6",
+    "value": 0
+   },
+   {
+    "op": "paramDecl",
+    "name": "c7",
+    "value": -0.4
+   },
+   {
+    "op": "paramDecl",
+    "name": "c8",
+    "value": -0.2
+   },
+   {
+    "op": "paramDecl",
+    "name": "c9",
+    "value": -0.9
+   },
+   {
+    "op": "paramDecl",
+    "name": "c10",
+    "value": -0.5
+   },
+   {
+    "op": "paramDecl",
+    "name": "c11",
+    "value": -0.8
+   },
+   {
+    "op": "paramDecl",
+    "name": "lfo",
+    "value": 3
+   },
+   {
+    "op": "paramDecl",
+    "name": "depth",
+    "value": 0.6
+   },
+   {
+    "op": "paramDecl",
+    "name": "level",
+    "value": 0.2
+   },
+   {
+    "op": "instanceDecl",
+    "name": "clock",
+    "program": "ClockPhasor",
+    "inputs": {
+     "clk": {
+      "op": "clock"
+     },
+     "freq": {
+      "op": "param",
+      "name": "pitch"
+     }
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "wave",
+    "program": "PeriodicCatmullRom12",
+    "inputs": {
+     "phase": {
+      "op": "toInt",
+      "args": [
+       {
+        "op": "mul",
+        "args": [
+         {
+          "op": "ref",
+          "instance": "clock",
+          "output": "phase"
+         },
+         4294967296
+        ]
+       }
+      ]
+     },
+     "c0": {
+      "op": "param",
+      "name": "c0"
+     },
+     "c1": {
+      "op": "param",
+      "name": "c1"
+     },
+     "c2": {
+      "op": "param",
+      "name": "c2"
+     },
+     "c3": {
+      "op": "param",
+      "name": "c3"
+     },
+     "c4": {
+      "op": "param",
+      "name": "c4"
+     },
+     "c5": {
+      "op": "param",
+      "name": "c5"
+     },
+     "c6": {
+      "op": "param",
+      "name": "c6"
+     },
+     "c7": {
+      "op": "param",
+      "name": "c7"
+     },
+     "c8": {
+      "op": "param",
+      "name": "c8"
+     },
+     "c9": {
+      "op": "param",
+      "name": "c9"
+     },
+     "c10": {
+      "op": "param",
+      "name": "c10"
+     },
+     "c11": {
+      "op": "param",
+      "name": "c11"
+     }
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "slow",
+    "program": "ClockPhasor",
+    "inputs": {
+     "clk": {
+      "op": "clock"
+     },
+     "freq": {
+      "op": "param",
+      "name": "lfo"
+     }
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "shape",
+    "program": "PeriodicCatmullRom12",
+    "inputs": {
+     "phase": {
+      "op": "toInt",
+      "args": [
+       {
+        "op": "mul",
+        "args": [
+         {
+          "op": "ref",
+          "instance": "slow",
+          "output": "phase"
+         },
+         4294967296
+        ]
+       }
+      ]
+     },
+     "c0": {
+      "op": "param",
+      "name": "c0"
+     },
+     "c1": {
+      "op": "param",
+      "name": "c1"
+     },
+     "c2": {
+      "op": "param",
+      "name": "c2"
+     },
+     "c3": {
+      "op": "param",
+      "name": "c3"
+     },
+     "c4": {
+      "op": "param",
+      "name": "c4"
+     },
+     "c5": {
+      "op": "param",
+      "name": "c5"
+     },
+     "c6": {
+      "op": "param",
+      "name": "c6"
+     },
+     "c7": {
+      "op": "param",
+      "name": "c7"
+     },
+     "c8": {
+      "op": "param",
+      "name": "c8"
+     },
+     "c9": {
+      "op": "param",
+      "name": "c9"
+     },
+     "c10": {
+      "op": "param",
+      "name": "c10"
+     },
+     "c11": {
+      "op": "param",
+      "name": "c11"
+     }
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "vca",
+    "program": "VCA",
+    "inputs": {
+     "audio": {
+      "op": "ref",
+      "instance": "wave",
+      "output": "out"
+     },
+     "cv": {
+      "op": "mul",
+      "args": [
+       {
+        "op": "param",
+        "name": "level"
+       },
+       {
+        "op": "add",
+        "args": [
+         1,
+         {
+          "op": "mul",
+          "args": [
+           {
+            "op": "param",
+            "name": "depth"
+           },
+           {
+            "op": "ref",
+            "instance": "shape",
+            "output": "out"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    }
+   }
+  ],
+  "assigns": [
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "expr": {
+     "op": "ref",
+     "instance": "vca",
+     "output": "out"
+    }
+   },
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "channel": 1,
+    "expr": {
+     "op": "ref",
+     "instance": "wave",
+     "output": "out"
+    }
+   },
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "channel": 2,
+    "expr": {
+     "op": "ref",
+     "instance": "shape",
+     "output": "out"
+    }
+   }
+  ]
+ }
+}

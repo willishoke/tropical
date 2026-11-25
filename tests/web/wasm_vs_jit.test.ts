@@ -11,13 +11,19 @@
  *   - Native side: `diffcli render-bytes` (the engine's ORC JIT).
  */
 
-import { describe, test, expect, setDefaultTimeout } from 'bun:test'
+import { describe, test, expect, setDefaultTimeout, afterAll } from 'bun:test'
 import { spawnSync } from 'bun'
-import { writeFileSync, readFileSync } from 'fs'
-import { resolve, dirname } from 'path'
+import { writeFileSync, readFileSync, mkdtempSync, rmSync } from 'fs'
+import { resolve, dirname, join } from 'path'
+import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
 import { expectAudible } from './energy_floor'
+
+// A per-run scratch directory: fixed /tmp paths let two checkouts' runs
+// overwrite each other's files.
+const TMP = mkdtempSync(join(tmpdir(), 'wvj-'))
+afterAll(() => rmSync(TMP, { recursive: true, force: true }))
 
 // Each case spawns three sequential heavy subprocesses — `diffcli compile`,
 // `render-bytes`, and `compile-wasm` (the last loads LLVM+lld in-process to
@@ -40,7 +46,7 @@ interface ProgramFile {
   body: { op: 'block'; decls: unknown[]; assigns: unknown[] }
 }
 
-const PROG_TMP = '/tmp/wvj-program.json'
+const PROG_TMP = join(TMP, 'program.json')
 const dacOut = (instance: string, output: string) => ({
   op: 'outputAssign',
   name: 'dac.out',
@@ -84,7 +90,7 @@ type Float = 'f64' | 'f32'
 
 /** Native side: render the wire plan through the engine's JIT. */
 function runNative(wirePlan: string, samples: number, float: Float = 'f64'): Float64Array {
-  const tmp = '/tmp/wvj-native.plan.json'
+  const tmp = join(TMP, 'native.plan.json')
   writeFileSync(tmp, wirePlan)
   const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples), '--float', float], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
@@ -100,7 +106,7 @@ async function runWasm(program: ProgramFile, _plan: string, samples: number,
     writes: Array<[string, number]> = [], float: Float = 'f64'): Promise<Float64Array> {
   const manifest = kernelManifestViaLean(program, float)
   writeFileSync(PROG_TMP, JSON.stringify(program))
-  const out = '/tmp/wvj-program.wasm'
+  const out = join(TMP, 'program.wasm')
   const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`, '--fixtures', '--float', float], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile-wasm failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   // The kernel's shape is static (128 frames); `render` chunks a longer
