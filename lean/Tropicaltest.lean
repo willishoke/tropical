@@ -39,6 +39,7 @@ import Tropical.Tropicaltest.AnchorContinuity
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
+import Tropical.Tropicaltest.SpectralRatios
 import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.TypeFamily
 import Tropical.Tropicaltest.PhaseClip
@@ -120,6 +121,14 @@ def main (args : List String) : IO UInt32 := do
         return 1
     | .ok (arena, resolved) =>
         let (_, bad) ← Tropical.Tropicaltest.Spectral.runSpectral arena resolved
+        return if bad == 0 then 0 else 1
+  if args.contains "--spectral-ratios-only" then
+    match Tropical.Playground.stdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, _) =>
+        let (_, bad) ← Tropical.Tropicaltest.SpectralRatios.runRatios arena
         return if bad == 0 then 0 else 1
   if args.contains "--spline-only" then
     match Tropical.Playground.stdlib with
@@ -384,6 +393,18 @@ def main (args : List String) : IO UInt32 := do
       IO.println s!"  FAIL  spectral  stdlib: {error}"
   | .ok (arena, resolved) =>
       let (n, bad) ← Tropical.Tropicaltest.Spectral.runSpectral arena resolved
+      total := total + n
+      failed := failed + bad
+
+  -- ── (g″) Families on a ratio column (rational, free) — design/spectral-family.md
+  IO.println "spectral ratio columns:"
+  match Tropical.Playground.stdlib with
+  | .error error =>
+      total := total + 9
+      failed := failed + 9
+      IO.println s!"  FAIL  spectral-ratios  stdlib: {error}"
+  | .ok (arena, _) =>
+      let (n, bad) ← Tropical.Tropicaltest.SpectralRatios.runRatios arena
       total := total + n
       failed := failed + bad
 

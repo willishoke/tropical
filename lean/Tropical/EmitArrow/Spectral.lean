@@ -21,9 +21,10 @@ uniform): a partial's frequency `k·f0` is then a constant the envelope can be
 evaluated at. A moving fundamental (phase-modulated partials) is a later slice.
 
 Soft edges: a partial whose frequency nears Nyquist or 0 Hz fades with a
-smoothstep edge instead of a hard cut, and partials at or above Nyquist are
-not evaluated at all (the region's trip count is `⌊Nyquist/|f0|⌋`, clamped to
-`K`; a skipped partial's edge weight is exactly 0).
+smoothstep edge instead of a hard cut, and partials above Nyquist are not
+evaluated at all (the region's trip count is `⌊Nyquist/|f0|⌋`, clamped to
+`K`; a skipped partial's edge weight is exactly 0). A partial exactly on
+Nyquist is evaluated, with edge weight 0.
 
 This module holds the data types and the bank lowering; the `ArrowTerm`
 constructors that carry them live in `Term`.
@@ -115,10 +116,35 @@ structure SoftEdges where
   dc : EdgeSpec := .standard
   nyquist : EdgeSpec := .standard
 
-/-- A harmonic partial family: partials `k = 1..count` at `k·freq`, phases
-    `k·φ` from one phasor on `clk`, weights `a_k`. `freq` must be uniform.
-    `phase` (cycles) offsets the fundamental; partial `k` is offset by
-    `k·phase`, so one anchor keeps every partial phase-locked. -/
+/-- Where each partial sits relative to the fundamental: partial `k` runs at
+    `r_k · f0`. The column is assemble-time data, like a weight table's shape:
+    the ring a rational family runs on (`Λ`) and the order the Nyquist cull
+    relies on are both fixed by it. A partial with ratio `r` is still one sine at
+    a known frequency, so the envelope `G(r·f0, τ)` and the soft edges apply
+    unchanged. -/
+inductive PartialRatios where
+  /-- `r_k = k`, `k = 1..count`: the harmonic family (the default). -/
+  | harmonic
+  /-- `r_k = n_k / d_k`, positive naturals, one pair per partial. Every partial
+      reads one shared ring position `X` whose wrap is `Λ = lcm d_k`
+      fundamental cycles; partial `k`'s phase is `m_k·X` with
+      `m_k = n_k·Λ/d_k`, an integer. The partials drift against each other but
+      stay locked, and the bundle recurs exactly whenever `X` returns: once per
+      ring wrap (`Λ` cycles of the realized fundamental). In samples the period
+      is the smallest `T` with `inc·T ≡ 0 (mod 2⁴⁸)`, which is a whole number of
+      samples only when `inc` has enough factors of 2. `Λ ≤ 2¹⁶`
+      (`rationalLcmCap`). An integer column (`Λ = 1`) is the harmonic
+      construction, bit for bit. -/
+  | rational (ratios : Array (Nat × Nat))
+  /-- `r_k` any positive finite real. Partial `k` runs on its own Q0.32
+      increment `trunc(r_k · f0·2³²/rate)`. -/
+  | free (ratios : Array Float)
+deriving Inhabited
+
+/-- A partial family: partials `k = 1..count` at `r_k·freq` (`r_k = k` unless
+    `ratios` says otherwise), weights `a_k`. `freq` must be uniform. `phase`
+    (cycles) offsets the fundamental; partial `k` is offset by `r_k·phase`, so
+    one anchor keeps every harmonic partial phase-locked. -/
 structure PartialFamily where
   name : String := "family"
   freq : Sig
@@ -136,13 +162,17 @@ structure PartialFamily where
       loop as `a_0·Re G(0)`. Only a `cosine` family has one (a sine is zero at
       0 Hz), and only with the DC edge `off` (the edge would fade it to 0). -/
   dc : Option Sig := none
+  /-- The frequency-ratio column (`ratioFamilySig`). Non-harmonic ratios need
+      a `table` of weights; the column is sorted by ratio at assemble time,
+      weights with it. -/
+  ratios : PartialRatios := .harmonic
 
 /-- A complex spectral envelope `G(f, τ)` as a closed form. `prepare` turns the
     envelope's control signals and the family's (signed) fundamental into the
     scalars the per-partial gain needs; they are computed once per sample,
     before the partial loop. `gain` returns `(Re G, Im G)` from those scalars,
-    the partial number `k` (float) and the partial frequency `k·f0` (Hz,
-    signed). -/
+    the partial's frequency ratio `r_k = f_k/f0` (float; `k` in a harmonic
+    family) and the partial frequency `r_k·f0` (Hz, signed). -/
 structure EnvelopeLaw where
   name : String
   prepare : Array Sig → Sig → BuildM (Array Sig)
@@ -236,6 +266,304 @@ private def zeroHzTerm (a0 : Sig) (laws : Array (EnvelopeLaw × Array Sig)) :
   | some (gre, _) => mul a0 gre
   | none => pure a0
 
+/-- The extra ring bits `E` of a rational family: 0 when every ratio is an
+    integer (`Λ = 1`, the harmonic construction exactly), else 16. Any
+    `E ≥ 0` is exact; `E` sets only the ring's resolution, and 16 is the most
+    for which `X` (`32 + E + F` bits) fits a 64-bit word next to the clock's
+    16 fraction bits. -/
+def ratioRingBits (lcm : Nat) : Nat := if lcm == 1 then 0 else 64 - 32 - clockFracBits
+
+/-- The largest common period `Λ` a rational column may have. The ring
+    increment's LSB is `Λ·rate/2⁴⁸` Hz of fundamental (`E = 16`), so at
+    `Λ = 2¹⁶` the realized fundamental is within `rate/2³²` Hz of `f0`, the
+    harmonic family's (and each free partial's) own precision. Above it the
+    rational regime would be coarser than the free one; the error grows with
+    `Λ` until the increment truncates to 0 and the bundle freezes. -/
+def rationalLcmCap : Nat := 2 ^ 16
+
+/-- One partial of a ratio column, as sorted: its ratio as a double, the
+    integer ring multiplier `m = n·Λ/d` (rational only), its weight, and a key
+    pair that orders it exactly (`n/d`, or the double itself for free ratios,
+    with the authored index as the tiebreak). -/
+private structure RatioEntry where
+  ratio : Float
+  multiplier : Nat
+  weight : Sig
+  num : Nat
+  den : Nat
+  authored : Nat
+deriving Inhabited
+
+private def RatioEntry.lt (rational : Bool) (a b : RatioEntry) : Bool :=
+  let less := if rational then a.num * b.den < b.num * a.den else a.ratio < b.ratio
+  let equal := if rational then a.num * b.den == b.num * a.den else a.ratio == b.ratio
+  less || (equal && a.authored < b.authored)
+
+/-- `#{k : column[k] ≤ t}` for an ascending column of `count` entries, by a
+    binary search of `⌈log₂(count+1)⌉` reads (`lo` stays the count of entries
+    known `≤ t`; a probe past the end reads the last entry and is refused by
+    the bound). The result is an `int`. -/
+def countAtMost (column : Sig) (count : Nat) (t : Sig) : BuildM Sig := do
+  let mut step := 1
+  while step * 2 ≤ count do step := step * 2
+  let mut lo ← litI 0
+  let last ← litI (count - 1)
+  let countI ← litI count
+  let one ← litI 1
+  while step > 0 do
+    let cand ← add lo (← litI step)
+    let over ← gt cand countI
+    let idx ← selectE over last (← sub cand one)
+    let r ← index column idx
+    lo ← selectE over lo (← selectE (← gt r t) lo cand)
+    step := step / 2
+  pure lo
+
+/-- The Nyquist trip count of a family with an ascending ratio column `column`
+    (`count` entries, largest `rMax`): `#{k : r_k ≤ Nyquist/max(|f0|, f_lo)}`
+    with `f_lo = Nyquist/(2·rMax)`, an `int`. The floor keeps the threshold
+    finite at `f0 = 0`; it is harmless because below it every partial is under
+    Nyquist/2 and the threshold `2·rMax` counts them all. Above it the
+    threshold is `Nyquist/|f0|` exactly, so the count is
+    `#{k : r_k·|f0| ≤ Nyquist}` up to the one rounding of that division. -/
+def ratioTripCount (column : Sig) (count : Nat) (rMax : Float) (f0abs nyquist : Sig) :
+    BuildM Sig := do
+  let floorF0 ← div nyquist (← litExact (2.0 * rMax))
+  let f0floor ← selectE (← gt f0abs floorF0) f0abs floorF0
+  countAtMost column count (← div nyquist f0floor)
+
+/-- A family whose ratio column is not the harmonic default
+    (`PartialRatios.rational` / `.free`): the same bank, envelope and soft edges
+    as `familySig`, with partial `k` at `r_k·f0`.
+
+    * **rational** `n/d`: `Ψ` is the position on a ring of `2^(32+E+F)` units
+      per `Λ` fundamental cycles, `X ≡ (inc·⌊τ⌋ + off)·2^F + inc·frac(τ)` with
+      `inc = trunc(f0·2^(32+E)/(Λ·rate))`, `off = trunc(phase·2^(32+E)/Λ)`.
+      Partial `k`'s Q32 phase is `⌊m_k·X / 2^(E+F)⌋ mod 2³²`: one floor, every
+      partial on the same `X`, so the frequencies are locked exactly
+      (`m_k/m_j = n_k·d_j/(n_j·d_k)`) and the phases to within the one Q32
+      unit each partial's own floor costs; the bundle recurs whenever `X`
+      does. The product wraps mod
+      2⁶⁴, which keeps bits `E+F..E+F+31` exact (`32+E+F ≤ 64`).
+    * **free** `r`: partial `k`'s Q32 phase is `⌊inc_k·τ⌋ + off_k mod 2³²` with
+      its own `inc_k = trunc(r_k·(f0·2³²/rate))`, `off_k = trunc(frac(r_k·phase)·2³²)`.
+      The one unchecked limit (shared with the harmonic and rational columns
+      when the Nyquist edge is off) is the float-to-int conversion of the
+      increment, which saturates once `|r_k·f0| ≥ 2³¹·rate`; below it a large
+      increment wraps correctly and merely aliases.
+
+    A 0 Hz term (`dc`) is added outside the region as in `familySig`.
+
+    The column is sorted ascending at assemble time (weights with it), so with a
+    uniform `f0` the partials below Nyquist are a prefix and the cull is still a
+    trip count: `#{k : r_k ≤ Nyquist/|f0|}`, found by a binary search per
+    sample (`ratioTripCount`). A live count keeps the LOWEST-ratio partials
+    (sorted order), not the first authored. -/
+private def ratioFamilySig (f : PartialFamily) (clock : Clock)
+    (envelopes : Array (EnvelopeLaw × Array Sig)) : BuildM Sig := do
+  let weightsIn ← match f.weights with
+    | .table ws => pure ws
+    | .law _ => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not a weight law in the partial number: once the column is reordered, the partial number could mean the index or the ratio"
+    | .closedForm .. => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not closed-form weights over partial-number columns: once the column is reordered, the partial number could mean the index or the ratio"
+    | .complex .. => throw s!"partial family '{f.name}': a family with a ratio column takes a weight table (one weight per partial, sorted with its ratio), not complex weights: their law reads the partial index and number (e.g. a DFT table at n mod K), which once the column is reordered could mean the index or the ratio"
+  if weightsIn.size != f.count then
+    throw s!"partial family '{f.name}': {weightsIn.size} weights for {f.count} partials"
+  unless ← sigIsUniform f.freq do
+    throw s!"partial family '{f.name}': the fundamental must be uniform (constant within a kernel call); a moving fundamental is a phase-modulated family, not yet supported"
+  if let some phase := f.phase then
+    unless ← sigIsUniform phase do
+      throw s!"partial family '{f.name}': the phase offset must be uniform"
+  if let some live := f.liveCount then
+    unless ← sigIsUniform live do
+      throw s!"partial family '{f.name}': the live partial count must be uniform"
+  -- ── the column: validated, the ring fixed, sorted ──
+  let (rational, lcm, entries) ← match f.ratios with
+    | .harmonic => throw s!"partial family '{f.name}': unreachable (harmonic column in the ratio lowering)"
+    | .rational pairs => do
+        if pairs.size != f.count then
+          throw s!"partial family '{f.name}': {pairs.size} ratios for {f.count} partials"
+        for (n, d) in pairs do
+          if n == 0 || d == 0 then
+            throw s!"partial family '{f.name}': the ratio {n}/{d} is not positive; ratios are positive n/d"
+        -- reduce each n/d first: Λ is the lcm of the REDUCED denominators, so
+        -- (2, 131072) is 1/65536 and an unreduced integer column is harmonic
+        let pairs := pairs.map fun (n, d) => let g := Nat.gcd n d; (n / g, d / g)
+        let lcm := pairs.foldl (fun acc (_, d) => Nat.lcm acc d) 1
+        if lcm > rationalLcmCap then
+          throw s!"partial family '{f.name}': the denominators' common multiple Λ = {lcm} exceeds {rationalLcmCap} (2^16). The ring increment's step is Λ·rate/2^48 Hz of fundamental, so above 2^16 the pitch would be coarser than rate/2^32 (and at large Λ the increment truncates to 0 and the bundle freezes). Use smaller denominators, or a free column for ratios that are not small fractions"
+        let entries ← (pairs.zip weightsIn).mapIdxM fun i ((n, d), w) => do
+          let m := n * (lcm / d)
+          if m ≥ 2 ^ 53 then
+            throw s!"partial family '{f.name}': the ratio {n}/{d} over the common period Λ = {lcm} needs the ring multiplier {m}, beyond the 2^53 a table carries exactly"
+          pure ({ ratio := n.toFloat / d.toFloat, multiplier := m, weight := w,
+                  num := n, den := d, authored := i } : RatioEntry)
+        pure (true, lcm, entries)
+    | .free rs => do
+        if rs.size != f.count then
+          throw s!"partial family '{f.name}': {rs.size} ratios for {f.count} partials"
+        for r in rs do
+          unless r > 0.0 && !r.isNaN && !r.isInf do
+            throw s!"partial family '{f.name}': the ratio {r} is not a positive finite number"
+        let entries := (rs.zip weightsIn).mapIdx fun i (r, w) =>
+          ({ ratio := r, multiplier := 0, weight := w, num := 0, den := 0,
+             authored := i } : RatioEntry)
+        pure (false, 1, entries)
+  let sorted := entries.qsort (RatioEntry.lt rational)
+  -- an empty family plays only its 0 Hz term, once its column is validated
+  let some largest := sorted.back?
+    | return ← match f.dc with
+      | none => lit 0
+      | some a0 => do
+          let laws ← envelopes.mapM fun (law, controls) => do
+            pure (law, ← law.prepare controls f.freq)
+          zeroHzTerm a0 laws
+  let ringBits := ratioRingBits lcm
+  let ratioTable ← arr (← sorted.mapM fun e => litExact e.ratio)
+  let weightTable ← arr (sorted.map (·.weight))
+  let multTable? ← if rational then
+      pure (some (← arr (← sorted.mapM fun e => lit (e.multiplier : Int))))
+    else pure none
+  -- ── uniforms and per-sample scalars (computed before the region) ──
+  let sr ← sampleRate
+  let fracBits ← clockFracLit
+  let thi ← rshift clock fracBits
+  let tlo ← bitAnd clock (← clockFracMaskLit)
+  let mask32 ← lit 4294967295
+  -- the regime's loop-invariant phase inputs (ints split to stay exact in the
+  -- float columns that carry them)
+  let phaseInputs ← if rational then do
+      let ringOne ← lit (2 ^ (32 + ringBits))
+      let denom ← if lcm == 1 then pure sr else mul (← lit lcm) sr
+      let inc ← toIntE (← div (← mul f.freq ringOne) denom)
+      let turns ← mul inc thi
+      let turns ← match f.phase with
+        | some phase => do
+            let scaled ← if lcm == 1 then mul phase ringOne
+              else div (← mul phase ringOne) (← lit lcm)
+            add turns (← toIntE scaled)
+        | none => pure turns
+      let wrapped ← bitAnd turns (← lit (2 ^ (32 + ringBits) - 1))
+      let x ← add (← lshift wrapped fracBits) (← mul inc tlo)
+      let x ← if 32 + ringBits + clockFracBits < 64 then
+          bitAnd x (← lit (2 ^ (32 + ringBits + clockFracBits) - 1))
+        else pure x
+      -- X's two 32-bit words (each exact in a double)
+      let hi ← bitAnd (← rshift x (← lit 32)) mask32
+      let lo ← bitAnd x mask32
+      pure #[hi, lo]
+    else do
+      let incScale ← div (← mul f.freq (← lit 4294967296)) sr
+      match f.phase with
+        | some phase => pure #[thi, tlo, incScale, phase]
+        | none => pure #[thi, tlo, incScale]
+  let f0abs ← absE f.freq
+  let half ← lit 5 1
+  let nyquist ← mul sr half
+  let zero ← lit 0
+  let nyquistInv? ← match f.edges.nyquist with
+    | .off => pure none
+    | .standard => pure (some (← div (← lit 10) nyquist))
+    | .width hz => pure (some (← div (← lit 1) hz))
+  let dcInv? ← match f.edges.dc with
+    | .off => pure none
+    | .standard => pure (some (← lit 5 2))
+    | .width hz => pure (some (← div (← lit 1) hz))
+  -- Trip count: the column is ascending, so the partials at or below Nyquist
+  -- are a prefix, `#{k : r_k ≤ Nyquist/max(|f0|, Nyquist/(K+1))}`.
+  let nyquistCount? ← match nyquistInv? with
+    | none => pure none
+    | some _ => do
+        pure (some (← toFloatE (← ratioTripCount ratioTable f.count largest.ratio f0abs nyquist)))
+  let tripF? ← match nyquistCount?, f.liveCount with
+    | some a, some b => pure (some (← selectE (← gt a b) b a))
+    | some a, none => pure (some a)
+    | none, some b => pure (some b)
+    | none, none => pure none
+  let liveCount? ← match tripF? with
+    | none => pure none
+    | some trip => do
+        let clamped ← clampE trip zero (← lit f.count)
+        pure (some (← toIntE clamped))
+  let fixedSlots := phaseInputs.size
+  let mut invariants : Array Sig := phaseInputs ++ #[f0abs, f.freq]
+  if let some inv := nyquistInv? then invariants := invariants.push nyquist |>.push inv
+  if let some inv := dcInv? then invariants := invariants.push inv
+  let mut envSlots : Array (EnvelopeLaw × Nat × Nat) := #[]
+  let mut envPrepared : Array (EnvelopeLaw × Array Sig) := #[]
+  for (law, controls) in envelopes do
+    let prepared ← law.prepare controls f.freq
+    envSlots := envSlots.push (law, invariants.size, prepared.size)
+    envPrepared := envPrepared.push (law, prepared)
+    invariants := invariants ++ prepared
+  let invTables ← invariants.mapM fun value => arr #[value]
+  let zeroIdx ← lit 0
+  let invReads ← invTables.mapM fun table => index table zeroIdx
+  -- ── the per-partial body ──
+  let k ← loopIdx familyBinderId
+  let rk ← index ratioTable k
+  let phaseK ← match multTable? with
+    | some multTable => do
+        let m ← toIntE (← index multTable k)
+        let x ← add (← lshift (← toIntE invReads[0]!) (← lit 32)) (← toIntE invReads[1]!)
+        bitAnd (← rshift (← mul m x) (← lit (ringBits + clockFracBits))) mask32
+    | none => do
+        let incK ← toIntE (← mul rk invReads[2]!)
+        -- off_k = trunc(frac(r_k·phase)·2³²): the offset mod one cycle, so no
+        -- ratio or phase can overflow it (≡ trunc(r_k·phase·2³²) mod 2³² for
+        -- r_k·phase ≥ 0)
+        let offK ← if f.phase.isSome then do
+            let cycles ← mul rk invReads[3]!
+            toIntE (← mul (← sub cycles (← unary .floor cycles)) (← lit 4294967296))
+          else litI 0
+        let turns ← add (← mul incK (← toIntE invReads[0]!)) offK
+        let x ← add (← lshift (← bitAnd turns mask32) fracBits)
+          (← mul incK (← toIntE invReads[1]!))
+        bitAnd (← rshift x fracBits) mask32
+  let q30 ← lit 1073741824
+  let weight ← index weightTable k
+  let fk ← mul rk invReads[fixedSlots + 1]!
+  let fkAbs ← mul rk invReads[fixedSlots]!
+  let mut edge? : Option Sig := none
+  let mut slot := fixedSlots + 2
+  if nyquistInv?.isSome then
+    let nyq := invReads[slot]!
+    let inv := invReads[slot + 1]!
+    edge? := some (← smoothEdge (← mul (← sub nyq fkAbs) inv))
+    slot := slot + 2
+  if dcInv?.isSome then
+    let dcEdge ← smoothEdge (← mul fkAbs invReads[slot]!)
+    edge? := some (← match edge? with
+      | some e => mul e dcEdge
+      | none => pure dcEdge)
+  let projected ← if envelopes.isEmpty then
+      match f.wave with
+      | .sine => div (← toFloatE (← fixedSinCycSig phaseK)) q30
+      | .cosine => div (← toFloatE (← fixedCosCycSig phaseK)) q30
+    else do
+      let mut g? : Option (Sig × Sig) := none
+      for (law, start, size) in envSlots do
+        let gi ← law.gain (invReads.extract start (start + size)) rk fk
+        g? := some (← match g? with
+          | some acc => cmulPair acc gi
+          | none => pure gi)
+      let (gre, gim) := g?.getD (zero, zero)
+      let s ← div (← toFloatE (← fixedSinCycSig phaseK)) q30
+      let c ← div (← toFloatE (← fixedCosCycSig phaseK)) q30
+      match f.wave with
+      | .sine => add (← mul gre s) (← mul gim c)
+      | .cosine => sub (← mul gre c) (← mul gim s)
+  let shaped ← match edge? with
+    | some e => mul e projected
+    | none => pure projected
+  let contribution ← mul weight shaped
+  let tables := #[weightTable, ratioTable] ++ (multTable?.map (#[·])).getD #[] ++ invTables
+  let region ← bankSum f.count tables contribution liveCount? familyBinderId
+  match f.dc with
+  | none => pure region
+  | some a0 =>
+    -- the 0 Hz partial, per sample, outside the region (as `familySig`)
+    add region (← zeroHzTerm a0 envPrepared)
+
 /-- The family's region, given its (already warped) clock and the envelopes
     applied to it, each with its control signals already emitted. -/
 def familySig (f : PartialFamily) (clock : Clock)
@@ -245,6 +573,9 @@ def familySig (f : PartialFamily) (clock : Clock)
       throw s!"partial family '{f.name}': a 0 Hz term needs the cosine projection (a sine is zero at 0 Hz)"
     unless f.edges.dc matches .off do
       throw s!"partial family '{f.name}': a 0 Hz term with a DC edge; the edge would fade it to zero, so set the DC edge off"
+  match f.ratios with
+  | .harmonic => pure ()
+  | _ => return ← ratioFamilySig f clock envelopes
   if f.count == 0 then
     -- No partials; the 0 Hz term, if any, still plays (as it does at a live
     -- count of 0).
