@@ -58,24 +58,32 @@ def runRefusals : IO Bool := do
       patch [paramDecl "pitch" (",\"type\":\"int32\",\"frac_bits\":16" ++ anchored),
         phasor "ph" (pref "pitch")] (refE "ph" "phase"),
       "an integer param is written raw"),
-    ("the param through an expression",
+    ("the param through an expression into an anchored input",
       patch [paramDecl "pitch" anchored,
         phasor "ph" ("{\"op\":\"mul\",\"args\":[" ++ pref "pitch" ++ ",2]}")] (refE "ph" "phase"),
-      "reads it through an expression"),
-    ("the param bare into an input with no anchor",
+      "reads 'pitch' through an expression"),
+    ("the param through an expression into a second phasor beside a bare one",
       patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
+        phasor "ph2" ("{\"op\":\"mul\",\"args\":[" ++ pref "pitch" ++ ",2]}")] (refE "ph" "phase"),
+      "input 'ph2.freq' declares a phase anchor and reads 'pitch' through an expression"),
+    ("the param through a lifted wire (an array literal) into an anchored input",
+      patch [paramDecl "pitch" anchored,
+        phasor "ph" ("{\"op\":\"index\",\"args\":[[" ++ pref "pitch" ++ ",440],0]}")] (refE "ph" "phase"),
+      "reads 'pitch' through an expression"),
+    ("no anchored input reads the param",
+      patch [paramDecl "pitch" anchored, phasor "ph" "220",
         inst "vca" "VCA" ("\"audio\":" ++ refE "ph" "phase" ++ ",\"cv\":" ++ pref "pitch")]
         (refE "vca" "out"),
-      "declares no phase anchor"),
+      "there is nothing to anchor"),
     ("a phasor on a scrubbed clock",
       patch [paramDecl "pitch" anchored,
         inst "sc" "ScrubClock" "\"tau_base\":0,\"velocity\":0.5",
         phasor "ph" (pref "pitch") (refE "sc" "clk")] (refE "ph" "phase"),
-      "holds on the sample clock only"),
+      "which is wired from 'ref'"),
     ("a phasor whose clock is left on its default",
       patch [paramDecl "pitch" anchored,
         inst "ph" "ClockPhasor" ("\"freq\":" ++ pref "pitch")] (refE "ph" "phase"),
-      "holds on the sample clock only"),
+      "which is wired from 'num'"),
     ("a phasor whose phase input is wired",
       patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch") clockE ",\"offset\":0.25"]
         (refE "ph" "phase"),
@@ -84,6 +92,14 @@ def runRefusals : IO Bool := do
       patch [paramDecl "pitch" anchored, paramDecl "pitch#phase" "" "0",
         phasor "ph" (pref "pitch"), phasor "ph2" (pref "pitch#phase")] (refE "ph" "phase"),
       "is also declared as a param"),
+    ("an undeclared read of the companion",
+      patch [paramDecl "pitch" anchored,
+        phasor "ph" (pref "pitch"), phasor "ph2" (pref "pitch#phase")] (refE "ph" "phase"),
+      "reads its phase companion 'pitch#phase'"),
+    ("a param declared twice with different disciplines",
+      patch [paramDecl "pitch" anchored, paramDecl "pitch", phasor "ph" (pref "pitch")]
+        (refE "ph" "phase"),
+      "declared twice with different disciplines"),
     ("a discipline a patch cannot declare",
       patch [paramDecl "pitch" ",\"discipline\":\"glide\"", phasor "ph" (pref "pitch")]
         (refE "ph" "phase"),
@@ -113,6 +129,24 @@ def runRefusals : IO Bool := do
       problems := problems.push s!"fan-out: table {(plan.paramDisciplines.map (·.toWire.compress))}"
     unless plan.slotNames.contains "param:pitch#phase" do
       problems := problems.push "fan-out: no companion slot"
+  -- Accepted: key tracking (the anchored pitch also read, bare and through
+  -- an expression, by inputs with no anchor), and a repeated identical
+  -- declaration (the first wins, as before).
+  let accepted : List (String × String) := [
+    ("key tracking", AnchorContinuity.splineVoicePatch (keyTrack := true)),
+    ("a bare read into an input with no anchor",
+      patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
+        inst "vca" "VCA" ("\"audio\":" ++ refE "ph" "phase" ++ ",\"cv\":" ++ pref "pitch")]
+        (refE "vca" "out")),
+    ("a repeated identical declaration",
+      patch [paramDecl "pitch" anchored, paramDecl "pitch" anchored, phasor "ph" (pref "pitch")]
+        (refE "ph" "phase"))]
+  for (what, text) in accepted do
+    match AnchorContinuity.compilePatchBay text with
+    | .error e => problems := problems.push s!"{what}: refused: {firstLine e}"
+    | .ok (plan, _) =>
+      unless plan.paramDisciplines.size == 1 do
+        problems := problems.push s!"{what}: table {(plan.paramDisciplines.map (·.toWire.compress))}"
   -- Undeclared: the same patch is raw, with no companion.
   match AnchorContinuity.compilePatchBay (AnchorContinuity.splineVoicePatch none) with
   | .error e => problems := problems.push s!"undeclared: refused: {firstLine e}"
@@ -120,7 +154,7 @@ def runRefusals : IO Bool := do
     unless plan.paramDisciplines.isEmpty && !plan.slotNames.contains "param:pitch#phase" do
       problems := problems.push "undeclared: the plan carries a discipline or a companion"
   if problems.isEmpty then
-    passGate label s!"{cases.length} declarations refused, each for its own reason; fan-out shares one companion; an undeclared param stays raw"
+    passGate label s!"{cases.length} declarations refused, each for its own reason; fan-out shares one companion; key tracking and other reads into inputs with no anchor accepted; an undeclared param stays raw"
   else failGate label (String.intercalate "; " problems.toList)
 
 private def runE {α : Type} (act : Tropical.EngineM α) : IO (Except String α) := do
@@ -232,7 +266,7 @@ def runEngine : IO Bool := do
     match refusal with
     | none => problems := problems.push "exported FreqOnlyPhasor: an anchor with no exposed phase compiles"
     | some e =>
-      unless contains e "declares no phase anchor" do
+      unless contains e "there is nothing to anchor" do
         problems := problems.push s!"exported FreqOnlyPhasor: another reason: {firstLine e}"
   | .error e, _ | _, .error e => problems := problems.push s!"export: {firstLine e}"
   if problems.isEmpty then

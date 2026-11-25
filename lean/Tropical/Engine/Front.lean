@@ -95,6 +95,10 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams flatArgs
+    -- the graph's params replace the mirror's, so nothing a patch-bay
+    -- document declared about its own params survives
+    paramTypes := #[]
+    paramDisciplines := #[]
     scopeTaps := publishedTaps })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —

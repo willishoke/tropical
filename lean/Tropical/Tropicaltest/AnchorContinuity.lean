@@ -341,20 +341,32 @@ private def sawGraph : String :=
     params"): a `ClockPhasor` on τ, its `freq` the param `pitch` declared
     `anchor`, reading a periodic Catmull-Rom spline. The spline's output is a
     function of the phase word alone, so the kernel continuity check applies. -/
-def splineVoicePatch (discipline : Option String := some "anchor") : String :=
+def splineVoicePatch (discipline : Option String := some "anchor")
+    (fanOut : Bool := false) (keyTrack : Bool := false) : String :=
   let disc := match discipline with
     | some d => s!",\"discipline\":\"{d}\""
     | none => ""
+  let voice := fun (ph wave : String) (coeffs : String) =>
+    "{\"op\":\"instanceDecl\",\"name\":\"" ++ ph ++ "\",\"program\":\"ClockPhasor\",\"inputs\":{" ++
+    "\"clk\":{\"op\":\"clock\"},\"freq\":{\"op\":\"param\",\"name\":\"pitch\"}}}," ++
+    "{\"op\":\"instanceDecl\",\"name\":\"" ++ wave ++ "\",\"program\":\"PeriodicCatmullRom8\",\"inputs\":{" ++
+    "\"phase\":{\"op\":\"toInt\",\"args\":[{\"op\":\"mul\",\"args\":[" ++
+    "{\"op\":\"ref\",\"instance\":\"" ++ ph ++ "\",\"output\":\"phase\"},4294967296]}]}," ++ coeffs ++ "}}"
+  let assign := fun (inst : String) =>
+    "{\"op\":\"outputAssign\",\"name\":\"dac.out\"," ++
+    "\"expr\":{\"op\":\"ref\",\"instance\":\"" ++ inst ++ "\",\"output\":\"out\"}}"
+  -- key tracking: the voice's gain reads the pitch through an expression
+  let vca :=
+    ",{\"op\":\"instanceDecl\",\"name\":\"vca\",\"program\":\"VCA\",\"inputs\":{" ++
+    "\"audio\":{\"op\":\"ref\",\"instance\":\"wave\",\"output\":\"out\"}," ++
+    "\"cv\":{\"op\":\"mul\",\"args\":[{\"op\":\"param\",\"name\":\"pitch\"},0.002]}}}"
   "{\"schema\":\"tropical_program_2\",\"name\":\"spline_voice\",\"body\":{\"op\":\"block\",\"decls\":[" ++
   "{\"op\":\"paramDecl\",\"name\":\"pitch\",\"value\":220" ++ disc ++ "}," ++
-  "{\"op\":\"instanceDecl\",\"name\":\"ph\",\"program\":\"ClockPhasor\",\"inputs\":{" ++
-  "\"clk\":{\"op\":\"clock\"},\"freq\":{\"op\":\"param\",\"name\":\"pitch\"}}}," ++
-  "{\"op\":\"instanceDecl\",\"name\":\"wave\",\"program\":\"PeriodicCatmullRom8\",\"inputs\":{" ++
-  "\"phase\":{\"op\":\"toInt\",\"args\":[{\"op\":\"mul\",\"args\":[" ++
-  "{\"op\":\"ref\",\"instance\":\"ph\",\"output\":\"phase\"},4294967296]}]}," ++
-  "\"c0\":0,\"c1\":0.5,\"c2\":0.6,\"c3\":0.2,\"c4\":-0.1,\"c5\":-0.5,\"c6\":-0.4,\"c7\":-0.2}}]," ++
-  "\"assigns\":[{\"op\":\"outputAssign\",\"name\":\"dac.out\"," ++
-  "\"expr\":{\"op\":\"ref\",\"instance\":\"wave\",\"output\":\"out\"}}]}}"
+  voice "ph" "wave" "\"c0\":0,\"c1\":0.5,\"c2\":0.6,\"c3\":0.2,\"c4\":-0.1,\"c5\":-0.5,\"c6\":-0.4,\"c7\":-0.2" ++
+  (if fanOut then "," ++ voice "ph2" "wave2" "\"c0\":0.3,\"c1\":-0.2,\"c2\":0.1,\"c3\":0.4,\"c4\":0,\"c5\":-0.3,\"c6\":0.2,\"c7\":-0.1" else "") ++
+  (if keyTrack then vca else "") ++ "]," ++
+  "\"assigns\":[" ++ assign (if keyTrack then "vca" else "wave") ++
+  (if fanOut then "," ++ assign "wave2" else "") ++ "]}}"
 
 private def velocity : String := Playground.Metadata.masterVelocityParam
 private def tauBase : String := Playground.Metadata.masterTauBaseParam
@@ -435,6 +447,23 @@ def cases : Array Case := #[
       .seek 1099511627776, .render 2, .write "pitch" 523.25, .render 2,
       .write "pitch" (-110), .render 2, .write "pitch" (-1001.7), .render 2,
       .write "pitch" 97, .render 2] },
+  -- One anchored param fanned out to two phasors: one companion on both
+  -- offsets, so the output (a sum of two splines of the shared phase) is
+  -- continuous only if both read it.
+  { label := "anchor-continuity/patch-bay-fan-out"
+    graph := splineVoicePatch (fanOut := true)
+    patchBay := true
+    steps := #[.render 2, .write "pitch" 330, .render 2,
+      .seek 1099511627776, .render 2, .write "pitch" (-523.25), .render 2] },
+  -- Key tracking: the anchored pitch also sets the gain through an
+  -- expression. The output is not a function of the phase alone, so only the
+  -- lockstep check against the reference applies.
+  { label := "anchor-continuity/patch-bay-key-tracking"
+    graph := splineVoicePatch (keyTrack := true)
+    patchBay := true
+    continuity := false
+    steps := #[.render 2, .write "pitch" 330, .render 2,
+      .seek 1099511627776, .render 2, .write "pitch" 97, .render 2] },
   -- The same patch with the table stripped: the raw write jumps by the
   -- predicted amount.
   { label := "anchor-continuity/patch-bay-raw-jumps"

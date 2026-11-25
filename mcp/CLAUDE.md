@@ -106,8 +106,13 @@ tools read and mutate:
   with `frac_bits`); a param not listed is `float`.
 - `paramDisciplines` — the params a patch declares `"discipline": "anchor"`
   (a phasor frequency retuned without a phase jump); a param not listed is
-  `raw`. The compile checks each against the input it is wired into and adds
+  `raw`. The compile checks each against the inputs that read it and adds
   its `#phase` companion (`design/host-param-dispatch.md`, "Patch-bay params").
+  The trade-off: a raw pitch jumps at every retune but never at a hot-swap;
+  an anchored one is continuous at a retune, but its companion reseeds to 0
+  on the next structural edit, so that edit jumps. In a session with frequent
+  structural edits, anchoring trades a click per retune for a click per
+  structural edit after a retune.
 
 What a host dispatches is the loaded plan's `param_disciplines` table; the
 companion slots it moves are not session params.

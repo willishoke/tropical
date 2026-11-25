@@ -223,10 +223,10 @@ private def paramFormatOf (context name : String) (d : JsonV) :
     smoothing expression in the kernel, `anchor_clock` and `velocity` a
     master-clock transport that patch-bay programs do not have. -/
 private def paramDisciplineOf (context name : String) (d : JsonV) :
-    SessionM (Option String) := do
+    SessionM (Option ParamWrite) := do
   match d.getField? "discipline" with
   | none | some (.str "raw") => pure none
-  | some (.str "anchor") => pure (some "anchor")
+  | some (.str "anchor") => pure (some .anchor)
   | some (.str s) =>
     internalError s!"{context}: paramDecl '{name}': discipline '{s}' is not declarable on a patch-bay param (raw or anchor)"
   | some _ =>
@@ -271,13 +271,21 @@ def ingestProgram (node : JsonV) (merge : Bool) : SessionM Unit := do
         s!"{context}: programDecl '{subName}': program definitions over the wire are retired — " ++
         "programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types."
 
-  -- Params before instances (instances may reference them). Idempotent
-  -- per name. A typed param records its format beside its value.
+  -- Params before instances (instances may reference them). A typed param
+  -- records its format beside its value, an anchored one its discipline.
+  -- A name declared twice keeps its first declaration (as its value does);
+  -- two that disagree on the discipline are refused.
+  let mut seen : Array (String × Option ParamWrite) := #[]
   for d in jvBodyEntries node "decls" do
     if jvOp? d == some "paramDecl" then
       if let some name := jvStr? d "name" then
         let f ← paramFormatOf context name d
         let disc? ← paramDisciplineOf context name d
+        if let some (_, first) := seen.find? (·.1 == name) then
+          if first != disc? then
+            internalError s!"{context}: paramDecl '{name}' is declared twice with different disciplines ({(first.getD .raw).wire}, then {(disc?.getD .raw).wire}); declare each param once"
+          continue
+        seen := seen.push (name, disc?)
         let st ← get
         if !st.params.any (·.1 == name) && !f.isDefault then
           modify fun st => { st with paramTypes := st.paramTypes.push (name, f) }

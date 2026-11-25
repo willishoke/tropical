@@ -42,8 +42,8 @@ def saveDocument (st : SessionSt) : Json := Id.run do
         (if f.fracBits == 0 then [] else [("frac_bits", Lean.toJson f.fracBits)])
     let disciplineFields : List (String × Json) :=
       match st.paramDiscipline name with
-      | "raw" => []
-      | d => [("discipline", Json.str d)]
+      | .raw => []
+      | d => [("discipline", Json.str d.wire)]
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)] ++ typeFields ++
       disciplineFields ++ [("value", value)]

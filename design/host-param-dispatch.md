@@ -151,9 +151,15 @@ against both an exact model of the kernel (lockstep reference) and the
 kernel itself (the first audible sample after the write equals the old
 oscillator's sample at `now`). Known exceptions:
 
-- Metal: slots reach the kernel as f32 and the increment is computed on the
-  f32 value path, so the host's f64 bump is not the kernel's; continuity
-  there is within the f32 tolerance, not bit-exact.
+- Metal (known issue, both `anchor` and `anchor_clock`): slots reach the
+  kernel as f32, and a slot-driven increment `trunc(f·2³²/SR)` is computed
+  on the f32 value path in-kernel (`Ir/EmitMsl.lean`: only constant-folded
+  landings carry exact i64 increments). The kernel's increment then differs
+  from the host's f64 one by some `δ`, and the phase step at a write is
+  about `(δ₁ − δ₀)·n / 2³²` cycles at sample `n`: it grows with τ, and an
+  hour in it can be as large as a raw write's jump. The fix is either an
+  exact increment on Metal (the param landing on the i64 rail) or refusing
+  anchored disciplines on Metal plans; neither is built.
 - `harmonic` partials: partial `k` takes `⌊k·P / 2¹⁶⌋` of the fundamental's
   phase with the clock's fraction bits kept (`EmitArrow.Spectral`), so when
   the clock has fraction bits (velocity ≠ 1 or a fractional origin) partial
@@ -192,29 +198,35 @@ The patch opts a param in with `"discipline": "anchor"` on its `paramDecl`
 The compile (`Session.anchorParams`) then adds a companion param
 `pitch#phase` (seeded 0), wires it into `ph.offset`, and lists
 `{ name: "pitch", discipline: "anchor", companions: ["pitch#phase"] }` in
-the plan. It refuses, naming the wire, a declaration it cannot honour:
+the plan. The host's bump moves only the phase offset; every other reader of
+`pitch` sees its new value exactly as after a raw write, so other reads are
+allowed (a pitch that also tracks a filter cutoff or a gain). The compile
+refuses, naming the wire, only a declaration it cannot deliver:
 
 - an integer param (`int32`/`int`): written raw, as `portError?` says;
-- a wire that reads the param through an expression, or bare into an input
-  with no `anchor`: the host computes the phase step from the param's own
-  value, so it must be the consumer's frequency exactly;
-- a consumer whose clock input is not wired to `{op:'clock'}` (τ). `anchor`
-  is the sample-clock identity `C = now·2¹⁶`; a `ClockPhasor` reading a
-  scrubbed or warped clock steps by a different amount. Such a phasor's
-  pitch param is written raw (no declaration), or the patch is refused if it
-  declares `anchor`. `anchor_clock`, the master-clock form, needs a velocity
-  param with an origin companion, which patch-bay programs do not declare;
-  it is not declarable on a `paramDecl` today, nor are `glide` and
-  `velocity`;
-- a consumer whose phase input is wired (other than to its declared
+- a param that no input declaring an `anchor` reads bare: there is nothing
+  to anchor;
+- a read through an expression (or through a lifted wire, the `__wire_N`
+  program an array literal becomes) into an input that declares an
+  `anchor`: that oscillator would be silently un-anchored;
+- a bare consumer whose clock input is not wired to `{op:'clock'}` (τ).
+  `anchor` is the sample-clock identity `C = now·2¹⁶`; a `ClockPhasor`
+  reading a scrubbed or warped clock steps by a different amount. Such a
+  phasor's pitch param is written raw (no declaration). `anchor_clock`, the
+  master-clock form, needs a velocity param with an origin companion, which
+  patch-bay programs do not declare; it is not declarable on a `paramDecl`
+  today, nor are `glide` and `velocity`;
+- a bare consumer whose phase input is wired (other than to its declared
   default), or claimed by another anchored param: the companion takes it;
-- a param named like the companion (`pitch#phase`).
+- any read of the companion's name (`pitch#phase`), declared or not;
+- the same param declared twice with different disciplines.
 
 A param fanned out bare to several anchored inputs, all on τ, shares one
-companion: the bump depends on the param's value and the clock only. A param
-declared `anchor` but wired nowhere has no slot and nothing to dispatch. The
+companion: the bump depends on the param's value and the clock only. The
 companion is not a session param: `list_params` and `save` do not show it,
-and `set_param` refuses it by name.
+and `set_param` refuses it by name. Like the playground's, an anchored
+param's companion reseeds to 0 on a hot-swap, so after a retune the next
+structural edit jumps (a raw param does not).
 
 The playground does not read this declaration yet: its port table
 (`Playground/VocabularyMetadata.lean`, `discipline := .anchor`) and its voice
