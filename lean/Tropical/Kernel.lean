@@ -255,9 +255,9 @@ private def binary32Default (slotName : String) (n : JsonNumber) : Except String
 
 /-- Why a plan cannot be realized at binary32 for its write disciplines, or
     `none`. A binary32 artifact's params are written raw: glide, anchor and
-    velocity re-anchor on companions that hold sample counts and phases
-    (`#t0`, `tau_base`, `#phase`), which binary32 does not hold exactly past
-    2^24. The plan's discipline table is walked directly, as
+    velocity keep companions binary32 does not hold exactly — a start sample
+    (`#t0`), a clock origin (`tau_base`) and a 32-bit phase offset
+    (`#phase`). The plan's discipline table is walked directly, as
     `FlatPlan.portError?` walks it: a glided knob has no port of its own (its
     ports are the `#v0`/`#v1`/`#t0` companions), so a walk over the param
     ports alone would miss it. -/

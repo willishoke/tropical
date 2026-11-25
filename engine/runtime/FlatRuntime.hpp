@@ -50,10 +50,12 @@ namespace tropical_runtime
 struct ParamDiscipline
 {
   std::string              name;             // base param ("sf.depth"; slot "param:<name>")
-  std::string              discipline;       // raw | glide | anchor | velocity
+  std::string              discipline;       // raw | glide | anchor | anchor_clock | velocity
   double                   glide_dur_sec = 0.0;
   std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
-  std::string              clock;            // anchor: the velocity param of the phasor's clock (empty: the sample clock)
+  std::string              clock;            // anchor_clock: the velocity param of the phasor's clock
+  uint32_t                 clock_velocity_slot = UINT32_MAX; // anchor_clock: its slot, resolved at decode
+  uint32_t                 clock_origin_slot = UINT32_MAX;   // anchor_clock: its origin companion's slot
 };
 
 struct ParamDispatchResult

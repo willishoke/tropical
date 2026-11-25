@@ -59,16 +59,18 @@ def liftIfNeeded : SessionM Unit := do
     let (arenaPost, postIdx) ← match runStrataChecked arenaRaw rawIdx with
       | .error msg => internalError msg
       | .ok r => pure r
-    -- Persist the counter and the raw program's name; the store adopts the
+    -- Render the entry first: state survives a failure in `SessionM`, so
+    -- nothing is written to the store until the entry exists. Then persist
+    -- the counter and the raw program's name; the store adopts the
     -- post-strata arena (the raw program plus what strata appended), like
     -- the registration path.
+    let entry ← match Tropical.Entries.concreteEntry arenaPost synthName postIdx with
+      | .error e => internalError e
+      | .ok j => pure j
     modify fun s =>
       { s with nameCounters := s.nameCounters.insert "__wire" counter,
                templateByName := s.templateByName.insert synthName rawIdx }
     adoptResolved arenaPost postIdx
-    let entry ← match Tropical.Entries.concreteEntry arenaPost synthName postIdx with
-      | .error e => internalError e
-      | .ok j => pure j
     let pm := ProgMeta.fromEntry entry
     let resolvedIdx := some postIdx
     modify fun s =>

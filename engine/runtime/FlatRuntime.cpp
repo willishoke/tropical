@@ -483,7 +483,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 
   new_state.param_disciplines.reserve(parsed.param_disciplines.size());
   for (const auto & d : parsed.param_disciplines)
     new_state.param_disciplines.push_back(
-      { d.name, d.discipline, d.glide_dur_sec, d.companions, d.clock });
+      { d.name, d.discipline, d.glide_dur_sec, d.companions, d.clock,
+        d.clock_velocity_slot, d.clock_origin_slot });
 
   // Host-side scratch exists only for the Metal pre-pass; the JIT kernel
   // allocates its own. Sized anyway: it is tiny and keeps the load path
@@ -1236,20 +1237,13 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     {
       // The clock's slots come only from what the plan declares: `clock`
       // names a param carrying the velocity discipline, whose companion is
-      // the origin. The parser refuses a plan where they do not resolve.
-      const ParamDiscipline * cd = state.find_discipline(pd->clock);
-      if (!cd || cd->discipline != "velocity" || cd->companions.empty())
-        return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
-          + "' is not a velocity param with an origin companion");
-      const uint32_t vi = slot_of("param:" + pd->clock);
-      const uint32_t ti = slot_of("param:" + cd->companions.front());
-      if (vi == UINT32_MAX || ti == UINT32_MAX)
-        return fail("set_param: anchor clock '" + pd->clock + "' of '" + name
-          + "' has no velocity/origin slot");
+      // the origin. The parser resolved both slots at decode and refuses a
+      // plan where they do not resolve, and every load decodes through it.
       const int64_t origin_q = trunc_sat_i64(
-        (read(ti) * state.sample_rate)
+        (read(pd->clock_origin_slot) * state.sample_rate)
           * static_cast<double>(INT64_C(1) << tropical_clock::kClockFracBits));
-      const int64_t velocity_q = trunc_sat_i64(read(vi) * 4294967296.0);
+      const int64_t velocity_q =
+        trunc_sat_i64(read(pd->clock_velocity_slot) * 4294967296.0);
       clk = wrapping_add(origin_q, scale_clock_q(velocity_q, clk));
     }
     // Exact on ℤ/2³²: off₁ = off₀ + Φ(inc₀, C) − Φ(inc₁, C), with the

@@ -9,8 +9,8 @@ buys two things:
 
 - **Provable recursion.** An `Array (String × JsonV)` object admits the
   `sizeOf` lemmas below (`sizeOf_lt_of_mem_snd`, `sizeOf_lt_of_getField`)
-  that the codec's total decode DFS hangs its termination on; core ships
-  no such lemmas for tree-map lookups. This is the load-bearing property.
+  that the total decoders (`WireExpr`'s, `PlanDecode`'s) hang their
+  termination on; core ships no such lemmas for tree-map lookups. This is the load-bearing property.
 - **Key order**, the original motivation (the TS `raise` adapter observed
   `Object.entries` order over several record shapes — all retired with
   the surface language). Audited 2026-07-26: order is now semantically

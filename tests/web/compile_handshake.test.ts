@@ -147,7 +147,7 @@ describe('load_patch_graph compile handshake', () => {
       expect(report.nodes).toContainEqual({ id: 'src', kind: 'source', status: 'active' })
       expect(report.nodes).toContainEqual({ id: 'scopeProbe', kind: 'string', status: 'excluded' })
       expect(report.inputs).toContainEqual({ node: 'out', port: 'in', state: 'wired', sources: ['src'] })
-      expect(report.params).toContainEqual({ name: 'src.freq', value: 220, discipline: 'anchor' })
+      expect(report.params).toContainEqual({ name: 'src.freq', value: 220, discipline: 'anchor_clock' })
 
       for (const tap of report.taps) {
         expect(Object.keys(tap).sort()).toEqual(['instance', 'name', 'output', 'slot'])

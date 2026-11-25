@@ -132,9 +132,15 @@ it reads the manifest and before any write:
 | Web `ParamWriter` constructor (port disciplines) | yes | yes | yes |
 | `Kernel.Discipline.ofWire` (one port entry) | yes | yes | no: it sees one entry; the nested plan's decode checks the table |
 
+The C++ parser also records the clock's velocity and origin slots on the
+`anchor_clock` entry, so a native write looks nothing up and has no failure
+path of its own.
+
 The web writer knows `glide` and `velocity` but does not write them: a write
 to such a param is refused by name. The playground declares `anchor_clock`
-on every anchored knob; plain `anchor` keeps its sample-clock meaning.
+on every anchored knob, and its compile report (`load_patch_graph`) names
+each param's discipline from the same table; plain `anchor` keeps its
+sample-clock meaning.
 
 On the f64 lanes (the JIT and wasm) the phase is then bit-exactly continuous
 at `now`: the oscillator continues from its pre-write phase with the new

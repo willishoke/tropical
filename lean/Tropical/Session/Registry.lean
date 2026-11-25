@@ -5,11 +5,11 @@ import Tropical.Entries
 import Tropical.Stdlib
 
 /-!
-# Session.Registry — program registration (strata → adopt → entry)
+# Session.Registry — program registration (strata → entry → adopt)
 
 `registerResolved` lands an already-resolved (arrow-builder or
-directly-constructed) program in the typed store: strata, adoption, entry
-rendering. `registerStdlib` is the boot chain, registering the
+directly-constructed) program in the typed store: strata, entry rendering,
+adoption. `registerStdlib` is the boot chain, registering the
 `Tropical.EmitArrow.stdlibBuilders` in manifest order, then records the
 stdlib's type families; `registerFamilyMember` registers a family member on
 first use. The former raise →
@@ -85,10 +85,13 @@ def registerResolved (name : String)
     SessionM (Json × Tropical.Ir.ProgramIdx) := do
   let st ← get
   let (arenaShip, shipIdx) ← strataConcrete st arena' rawIdx
-  adoptResolved arenaShip shipIdx
+  -- Render the entry before touching the store: `SessionM` keeps its state
+  -- across a failure, so adopting first would leave `resolvedByName` on the
+  -- new body while `programs`/`templateByName` keep the old one.
   let entry ← match Tropical.Entries.concreteEntry arenaShip name shipIdx with
     | .error e => internalError e
     | .ok j => pure j
+  adoptResolved arenaShip shipIdx
   modify fun s => { s.addProgram (ProgMeta.fromEntry entry) with
     templateByName := s.templateByName.insert name shipIdx }
   pure (entry, rawIdx)

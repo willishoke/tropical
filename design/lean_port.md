@@ -13,7 +13,8 @@ whole stack — compiler, MCP server, and session engine in one process.
 It owns: raise (`Tropical/Parse/Raise.lean`), the surface parser
 (`Tropical/Parse/Surface/*` + `Tropical/Parse/Nodes.lean`), the
 elaborator (`Tropical/Ir/Elaborator.lean`), the codec
-(`Tropical/Ir/Codec.lean`), all six strata passes
+(`Tropical/Ir/Codec.lean`, since deleted: registration adopts the
+post-strata program in place, #264), all six strata passes
 (`Tropical/Ir/Strata/*` + `Tropical/Ir/Strata.lean`), the Core
 downcast (`Tropical/Ir/Core.lean`, carrying resolved port types), emit
 (`Tropical/Ir/Emit.lean` — the structural-CSE emitter over Core with
