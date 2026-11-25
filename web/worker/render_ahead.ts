@@ -45,7 +45,7 @@ export const RENDER_AHEAD_DEFAULTS: RenderAheadOptions = {
   controlHoldMs: 250,
 }
 
-/** Worker → worklet: `data` holds the kernel's compact channels, planar f32,
+/** Worker → worklet: `data` holds the kernel's audio channels (never a tap), planar f32,
  *  faded and clamped (`WasmKernel.process`), covering `[start, start + n)`. */
 export type Chunk = { type: 'chunk'; epoch: number; start: number; data: Float32Array[] }
 
@@ -55,6 +55,9 @@ const KNOB_EVENTS_PER_S = 60
 type Segment = {
   kernel: WasmKernel
   writer: ParamWriter
+  /** The kernel channels that are sound, in host order; the rest are
+   *  observation channels (taps) and are never sent to the worklet. */
+  audio: number[]
   /** The frame at which this kernel's τ is 0. */
   origin: number
   /** The first frame this segment plays (the previous one plays before it). */
@@ -80,7 +83,7 @@ export class RenderAhead {
   // Controls received since the last step, applied together at one splice.
   private writes = new Map<string, number>()
   private fade: 'in' | 'out' | null = null
-  private incoming: { kernel: WasmKernel; manifest: KernelManifest } | null = null
+  private incoming: { kernel: WasmKernel; manifest: KernelManifest; audio: number[] } | null = null
   /** The newest load; an older load that finishes late is dropped. */
   private loadToken = 0
   /** Writes posted while a patch loads, for that patch at its τ = 0. */
@@ -114,12 +117,20 @@ export class RenderAhead {
 
   /** The newest patch's kernel and its own frame at the playhead (0 before
    *  it starts), for a display that evaluates the kernel off the audio path.
-   *  The kernel holds the newest knob values once they are spliced. */
+   *  The kernel holds the newest knob values once they are spliced. `null`
+   *  while a load is pending, so a display never draws the old kernel under
+   *  the new patch. */
   displaySource(): { kernel: WasmKernel; frame: number } | null {
+    if (this.pendingLoad() || this.incoming) return null
     const seg = this.segments[this.segments.length - 1]
     if (!seg) return null
     return { kernel: seg.kernel, frame: Math.max(0, this.estimate() - seg.origin) }
   }
+
+  /** The last `step` left frames to render: the renderer is behind its
+   *  lookahead, and optional work (a display) should wait. */
+  get behind(): boolean { return this.lastStepMore }
+  private lastStepMore = false
 
   /** A patch load started; returns the token `adopt` must present. Writes
    *  posted before it were for the old patch. */
@@ -130,10 +141,14 @@ export class RenderAhead {
     return ++this.loadToken
   }
 
-  /** The loaded kernel, spliced in after the current one fades out. */
-  adopt(token: number, kernel: WasmKernel, manifest: KernelManifest): void {
+  /** The loaded kernel, spliced in after the current one fades out.
+   *  `audio` names the kernel channels that are sound (default: all). */
+  adopt(token: number, kernel: WasmKernel, manifest: KernelManifest,
+      audio: number[] = Array.from({ length: kernel.outputChannelCount }, (_, c) => c)): void {
     if (token !== this.loadToken) return
-    this.incoming = { kernel, manifest }
+    if (audio.length === 0 || audio.some((c) => !Number.isInteger(c) || c < 0 || c >= kernel.outputChannelCount))
+      throw new RangeError(`audio channels [${audio}] are not channels of a ${kernel.outputChannelCount}-channel kernel`)
+    this.incoming = { kernel, manifest, audio }
   }
 
   /** A load that failed: the current patch plays on. */
@@ -160,6 +175,11 @@ export class RenderAhead {
   /** Apply pending controls at one splice and render at most one chunk.
    *  Returns whether there is more to render right now. */
   step(): boolean {
+    this.lastStepMore = this.stepInner()
+    return this.lastStepMore
+  }
+
+  private stepInner(): boolean {
     if (!this.clockKnown) return false
     const est = this.estimate()
     const margin = this.frames(this.options.marginMs)
@@ -201,7 +221,7 @@ export class RenderAhead {
     while (this.segments.length > 1 && this.segments[1]!.from <= S) this.segments.shift()
 
     if (this.incoming) {
-      const { kernel, manifest } = this.incoming
+      const { kernel, manifest, audio } = this.incoming
       this.incoming = null
       this.adoptedToken = this.loadToken
       const writer = new ParamWriter(manifest)
@@ -217,7 +237,7 @@ export class RenderAhead {
         origin = S + FADE_FRAMES
       }
       kernel.beginFadeIn(0)
-      this.segments.push({ kernel, writer, origin, from: origin })
+      this.segments.push({ kernel, writer, audio, origin, from: origin })
       if (this.fade === 'in') this.fade = null // the new patch fades in anyway
     }
 
@@ -248,12 +268,12 @@ export class RenderAhead {
     const next = this.segments[i + 1]
     const n = Math.min(this.options.chunkFrames, next ? next.from - a : Infinity)
     const k = seg.kernel
-    const data = Array.from({ length: k.outputChannelCount }, () => new Float32Array(n))
+    const data = Array.from({ length: seg.audio.length }, () => new Float32Array(n))
     // A finished fade-out is silence; skip the kernel.
     if (a - seg.origin < k.mutedFrom) {
       const t0 = this.now()
       k.seek(a - seg.origin)
-      k.process(data, n)
+      k.process(data, n, seg.audio)
       const share = (this.now() - t0) / ((1000 * n) / this.rate)
       this.costShare += 0.1 * (share - this.costShare)
     }

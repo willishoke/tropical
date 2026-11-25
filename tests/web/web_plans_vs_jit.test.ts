@@ -9,13 +9,19 @@
  * browser bug is in the host/worklet glue, not codegen.
  */
 
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, afterAll } from 'bun:test'
 import { spawnSync } from 'bun'
-import { readFileSync, existsSync, writeFileSync } from 'fs'
+import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
 import { expectAudible } from './energy_floor'
+
+// A per-run scratch directory: fixed /tmp paths let two checkouts' runs
+// overwrite each other's files.
+const TMP = mkdtempSync(join(tmpdir(), 'wpvj-'))
+afterAll(() => rmSync(TMP, { recursive: true, force: true }))
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '../..')
@@ -53,7 +59,7 @@ function runNative(slug: string, samples: number): { data: Float64Array; channel
   }
   const c = spawnSync([diffcli, 'compile', source, '--mode=fused'], { cwd: repoRoot, env: cliEnv })
   if (c.exitCode !== 0) throw new Error(`compile ${slug} failed: ${c.stderr?.toString()}`)
-  const planTmp = `/tmp/wpvj-${slug}.plan.json`
+  const planTmp = join(TMP, `${slug}.plan.json`)
   writeFileSync(planTmp, c.stdout.toString())
   const r = spawnSync([diffcli, 'render-bytes', planTmp, '--all-channels', '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`render-bytes ${slug} failed: ${r.stderr?.toString()}`)

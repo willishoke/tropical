@@ -330,6 +330,26 @@
      "instance": "vca",
      "output": "out"
     }
+   },
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "channel": 1,
+    "expr": {
+     "op": "ref",
+     "instance": "wave",
+     "output": "out"
+    }
+   },
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "channel": 2,
+    "expr": {
+     "op": "ref",
+     "instance": "env",
+     "output": "out"
+    }
    }
   ]
  }

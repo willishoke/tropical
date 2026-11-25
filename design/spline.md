@@ -6,8 +6,9 @@ Gates: `lean/Tropical/Tropicaltest/Spline.lean`,
 `lean/Tropical/Tropicaltest/PhaseClip.lean` and, for the families,
 `Tropicaltest/TypeFamily.lean` (`tropicaltest --spline-only`).
 The browser player ships two spline patches, `web/patches/spline-voice.json`
-and `spline-tremolo.json`, and draws one cycle of their output from the
-kernel itself (`web/CLAUDE.md`, "The curve display").
+and `spline-tremolo.json`, and draws one cycle of each spline, tapped as
+its own output channel, from the kernel itself (`web/CLAUDE.md`, "The curve
+display").
 
 A spline is a shape read by a phase. It is a function of one phase
 coordinate, not a parametric Bézier curve. Every spline is periodic. At

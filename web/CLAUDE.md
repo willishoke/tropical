@@ -68,7 +68,21 @@ web/
 `--graph`) and compile a graph
 through `Playground.compilePlan` and the typed stage-0 split, as
 `render-graph` does. Channel 0 is the graph's `out`; each named tap is a
-further channel.
+further channel. A `tropical_program_2` patch makes a tap the same way: a
+further `dac.out` assign with a `channel`.
+
+**Audio channels and taps.** A tap is an observation channel, never sound.
+The kernel type names its channels (`out.channels`, e.g.
+`__root__.tap:cutoff`) but does not mark which are sound, so the patch's
+`manifest.json` entry declares `audio`, the kernel channels that are sound
+in host order, and `build_patches.ts` fails on a kernel with more than one
+channel that does not declare them (a one-channel kernel is `[0]`). The
+player sends only those to the worklet (`WasmKernel.process(outputs, n,
+channels)`); one audio channel plays on every speaker. A display may still
+draw a tap: that is what taps are for. Carrying the distinction in the
+kernel type (a role per output channel, set by the compiler, which knows
+which assigns are taps) would remove the declaration; it is a core gap, not
+built.
 
 `web/runtime/` depends **only** on `KernelManifest` (`tropical_kernel_1`) —
 nothing from the compiler. It is a self-contained consumer of tropical's
@@ -116,8 +130,17 @@ sits on a base name with no port, so the kernel type cannot carry it; a
 playable knob is therefore a `knob` node (raw, or anchor when it feeds a
 freq inlet). A `tropical_program_2` patch's params are all raw: a
 `paramDecl` cannot declare a discipline and the session compile attaches
-none, so a frequency param there jumps the phase on a write (`spline-voice`
-and `spline-tremolo` ship their pitch knob this way). `build_patches.ts` fails the build on a knob that names no
+none. So a program-2 knob is continuous only where a raw write is. A clock's
+phase is `inc·τ`, so a raw write to a frequency re-evaluates the whole past
+under the new frequency and moves the phase by `Δinc·τ`: at τ a minute in,
+one slider step of `spline-voice`'s 2 Hz pulse rate moves the envelope by
+about 0.64 of a cycle, to an effectively arbitrary point. The frequency
+knobs of the spline patches (`pitch`, the pulse `rate`, the `lfo` rate) are
+discontinuous this way; a control point, `width`, `depth` or `level` steps
+the output by its own change at the current phase, which is smaller. These
+knobs become continuous once a patch can declare an anchored frequency
+(declared write disciplines for patch-bay params are in progress on
+`feat/patch-disciplines`); the patches stay raw until then. `build_patches.ts` fails the build on a knob that names no
 param or a discipline the player cannot write. Writes are messages, so the
 demo still needs no COOP/COEP and deploys as plain static files.
 
@@ -203,11 +226,11 @@ the playhead: the last report advanced by the time since.
 
 | Message | Path | Effect |
 |---------|------|--------|
-| `{type:'load', wasm, manifest}` | host → renderer | instantiate; splice in after the current patch fades out |
+| `{type:'load', wasm, manifest, audio}` | host → renderer | instantiate; splice in after the current patch fades out; play only the `audio` channels |
 | `{type:'param', name, value}` | host → renderer | write at the next splice |
 | `{type:'fadeIn'}` / `{type:'fadeOut'}` | host → renderer | envelope from the next splice |
-| `{type:'display', display, points}` | host → renderer | draw one cycle of a channel; `display: null` stops |
-| `{type:'curve', frame, freq, data}` | renderer → host | the cycle's points, from kernel frame `frame` |
+| `{type:'display', displays, points}` | host → renderer | draw one cycle of each listed channel; `[]` stops |
+| `{type:'curve', index, cycle, tau0, freq, data}` | renderer → host | display `index`'s points over clock cycle `cycle`, from clock word `tau0` |
 | `{type:'chunk', epoch, start, data}` | renderer → worklet | planar f32 frames from `start`; a newer epoch overwrites the frames it covers, an older one is dropped |
 | `{type:'playhead', frame}` | worklet → renderer | the next frame the worklet will play, every 4 quanta |
 | `{type:'mute'}` | host → worklet | a short local fade before the host closes the context |
@@ -218,31 +241,60 @@ containing a `WebAssembly.Module`.)
 
 ## The curve display
 
-A patch's `manifest.json` entry may declare `display: {channel, freq |
-freqParam}`: draw one cycle (`rate / freq` frames, `freq` fixed or the
-current value of a param) of that output channel. The page sends it to the
-renderer (`{type:'display'}`), which evaluates the cycle with
-`renderAt` at 512 τ values from the played frame (`worker/curve.ts`), under
-the knob values the kernel is rendering with, and posts the points back
-(`{type:'curve'}`) about 30 times a second and after each spliced knob
-write. The page only draws them. `build_patches.ts` fails the build on a
-display whose channel or param the kernel does not have. The display reads a
-kernel output channel, so a curve that is not itself audible would need its
-own channel, and the player plays every channel (a wider kernel maps channel
-`c` to host channel `c`).
+A patch's `manifest.json` entry may declare `displays`, each `{channel,
+freq | freqParam, label}`: draw one cycle of output `channel` (usually a
+tap) over a clock of frequency `freq`, fixed or the current value of a
+param. The page sends the list to the renderer (`{type:'display'}`), which
+evaluates each curve with `renderAt` at 512 τ values (`worker/curve.ts`)
+under the newest spliced knob values, and posts the points back
+(`{type:'curve'}`). The page only draws them. `build_patches.ts` fails the
+build on a display whose channel or param the kernel does not have.
 
-What it shows: the patch's output over one cycle of the declared clock,
-starting at the played frame. What it does not show: the shape of one
-component at one instant. A patch has one τ, so sweeping τ across a cycle
-also advances every other clock in the patch by one cycle: in
-`spline-voice` the envelope moves on by 1/220 s across the drawn wave, and a
-modulator as fast as the drawn clock is drawn as part of the shape. Drawing
-"the wave at instant τ₀, modulators frozen" needs the oscillator's phase as
-a kernel input separate from τ, which the port does not have. The smallest
-change that would give it: a second, optional per-frame input on the port
-(say `phase:i64q16[N]`, defaulting to τ) that the compiler routes to the
-clocks a display names, so a host could hold τ at τ₀ and sweep the phase.
-Not built.
+- **Which cycle.** The clock is read by the stdlib phasor law, the one the
+  anchor discipline also uses: `inc = trunc(f·2³²/rate)`, phase
+  `⌊inc·τ/2¹⁶⌋ mod 2³²` (a `ClockPhasor` on τ with offset 0; a clock with
+  an offset or another law would be drawn rotated). The curve is the cycle
+  that contains the renderer's estimate of the playhead, from its phase 0:
+  point `j` is the first clock word at or after phase `cycle + j/512`, so
+  its phase is exact to within one word's advance (`inc/2¹⁶` phase units,
+  about 2⁻²³ of a cycle at 220 Hz). Two redraws within one cycle are the
+  same curve bit for bit, and a later cycle differs only by that grid
+  offset, so the picture holds still under fixed knobs.
+- **When.** The playhead estimate is the worklet's next frame, from its last
+  report advanced by the time since. The knob values are the newest
+  spliced, so the picture leads what is heard by the knob margin plus the
+  device latency.
+- **What a tap shows.** `spline-voice` taps the wave and the envelope, and
+  `spline-tremolo` the wave at audio rate and the same wave at LFO rate;
+  each curve depends only on its own clock, so one cycle of it is the shape
+  itself. Drawing the audible `vca.out` instead would not be: a patch has
+  one τ, so sweeping τ across a cycle also advances every other clock by
+  the same span of time. Across one 220 Hz cycle of `spline-voice`'s output
+  the envelope changes its peak by up to 29% at the defaults (85% at pitch
+  55), and a short pulse can be shorter than the cycle. Drawing "the
+  output's shape at τ₀, modulators frozen" needs the oscillator's phase as
+  a kernel input separate from τ, which the port does not have. The
+  smallest change that would give it: an optional second per-frame input
+  on the port (say `phase:i64q16[N]`, defaulting to τ) that the compiler
+  routes to the clocks a display names. Not built.
+- **Cost.** A curve is 512 kernel frames. At most one round of curves runs
+  per 33 ms; a knob write marks the curves stale and is coalesced into the
+  next round; no round runs while the renderer is behind its lookahead, and
+  none while a load is pending (so an old kernel is never drawn under a new
+  patch). Two curves at 30 rounds a second are about 0.7× real time of
+  kernel work, so their share of a core is 0.7× the patch's render cost
+  (see the per-chunk cost table in `render_ahead.test.ts`, which also times
+  one curve): negligible for the spline patches. It is not counted in
+  `controlBudget`: the spline patches' curves cost about 40 µs each (about
+  0.3% of a core for two at 30 rounds a second); a patch as heavy as
+  `spectral-filter-fm` (about 560 µs a
+  curve) declares no display.
+
+## Known issues
+
+- Kernels are compiled at 44.1 kHz and played at the AudioContext's rate
+  with no resampling: on 48 kHz hardware everything plays 8.8% sharp and
+  fast. The display's Hz are in kernel time (the manifest's `rate`).
 
 ## Equivalence gates
 
@@ -278,14 +330,18 @@ compare the kernel's output against the JIT (`WasmKernel.render` vs
   schedule: zero-filled quanta, the largest step against the patch's own, a
   sustained overload resuming at the wall-clock τ, ahead ≡ in place sample for
   sample, a knob splice ≡ an in-place write at its frame (also a spline
-  control point and a `PhaseClip` width on `spline-voice`), late splices,
-  patch swaps, and each shipped patch's per-chunk render cost.
-- `render_at.test.ts` — `renderAt`: one period of a spline oscillator
-  (Catmull-Rom, K = 12; B-spline, K = 5) at 1000 fractional-frame τ values
-  equals the f64 reference spline at each τ's exact integer phase within
-  1e-12, at τ = 0 and ten hours in; at whole frames it is `render` bit for
-  bit (and on the shipped `spline-voice`); `cycleCurve`, the display's path,
-  returns those same points.
+  control point and a `PhaseClip` width on `spline-voice`), no tap channel
+  reaching a host channel (`spectral-filter-fm`'s cutoff tap; both
+  speakers play its one audio channel), late splices, patch swaps, and each
+  shipped patch's per-chunk render and per-curve cost.
+- `render_at.test.ts` — `renderAt` on a two-channel kernel: one period of
+  two spline oscillators (Catmull-Rom, K = 12; B-spline, K = 5) at 1000
+  fractional-frame τ values equals the f64 reference spline at each τ's
+  exact integer phase within 1e-12, at τ = 0 and ten hours in; at whole
+  frames it is `render` bit for bit (also on the shipped `spline-voice`).
+  The display path: `cycleCurve` is `renderAt` on its τ grid bit for bit,
+  starts at phase 0 of the cycle containing the frame, closes, redraws the
+  same curve within a cycle, and follows a param write.
 - `runtime_params.test.ts` — `ParamWriter`: an anchored re-pitch ten hours in
   is continuous and plays the new pitch (a raw one jumps); companions and
   unimplemented disciplines are refused.

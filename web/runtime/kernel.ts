@@ -369,8 +369,11 @@ export class WasmKernel {
   get frame(): number { return this.frameIdx }
 
   /** Render `n` frames into planar host outputs (f32 audio) with the anti-click
-   *  fade and the device-boundary clamp. Mono kernels are upmixed to every host
-   *  channel; wider kernels map each compact channel independently.
+   *  fade and the device-boundary clamp. `channels` picks the kernel channels
+   *  that are sound, in host order (omitted: all of them); a patch's
+   *  observation channels (taps) are left out, so they never reach a host
+   *  output. One played channel is upmixed to every host channel; more map
+   *  one to one.
    *
    *  The clamp lives HERE and not in `render` on purpose: `render` returns the
    *  kernel's own f64 output — the value of `f(τ)` — and that is the surface the
@@ -385,21 +388,25 @@ export class WasmKernel {
    *
    *  It runs on the audio thread, so it reads each block's output view in
    *  place rather than going through `render`'s copy, and allocates nothing. */
-  process(outputs: readonly Float32Array[], n: number): void {
+  process(outputs: readonly Float32Array[], n: number, channels?: readonly number[]): void {
     if (outputs.length === 0)
       throw new RangeError('process requires at least one host output channel')
-    if (this.outputChannelCount > 1
-        && outputs.length < this.outputChannelCount)
+    const A = channels ? channels.length : this.outputChannelCount
+    if (A === 0) throw new RangeError('process requires at least one kernel channel to play')
+    for (const c of channels ?? [])
+      if (!Number.isInteger(c) || c < 0 || c >= this.outputChannelCount)
+        throw new RangeError(`no kernel output channel ${c}`)
+    if (A > 1 && outputs.length < A)
       throw new RangeError(
-        `kernel requires ${this.outputChannelCount} host output channels; got ${outputs.length}`)
+        `kernel requires ${A} host output channels; got ${outputs.length}`)
     for (const output of outputs)
       if (output.length < n)
         throw new RangeError('host output channel is shorter than the frame count')
 
     const C = this.outputChannelCount
-    if (C > 1)
-      for (let channel = C; channel < outputs.length; channel++)
-        outputs[channel]!.fill(0, 0, n)
+    if (A > 1)
+      for (let h = A; h < outputs.length; h++)
+        outputs[h]!.fill(0, 0, n)
 
     // A block's tail past `n` is discarded and recomputed by the next call,
     // as in `render`: the closed form has no state to keep in step.
@@ -410,17 +417,17 @@ export class WasmKernel {
       for (let s = 0; s < take; s++, frame++) {
         const gain = steady >= 0 ? steady : this.gainAt(this.frameIdx + s)
 
-        if (C === 1) {
-          const v = block[s]! * gain
+        if (A === 1) {
+          const v = block[s * C + (channels ? channels[0]! : 0)]! * gain
           const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
           const sample = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
           for (const output of outputs) output[frame] = sample
           continue
         }
-        for (let channel = 0; channel < C; channel++) {
-          const v = block[s * C + channel]! * gain
+        for (let h = 0; h < A; h++) {
+          const v = block[s * C + (channels ? channels[h]! : h)]! * gain
           const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
-          outputs[channel]![frame] =
+          outputs[h]![frame] =
             lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
         }
       }

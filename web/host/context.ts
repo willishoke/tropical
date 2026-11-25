@@ -25,16 +25,19 @@ export type TropicalHost = {
   node: AudioWorkletNode
   worker: Worker
   /** Load a precompiled patch; it is spliced in after the current one fades
-   *  out. */
-  loadPatch(wasm: ArrayBuffer, manifest: KernelManifest): void
+   *  out. `audio` names the kernel channels that are sound, in host order
+   *  (default: all); the others are observation channels (taps) and never
+   *  reach the device. */
+  loadPatch(wasm: ArrayBuffer, manifest: KernelManifest, audio?: number[]): void
   fadeIn(): void
   /** Resolves once the fade-out has reached the speakers. */
   fadeOut(): Promise<void>
   /** Write a live param (a `param:` slot name) under its discipline. */
   setParam(name: string, value: number): void
-  /** Ask the renderer for one cycle of a channel at `points` points
-   *  (`worker/curve.ts`), or stop with `null`; curves arrive at `onCurve`. */
-  setDisplay(display: CycleDisplay | null, points?: number): void
+  /** Ask the renderer for one cycle of each listed channel at `points`
+   *  points (`worker/curve.ts`), or stop with `[]`; curves arrive at
+   *  `onCurve`. */
+  setDisplay(displays: CycleDisplay[], points?: number): void
   onCurve: ((curve: Curve) => void) | null
   dispose(): Promise<void>
 }
@@ -114,12 +117,12 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     context: ctx,
     node,
     worker,
-    loadPatch(wasm, manifest) {
-      const required = kernelOutputChannelCount(manifest)
+    loadPatch(wasm, manifest, audio) {
+      const required = audio?.length ?? kernelOutputChannelCount(manifest)
       if (required > 1 && required > outputChannels)
         throw new RangeError(
           `patch requires ${required} output channels; host has ${outputChannels}`)
-      worker.postMessage({ type: 'load', wasm, manifest })
+      worker.postMessage({ type: 'load', wasm, manifest, audio })
     },
     fadeIn() { worker.postMessage({ type: 'fadeIn' }) },
     fadeOut() {
@@ -127,7 +130,7 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
       return new Promise((resolve) => setTimeout(resolve, fadeOutMs()))
     },
     setParam(name, value) { worker.postMessage({ type: 'param', name, value }) },
-    setDisplay(display, points = 512) { worker.postMessage({ type: 'display', display, points }) },
+    setDisplay(displays, points = 512) { worker.postMessage({ type: 'display', displays, points }) },
     async dispose() {
       // Whatever is still queued, fade it locally rather than cut it.
       node.port.postMessage({ type: 'mute' })

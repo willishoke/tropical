@@ -3,7 +3,7 @@
   { "slug": "ring-mod", "title": "Ring Mod", "description": "Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials." },
   { "slug": "tz-flanger", "title": "Through-Zero Flanger", "description": "A stateless through-zero flanger: an LFO sweeps the two offset taps of a reversible comb through zero on a 110 Hz modal drone. The ahead tap reads the future." },
   { "slug": "tz-saw", "title": "Through-Zero Saw", "description": "A playground PatchGraph: a 110 Hz polyBLEP saw through a through-zero flanger patched from delay, ring and mix. The delay time is an LFO, so the tap sweeps through zero and reads ahead." },
-  { "slug": "spectral-filter-fm", "title": "Spectral Filter FM",
+  { "slug": "spectral-filter-fm", "title": "Spectral Filter FM", "audio": [0],
     "description": "A 128-partial harmonic saw (a partial family, phase-exact at any τ) under a complex spectral lowpass envelope whose cutoff an LFO sweeps — slow, or up into audio rate for filter FM. The envelope multiplies each partial by the filter shape at its own frequency; there is no filter state.",
     "knobs": [
       {"param": "f0.value", "label": "f0", "min": 27.5, "max": 440, "log": true, "unit": "Hz"},
@@ -15,7 +15,7 @@
       {"param": "depth.value", "label": "LFO depth", "min": 0, "max": 2000, "unit": "Hz"},
       {"param": "level.value", "label": "level", "min": 0, "max": 0.2}
     ] },
-  {"slug": "spline-voice", "title": "Spline Voice", "description": "A 12-point periodic Catmull-Rom wave read by one clock; its loudness is a periodic B-spline read through PhaseClip by a second, slower clock, so the envelope fits the pulse width. Every control point is a knob. Pitch is a raw write: a tropical_program_2 patch cannot declare an anchored frequency yet, so a pitch move jumps the phase.", "display": {"channel": 0, "freqParam": "pitch"},
+  {"slug": "spline-voice", "title": "Spline Voice", "description": "A 12-point periodic Catmull-Rom wave read by one clock; its loudness is a periodic B-spline read through PhaseClip by a second, slower clock, so the envelope fits the pulse width. The curves are taps on the wave and the envelope, each over its own clock's cycle. Knobs are raw writes (patch-bay params cannot declare a write discipline yet), so they are not all continuous. A clock's phase is inc·τ, so a raw write to a frequency (pitch, pulse rate) re-evaluates the whole past under the new frequency and jumps the phase to an effectively arbitrary point; a control-point or width move steps the output by the change at the current phase.", "audio": [0], "displays": [{"channel": 1, "freqParam": "pitch", "label": "wave (c0–c11), one cycle of the pitch clock"}, {"channel": 2, "freqParam": "rate", "label": "envelope (e0–e7 through PhaseClip), one cycle of the pulse clock"}],
     "knobs": [
       {"param": "pitch", "label": "pitch", "min": 55, "max": 880, "log": true, "unit": "Hz"},
       {"param": "c0", "label": "c0", "min": -1, "max": 1},
@@ -42,7 +42,7 @@
       {"param": "e7", "label": "e7", "min": -1, "max": 1},
       {"param": "level", "label": "level", "min": 0, "max": 0.5}
     ] },
-  {"slug": "spline-tremolo", "title": "Spline Tremolo", "description": "One 12-point periodic spline at two rates: read at audio rate it is the oscillator, read by a slow clock it is the tremolo that shapes the oscillator's loudness. Both read the same control-point knobs. Raise the LFO rate into the audio range and the tremolo becomes sidebands. Pitch is a raw write (see Spline Voice).", "display": {"channel": 0, "freqParam": "pitch"},
+  {"slug": "spline-tremolo", "title": "Spline Tremolo", "description": "One 12-point periodic spline at two rates: read at audio rate it is the oscillator, read by a slow clock it is the tremolo that shapes the oscillator's loudness. Both read the same control-point knobs, and the two curves are the same shape drawn from taps at the two rates. Raise the LFO rate into the audio range and the tremolo becomes sidebands. Catmull-Rom overshoots its control points (by up to 1.25× their range), so level is capped to keep the worst case below full scale. Knobs are raw writes (patch-bay params cannot declare a write discipline yet), so they are not all continuous. A clock's phase is inc·τ, so a raw write to a frequency (pitch, LFO rate) re-evaluates the whole past under the new frequency and jumps the phase to an effectively arbitrary point; a control-point or depth move steps the output by the change at the current phase.", "audio": [0], "displays": [{"channel": 1, "freqParam": "pitch", "label": "the wave at audio rate, one cycle of the pitch clock"}, {"channel": 2, "freqParam": "lfo", "label": "the same wave at LFO rate, one cycle of the LFO clock"}],
     "knobs": [
       {"param": "pitch", "label": "pitch", "min": 55, "max": 880, "log": true, "unit": "Hz"},
       {"param": "c0", "label": "c0", "min": -1, "max": 1},
@@ -59,6 +59,6 @@
       {"param": "c11", "label": "c11", "min": -1, "max": 1},
       {"param": "lfo", "label": "LFO rate", "min": 0.1, "max": 400, "log": true, "unit": "Hz"},
       {"param": "depth", "label": "depth", "min": 0, "max": 1},
-      {"param": "level", "label": "level", "min": 0, "max": 0.5}
+      {"param": "level", "label": "level", "min": 0, "max": 0.35}
     ] }
 ]

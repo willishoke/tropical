@@ -32,12 +32,18 @@
  * otherwise the whole suite skips.
  */
 
-import { describe, test, expect, setDefaultTimeout } from 'bun:test'
+import { describe, test, expect, setDefaultTimeout, afterAll } from 'bun:test'
 import { spawnSync } from 'bun'
-import { readFileSync, writeFileSync } from 'fs'
-import { resolve, dirname } from 'path'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'fs'
+import { resolve, dirname, join } from 'path'
+import { tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 import { expectAudible } from './energy_floor'
+
+// A per-run scratch directory: fixed /tmp paths let two checkouts' runs
+// overwrite each other's files.
+const TMP = mkdtempSync(join(tmpdir(), 'mvj-'))
+afterAll(() => rmSync(TMP, { recursive: true, force: true }))
 
 setDefaultTimeout(120_000)
 
@@ -87,7 +93,7 @@ function snrDb(ref: Float64Array, got: Float64Array): number {
 }
 
 function planFile(name: string, planJson: string): string {
-  const p = `/tmp/mvj-${name}.plan.json`
+  const p = join(TMP, `${name}.plan.json`)
   writeFileSync(p, planJson)
   return p
 }

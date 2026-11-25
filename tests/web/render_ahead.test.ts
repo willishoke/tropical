@@ -27,6 +27,7 @@ import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, ParamWriter, type KernelManifest } from '../../web/runtime/index'
 import { RENDER_AHEAD_DEFAULTS } from '../../web/worker/render_ahead'
+import { cycleCurve } from '../../web/worker/curve'
 import {
   simulate, zeroQuanta, maxStep, firstDiff, stallSchedule, type SimConfig,
 } from './playout_sim'
@@ -49,10 +50,20 @@ async function load(slug: string): Promise<{ k: WasmKernel; m: KernelManifest }>
   return { k, m }
 }
 
+/** The kernel channels the player sends to the device for `slug`: its
+ *  index entry's `audio` (the rest are taps). */
+function audioOf(slug: string): number[] {
+  const index = JSON.parse(readFileSync(join(distDir, 'index.json'), 'utf-8')) as { slug: string; audio: number[] }[]
+  const e = index.find((x) => x.slug === slug)
+  if (!e) throw new Error(`${slug} is not in index.json`)
+  return e.audio
+}
+
 async function run(slug: string, cfg: Omit<SimConfig, 'kernel' | 'manifest'>) {
   const { k, m } = await load(slug)
   return simulate({
     deviceFrames: DEVICE_FRAMES, renderMsPerFrame: ((COST[slug] ?? 0) * 1000) / m.rate,
+    audio: audioOf(slug),
     ...cfg, kernel: k, manifest: m,
   })
 }
@@ -154,13 +165,37 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
       const S = moved.splices[1]! - moved.origin
       const N = moved.out.length - moved.origin
       const ref = new Float32Array(N)
+      const audio = audioOf(slug)
       k.beginFadeIn(0)
-      k.process([ref.subarray(0, S)], S)
+      k.process([ref.subarray(0, S)], S, audio)
       new ParamWriter(m).write(k, name, value, k.frame)
-      k.process([ref.subarray(S)], N - S)
+      k.process([ref.subarray(S)], N - S, audio)
       expect(firstDiff(ref, moved.out.subarray(moved.origin))).toBe(-1)
       // and the write did change what plays after the splice
       expect(firstDiff(base.out, moved.out)).toBeGreaterThanOrEqual(moved.splices[1]!)
+    }
+  })
+
+  // A tap is an observation channel: the cutoff tap of spectral-filter-fm
+  // (hundreds of Hz as a number) must never reach a speaker. The patch is
+  // mono audio, so both host channels play channel 0.
+  test('spectral-filter-fm: no tap channel reaches a host channel', async () => {
+    const slug = 'spectral-filter-fm'
+    const { k } = await load(slug)
+    expect(k.outputChannelCount).toBe(2)
+    expect(audioOf(slug)).toEqual([0])
+    const raw = k.render(4096)
+    let tapPeak = 0
+    for (let s = 0; s < 4096; s++) tapPeak = Math.max(tapPeak, Math.abs(raw[2 * s + 1]!))
+    expect(tapPeak).toBeGreaterThan(100) // the tap is the cutoff in Hz
+    for (const variant of ['direct', 'ahead'] as const) {
+      const r = await run(slug, { variant, durationMs: 1500 })
+      expect(r.outs.length).toBe(2)
+      expect(firstDiff(r.outs[1]!, r.outs[0]!)).toBe(-1)
+      let peak = 0
+      for (const x of r.outs[1]!) peak = Math.max(peak, Math.abs(x))
+      expect(peak).toBeGreaterThan(0)
+      expect(peak).toBeLessThan(1)
     }
   })
 
@@ -208,7 +243,7 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
       const next = await load('spectral-filter-fm')
       return run('tz-flanger', {
         variant, durationMs: dur,
-        controls: [{ at: 1500, msg: { type: 'load', kernel: next.k, manifest: next.m, instantiateQuanta: 4 } }],
+        controls: [{ at: 1500, msg: { type: 'load', kernel: next.k, manifest: next.m, instantiateQuanta: 4, audio: audioOf('spectral-filter-fm') } }],
       })
     }
     const normal = Math.max(
@@ -225,7 +260,8 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
   test('per-chunk render cost of every shipped patch', async () => {
     const entries = JSON.parse(readFileSync(join(distDir, 'index.json'), 'utf-8')) as { slug: string }[]
     const chunk = RENDER_AHEAD_DEFAULTS.chunkFrames
-    const lines = [`| patch | µs / ${chunk}-frame chunk | % of real time | refill ${RENDER_AHEAD_DEFAULTS.lookaheadMs} ms |`, '|---|---|---|---|']
+    // A display curve is 512 kernel frames at chosen τ (`worker/curve.ts`).
+    const lines = [`| patch | µs / ${chunk}-frame chunk | % of real time | refill ${RENDER_AHEAD_DEFAULTS.lookaheadMs} ms | µs / 512-point curve |`, '|---|---|---|---|---|']
     for (const { slug } of entries) {
       const { k, m } = await load(slug)
       const out = Array.from({ length: k.outputChannelCount }, () => new Float32Array(chunk))
@@ -235,7 +271,10 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
       for (let i = 0; i < reps; i++) k.process(out, chunk)
       const ms = (performance.now() - t0) / reps
       const share = ms / ((chunk / m.rate) * 1000)
-      lines.push(`| ${slug} | ${(ms * 1000).toFixed(0)} | ${(share * 100).toFixed(2)} | ${(share * RENDER_AHEAD_DEFAULTS.lookaheadMs).toFixed(1)} ms |`)
+      const c0 = performance.now()
+      for (let i = 0; i < 20; i++) cycleCurve(k, m.rate, 1000, 0, 220, 512)
+      const curveUs = ((performance.now() - c0) / 20) * 1000
+      lines.push(`| ${slug} | ${(ms * 1000).toFixed(0)} | ${(share * 100).toFixed(2)} | ${(share * RENDER_AHEAD_DEFAULTS.lookaheadMs).toFixed(1)} ms | ${curveUs.toFixed(0)} |`)
     }
     console.log(`\n${lines.join('\n')}\n`)
   })
