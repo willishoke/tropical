@@ -26,8 +26,9 @@ private def ExposedInput.key (input : ExposedInput) : String :=
 
 -- ── Program I/O (save / export) ──────────────────────────────────────────────
 
-def handleSave (env : Env) : EngineM Json := do
-  let st ← env.state.get
+/-- The session as a `tropical_program_2` document (`{program: …}`), the
+    `save` result. -/
+def saveDocument (st : SessionSt) : Json := Id.run do
   -- CF-only: wires are stored raw (no session-level unit delay wrap), so
   -- save echoes the canonical wires directly.
   let wiresPost := st.wires
@@ -69,6 +70,9 @@ def handleSave (env : Env) : EngineM Json := do
   pure <| Json.mkObj [("program", Json.mkObj
     [("schema", Json.str "tropical_program_2"), ("name", Json.str "patch"),
      ("body", body)])]
+
+def handleSave (env : Env) : EngineM Json := do
+  pure (saveDocument (← env.state.get))
 
 /-- Port of `rewriteRefs`: session refs to internal instances become
     `nestedOut`. Typed and exhaustive — refs inside array literals are
@@ -155,6 +159,14 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   if name.isEmpty then
     throwBare .missingArgument "name is required" (param := some "name")
+  -- A type family owns its name and every `<family><size>` spelling: an
+  -- export there would shadow a member.
+  match lookupFamily (← env.state.get).families name with
+  | .none => pure ()
+  | .member f _ | .missingSize f | .outOfRange f _ | .leadingZero f _ =>
+    throwBare .invalidValue
+      s!"export_program: '{name}' is reserved by the type family '{f.name}' (its name and every '{f.name}<size>' spelling); choose another name"
+      (param := some "name") (value := some (Json.str name))
   let outputsArg := arg? args "outputs"
   let outputPairs : Array (String × Json) := match outputsArg with
     | some (.obj m) => m.toArray

@@ -505,3 +505,46 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 })
+
+// Type families (`lean/Tropical/Family.lean`): a spline type at a size other
+// than 8. A 12-point periodic Catmull-Rom wave (param controls) read by a
+// 220 Hz phasor, times a 5-point periodic B-spline read by a 3 Hz one. Both
+// members are assembled at ingest from their family's builder.
+const FAMILY_WAVE = [0, 0.4, 0.7, 0.5, 0.2, 0.1, -0.1, -0.3, -0.6, -0.5, -0.3, -0.1]
+const FAMILY_LFO = [0.2, 1, 0.6, 0.9, 0.4]
+function familySplineProgram(wave: number[]): ProgramFile {
+  const phaseOf = (instance: string) => ({ op: 'toInt', args: [
+    { op: 'mul', args: [{ op: 'ref', instance, output: 'phase' }, 4294967296] }] })
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_family_spline',
+    body: { op: 'block', decls: [
+      ...wave.map((value, j) => ({ op: 'paramDecl', name: `w${j}`, value })),
+      { op: 'instanceDecl', name: 'ph', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 220 } },
+      { op: 'instanceDecl', name: 'wave', program: `PeriodicCatmullRom${wave.length}`, inputs: {
+        phase: phaseOf('ph'),
+        ...Object.fromEntries(wave.map((_, j) => [`c${j}`, { op: 'param', name: `w${j}` }])) } },
+      { op: 'instanceDecl', name: 'lfoph', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 3 } },
+      { op: 'instanceDecl', name: 'lfo', program: `PeriodicBSpline${FAMILY_LFO.length}`, inputs: {
+        phase: phaseOf('lfoph'), ...Object.fromEntries(FAMILY_LFO.map((v, j) => [`c${j}`, v])) } },
+      { op: 'instanceDecl', name: 'vca', program: 'VCA', inputs: {
+        audio: { op: 'ref', instance: 'wave', output: 'out' },
+        cv: { op: 'ref', instance: 'lfo', output: 'out' } } },
+    ], assigns: [dacOut('vca', 'out')] },
+  }
+}
+
+describe('wasm vs native JIT — type-family members', () => {
+  test('PeriodicCatmullRom12 × PeriodicBSpline5 — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('family spline', familySplineProgram(FAMILY_WAVE), 2048)
+  })
+
+  test('PeriodicCatmullRom12: a written control value ≡ the JIT compiled at that value', async () => {
+    const moved = FAMILY_WAVE.map((v, j) => (j === 10 ? 0.8 : v))
+    const nat = runNative(compileViaLean(familySplineProgram(moved)), 2048)
+    expectAudible('family spline written', nat)
+    const wasm = await runWasm(familySplineProgram(FAMILY_WAVE), '', 2048, [['param:w10', 0.8]])
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  })
+})

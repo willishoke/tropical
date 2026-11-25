@@ -80,7 +80,7 @@ validate: build lean
 
 # Behavioral MCP protocol suites against the live Lean engine.
 test-lean-engine: build lean
-	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
+	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts mcp/type_family.test.ts
 
 # Native Reversible gates. SwiftUI is a macOS surface; Linux CI must not
 # pretend to compile it.

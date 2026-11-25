@@ -107,7 +107,19 @@ def handleListPrograms (env : Env) : EngineM Json := do
       ("registers", Json.arr (m.registers.map (portJson false))),
       ("type_params", jsonNull)]
   let metas := st.catalogOrder.filterMap st.programs.get?
-  pure <| Json.arr (metas.map render)
+  -- A type family is listed after the concrete types: no ports of its own
+  -- (they depend on the size), a `family` descriptor instead.
+  let family (f : TypeFamily) : Json :=
+    Json.mkObj [
+      ("program_name", Json.str f.name),
+      ("inputs", Json.arr #[]), ("outputs", Json.arr #[]),
+      ("registers", Json.arr #[]), ("type_params", jsonNull),
+      ("family", Json.mkObj [
+        ("member", Json.str s!"{f.name}<size>"),
+        ("size_min", toJson f.sizeMin), ("size_max", toJson f.sizeMax),
+        ("size_meaning", Json.str f.sizeMeaning),
+        ("ports", Json.str f.ports)])]
+  pure <| Json.arr (metas.map render ++ st.families.map family)
 
 def handleListInstances (env : Env) : EngineM Json := do
   let st ← env.state.get
