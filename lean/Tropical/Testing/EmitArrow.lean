@@ -342,11 +342,13 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- the phase input per warped generator. Instance count is unchanged.
   -- 16 → 17 programs / 347 → 410 nodes: `SinOscQ15`, the Q15 LFO with typed
   -- fixed-point ports (`design/typed-kernel.md`, "Typed ports").
+  -- 17 → 21 programs / 410 → 524 nodes: the four registered splines
+  -- (`EmitArrow/Spline.lean`), Catmull-Rom and B-spline, periodic and phantom-end.
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),
-    ("stdlib programs",         nativeStdlib.programs.size,    17),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 410),
+    ("stdlib programs",         nativeStdlib.programs.size,    21),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 524),
     ("carrier instances",       nativeProgram.decls.size,      3),
     ("reachable carrier nodes", nativeExprs.nodes.size,        174),
     ("carrier wire bytes",      nativeWire.length,             28835)]

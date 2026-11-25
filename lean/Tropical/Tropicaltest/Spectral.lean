@@ -110,10 +110,15 @@ def nmseDb (dut ref : Array Float) : Float := Id.run do
     p := p + ref[i]! * ref[i]!
   return 10.0 * Float.log10 (e / p + 1e-300)
 
+/-- The largest `|a[i] − b[i]|` over the common prefix, or NaN if any
+    difference is NaN (`max` alone would drop it, and a NaN render would
+    compare as close). -/
 def maxAbsDiff (a b : Array Float) : Float := Id.run do
   let mut m := 0.0
   for i in [0:min a.size b.size] do
-    m := max m (a[i]! - b[i]!).abs
+    let d := (a[i]! - b[i]!).abs
+    if d.isNaN then return d
+    m := max m d
   return m
 
 def peakOf (a : Array Float) : Float := a.foldl (fun m x => max m x.abs) 0.0

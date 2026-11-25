@@ -270,6 +270,35 @@ async function expectBitIdentical(name: string, prog: ProgramFile, N: number,
     for (let i = 0; i < nat.length; i++) expect(Math.fround(nat[i]!)).toBe(nat[i]!)
 }
 
+// The registered splines (`lean/Tropical/EmitArrow/Spline.lean`): a periodic
+// Catmull-Rom wave read by a 220 Hz `ClockPhasor`, times a phantom-end B-spline
+// envelope read by an 8 Hz one. The wave's control values are params, so a
+// written control is a param write into the same artifact.
+const SPLINE_WAVE = [0, 0.5, 0.6, 0.2, -0.1, -0.5, -0.4, -0.2]
+const SPLINE_ENV = [0, 1, 0.8, 0.6, 0.45, 0.3, 0.15, 0]
+function splineProgram(wave: number[]): ProgramFile {
+  const phaseOf = (instance: string) => ({ op: 'toInt', args: [
+    { op: 'mul', args: [{ op: 'ref', instance, output: 'phase' }, 4294967296] }] })
+  const controls = (prefix: string | null, values: number[]) => Object.fromEntries(
+    values.map((v, j) => [`c${j}`, prefix === null ? v : { op: 'param', name: `${prefix}${j}` }]))
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spline',
+    body: { op: 'block', decls: [
+      ...wave.map((value, j) => ({ op: 'paramDecl', name: `w${j}`, value })),
+      { op: 'instanceDecl', name: 'ph', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 220 } },
+      { op: 'instanceDecl', name: 'wave', program: 'PeriodicCatmullRom8', inputs: {
+        phase: phaseOf('ph'), ...controls('w', wave) } },
+      { op: 'instanceDecl', name: 'ev', program: 'ClockPhasor', inputs: { clk: { op: 'clock' }, freq: 8 } },
+      { op: 'instanceDecl', name: 'env', program: 'PhantomEndBSpline8', inputs: {
+        phase: phaseOf('ev'), ...controls(null, SPLINE_ENV) } },
+      { op: 'instanceDecl', name: 'vca', program: 'VCA', inputs: {
+        audio: { op: 'ref', instance: 'wave', output: 'out' },
+        cv: { op: 'ref', instance: 'env', output: 'out' } } },
+    ], assigns: [dacOut('vca', 'out')] },
+  }
+}
+
 // A float param into SoftClip after a sine: an f32 param cell in a binary32
 // artifact, seeded from its binary32 default or written by the host.
 function drivePatch(drive: number): ProgramFile {
@@ -399,6 +428,19 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
   })
 
+  test('spline wave × spline envelope (param controls) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('spline', splineProgram(SPLINE_WAVE), 2048)
+  })
+
+  test('spline: a written control value ≡ the JIT compiled at that value', async () => {
+    const moved = SPLINE_WAVE.map((v, j) => (j === 3 ? -0.7 : v))
+    const nat = runNative(compileViaLean(splineProgram(moved)), 2048)
+    expectAudible('spline written', nat)
+    const wasm = await runWasm(splineProgram(SPLINE_WAVE), '', 2048, [['param:w3', -0.7]])
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+  })
+
   test('FixedSin with an int param (i64 word) — WASM ≡ JIT, seeded and written', async () => {
     await expectBitIdentical('FixedSin int param', intParamProgram(1073741824), 64)
     const nat = runNative(compileViaLean(intParamProgram(3221225472)), 64)
@@ -438,6 +480,10 @@ describe('wasm vs native JIT', () => {
 
   test('f32: SpectralSaw (200-partial family) — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('SpectralSaw f32', spectralSawProgram(110), 512, 'f32')
+  })
+
+  test('f32: spline wave × spline envelope — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('spline f32', splineProgram(SPLINE_WAVE), 2048, 'f32')
   })
 
   test('f32: a float param, seeded and written — WASM ≡ JIT bit for bit', async () => {

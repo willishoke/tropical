@@ -116,7 +116,7 @@ not a real instance.
 
 New DSP types are **not** defined over the wire. They are authored as
 `Tropical.Stdlib` arrow-combinator builders in Lean and booted directly
-by the engine (17 at present) — no parse bridge, no literate `.md`
+by the engine (21 at present) — no parse bridge, no literate `.md`
 surface language. The former `define_program` tool and its entire
 generics apparatus (`type_params` / `type_args`, monomorphization, the
 specialization cache) are gone; every registered program is concrete.

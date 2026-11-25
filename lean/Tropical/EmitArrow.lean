@@ -4,6 +4,7 @@ import Tropical.EmitArrow.ClockAlgebra
 import Tropical.EmitArrow.BankOrder
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spectral
+import Tropical.EmitArrow.Spline
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
@@ -35,6 +36,8 @@ The modules:
 * `Spectral` — partial families (one `bankSum` region per family) and
   complex spectral envelopes, carried by `Term`'s `family`/`envelope`
   constructors (`design/spectral-family.md`).
+* `Spline` — a uniform cubic spline read by an integer phase (Catmull-Rom
+  or B-spline, periodic or phantom-end; `design/spline.md`).
 * `Modal` / `Patch` / `Gong` — the ID-valued modal
   compiler, graph lowering seam, and struck-register authoring.
 The recursive authoring representation has been retired; this is the single

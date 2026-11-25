@@ -36,6 +36,7 @@ import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
+import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -106,6 +107,14 @@ def main (args : List String) : IO UInt32 := do
         return 1
     | .ok (arena, resolved) =>
         let (_, bad) ← Tropical.Tropicaltest.Spectral.runSpectral arena resolved
+        return if bad == 0 then 0 else 1
+  if args.contains "--spline-only" then
+    match Tropical.Playground.stdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, _) =>
+        let (_, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
         return if bad == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
@@ -348,6 +357,18 @@ def main (args : List String) : IO UInt32 := do
       total := total + n
       failed := failed + bad
 
+  -- ── (g′) The uniform cubic spline read by a phase (EmitArrow/Spline.lean) ──
+  IO.println "spline (oracle, seam, live control):"
+  match Tropical.Playground.stdlib with
+  | .error error =>
+      total := total + 3
+      failed := failed + 3
+      IO.println s!"  FAIL  spline  stdlib: {error}"
+  | .ok (arena, _) =>
+      let (n, bad) ← Tropical.Tropicaltest.Spline.runSpline arena
+      total := total + n
+      failed := failed + bad
+
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
   let arrowTotal0 := total
@@ -390,7 +411,7 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     -- ── (h‴) Stdlib wire+port goldens: the PERMANENT anchor. Folds the builder
     -- chain (no bridge) and freezes each program's plan-wire + port surface —
-    -- what guards the 15 builders once the parse bridge is deleted.
+    -- what guards the stdlib builders once the parse bridge is deleted.
     IO.println "stdlib wire+port goldens (builder chain ≡ frozen):"
     total := total + 1
     if !(← runStdlibWireGoldens writeMode) then failed := failed + 1
