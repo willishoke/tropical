@@ -31,6 +31,7 @@ import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.KernelType
 import Tropical.Tropicaltest.BootStore
+import Tropical.Tropicaltest.ReexportFailure
 import Tropical.Tropicaltest.FractionalTau
 import Tropical.Tropicaltest.LongHorizon
 import Tropical.Tropicaltest.ParamOrder
@@ -95,6 +96,8 @@ def main (args : List String) : IO UInt32 := do
     | .error e => IO.println s!"  FAIL  anchor-continuity  stdlib: {firstLine e}"; return 1
     | .ok (arena, resolved) =>
       return if ← Tropical.Tropicaltest.AnchorContinuity.runAnchorContinuity arena resolved then 0 else 1
+  if args.contains "--reexport-only" then
+    return if ← Tropical.Tropicaltest.ReexportFailure.runReexportFailure then 0 else 1
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--emitarrow-only" || args.contains "--arena-native-only" then
@@ -221,6 +224,9 @@ def main (args : List String) : IO UInt32 := do
   IO.println "stdlib boot store (adopted in place, well-formed, indexed by name):"
   total := total + 1
   if !(← Tropical.Tropicaltest.BootStore.runBootStore) then failed := failed + 1
+  IO.println "failed re-export (a refused export_program onto a live name changes nothing):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ReexportFailure.runReexportFailure) then failed := failed + 1
 
   -- ── (b⁗′) Fractional τ at the port: the closed form at half-sample instants ──
   IO.println "fractional tau (scrub(½) on the grid ≡ τ at k+½, byte-exact):"

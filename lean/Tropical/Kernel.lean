@@ -255,9 +255,9 @@ private def binary32Default (slotName : String) (n : JsonNumber) : Except String
 
 /-- Why a plan cannot be realized at binary32 for its write disciplines, or
     `none`. A binary32 artifact's params are written raw: glide, anchor and
-    velocity re-anchor on companions that hold sample counts and phases
-    (`#t0`, `tau_base`, `#phase`), which binary32 does not hold exactly past
-    2^24. The plan's discipline table is walked directly, as
+    velocity keep companions binary32 does not hold exactly — a start sample
+    (`#t0`), a clock origin (`tau_base`) and a 32-bit phase offset
+    (`#phase`). The plan's discipline table is walked directly, as
     `FlatPlan.portError?` walks it: a glided knob has no port of its own (its
     ports are the `#v0`/`#v1`/`#t0` companions), so a walk over the param
     ports alone would miss it. -/
@@ -265,7 +265,7 @@ def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
   for d in plan.paramDisciplines do
     if d.discipline != "raw" then
       let slots := String.intercalate ", " ((#[d.name] ++ d.companions).toList.map (s!"param:{·}"))
-      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are sample counts and phases, which binary32 does not hold exactly)"
+      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are a start sample, a clock origin or a 32-bit phase offset, which binary32 does not hold exactly)"
   return none
 
 /-- Derive the kernel type of a plan compiled for `frames` samples per call,

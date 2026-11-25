@@ -124,10 +124,7 @@ def runEmitCorpusGate (label stdName : String)
     then `Entries.concreteEntry`; only the port surface is compared.
     The resolved-body SEMANTICS are the corpus gate's job (plan-wire identity);
     this pins the port surface, which the plan doesn't fully exercise (unwired
-    defaults). `binderCount` — a count of source `let`-binders, non-load-bearing
-    (nothing in Compile/Emit reads it) and legitimately 0 for a DAG-authored
-    builder — lives in the resolved codec, not the port surface, and is out of
-    scope by construction. -/
+    defaults). -/
 def runEntryEquivGate (label stdName : String)
     (arena : Arena) (resolved : Array (String × ProgramIdx))
     (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :

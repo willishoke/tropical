@@ -156,8 +156,8 @@ theorem UnaryOpTag.ofWire_wire (t : UnaryOpTag) :
 
 -- The tree `Expr` (and its binder machinery) is gone: the resolved
 -- expression IS the hash-consed `ENode`/`ExprArena` DAG below, and
--- `Program`'s leaves are `ExprId`s. Authoring frontends (the JSON codec's
--- `ParsedExpr`, `EmitArrow`'s combinator tree) build their own shapes and
+-- `Program`'s leaves are `ExprId`s. Authoring frontends (the session's
+-- `WireExpr`, `EmitArrow`'s combinator tree) build their own shapes and
 -- lower into the arena.
 
 -- ─────────────────────────────────────────────────────────────
@@ -501,8 +501,8 @@ structure OutputAssign where
 deriving Repr, Inhabited
 
 /-- One program pool entry. `registry` is the `programRegistry` as an
-    ordered association array — insertion order is observable through
-    the codec, so it is load-bearing here. -/
+    association array in insertion order; a lookup takes the first match
+    (`registryGet?`). -/
 structure Program where
   name : String
   inputs : Array InputDecl := #[]
@@ -529,11 +529,10 @@ def Program.registryGet? (p : Program) (key : String) : Option ProgramIdx :=
 
 /-- The identity pools of the resolved IR: the program pool plus the
     shared expression DAG. References into the pool are by index;
-    sharing an index is pointer sharing. Invariant (maintained by both
-    the codec's forward-pass decode and the elaborator's
-    children-before-parents construction): a program at index `i`
-    references only programs at indices `< i`, so the arena is acyclic
-    by construction. -/
+    sharing an index is pointer sharing. Invariant (maintained by every
+    construction site, each of which pushes children before parents): a
+    program at index `i` references only programs at indices `< i`, so
+    the arena is acyclic by construction. -/
 structure Arena where
   programs : Array Program := #[]
   /-- The shared hash-consed expression DAG every program's leaf `ExprId`s
@@ -556,11 +555,11 @@ def Program.progChildren (p : Program) : Array ProgramIdx :=
 
 /-- Pool-level child-descending well-formedness: every program
     references only programs strictly below its own index. Every
-    construction site satisfies it (the elaborator pushes children
-    before parents, the codec decodes in a forward pass, the lowering
-    appends via `pushEProgram`); checking it once makes
-    `ProgramIdx.idx` a termination measure for pool walks — the
-    lowering's instance recursion and the codec's pooling DFS. -/
+    construction site satisfies it (`assemble` and `export_program` push
+    a program after the programs it links, the lowering appends via
+    `pushEProgram`); checking it once makes `ProgramIdx.idx` a
+    termination measure for pool walks such as the lowering's instance
+    recursion. -/
 def progPoolWf (programs : Array Program) : Bool :=
   (Array.range programs.size).all fun i =>
     match programs[i]? with

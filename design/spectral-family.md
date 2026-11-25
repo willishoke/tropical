@@ -248,15 +248,19 @@ modulation.
 
 ## 6. Findings outside the slice
 
-**Registration expands the DAG.** Registering a program whose
-expression nests transcendentals over an input took 40–70 s under
-`--fixtures`. The case was `expSig` of `logSig(fb/fa)`, the first
-draft of the chirp fixture. The registration path renders a catalog
-entry (`Entries.concreteEntry` → `Codec.encodeResolved`) that writes the
-resolved expression out as a tree. For a three-level nest the entry was
-21 MB of JSON, and `adoptResolved` re-parses it. The fixture now folds
-`ln(fb/fa)` at assemble time. The encoding is worth a look: shared
-subterms should stay shared.
+**Registration expanded the DAG (fixed in #264).** Registering a
+program whose expression nests transcendentals over an input took
+40–70 s under `--fixtures`. The case was `expSig` of `logSig(fb/fa)`,
+the first draft of the chirp fixture. The registration path rendered a
+catalog entry that wrote the resolved expression out as a tree
+(`tropical_resolved_1`): for a three-level nest the entry was 21 MB of
+JSON, and `adoptResolved` re-parsed it. The fixture folds `ln(fb/fa)`
+at assemble time. Registration now adopts the post-strata program in
+place and the codec is deleted, so shared subterms stay shared. One
+side effect: the round trip canonicalised number literals (`0.50` came
+back as `0.5`), so two spellings of one constant in an exported program
+were merged into one node; they now stay two nodes. The output is
+unchanged.
 
 **An honest playground kind is easy.** A `harmonic` node (a family with
 a uniform `f0` knob) and an envelope node whose input must lower to

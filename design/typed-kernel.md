@@ -176,7 +176,9 @@ column crossing achieves.
   "rate":    44100.0,
   "inputs":  [ { "name": "tau",          "elem": "i64q16", "shape": [512],  "role": "signal" },
                { "name": "param:freq",   "elem": "f64",    "shape": [],     "role": "param",
-                 "default": 220.0, "discipline": "anchor", "companion": "param:freq.tau_base" },
+                 "default": 220.0,
+                 "discipline": { "discipline": "anchor_clock", "companions": ["freq#phase"],
+                                 "clock": "master.velocity" } },
                { "name": "in:mic",       "elem": "f64",    "shape": [512],  "role": "signal" },
                { "name": "table:wave",   "elem": "f64",    "shape": [2048], "role": "table",
                  "default": [ … ] } ],
@@ -479,8 +481,9 @@ loop, found by dynamic programming in topological order. That is linear in
 the size of the graph, however many paths it has, so a chain of selects
 that Thumb-1 compiles into a chain of branches, 2²⁰ paths for twenty of
 them, costs no more than its instructions. The entry, from the first
-instruction to the loop head, and the exit, out of the loop and through the
-epilogue to the return, are found the same way. The numbers are exactly
+instruction to the loop head, and the last frame, from the loop head out
+through an exit branch and the epilogue to the return, are found the same
+way. A call is entry + (N − 1) frames + the last frame. The numbers are exactly
 those of the path enumeration the script used before.
 `tools/test_embedded_object.py` keeps that enumeration as its oracle and
 checks the two agree on the fixture objects and on random graphs.
@@ -492,19 +495,20 @@ count: the upper bound may be loose, and nothing says the lower one is
 reached. The report says so in `cycle_bounds`. A call is also assumed to
 run the frame loop exactly N times. Any other cycle, such as an inner loop,
 has no bounded cost: the script names an instruction on it and exits
-non-zero, with no range printed. The epilogue's cheapest and dearest paths
-both enter the call range (`exit_cycles` and `exit_cycles_upper`, and
-`entry_cycles` beside `entry_cycles_upper`; the manifest's `m0plus_cycles`
-carries both ends of each). An ARMv6-M emulator on the same table measured
-four objects, and every measurement falls inside the computed range:
+non-zero, with no range printed. Each part's cheapest and dearest paths
+enter the call range (`entry_cycles` beside `entry_cycles_upper`,
+`frame_cycles_lower`/`_upper`, `last_frame_cycles_lower`/`_upper`; the
+manifest's `m0plus_cycles` carries both ends of each). An ARMv6-M emulator
+on the same table measured four objects, and every measurement falls inside
+the computed range:
 
-| object (N = 16) | entry | frame | exit | call | measured |
+| object (N = 16) | entry | frame | last frame | call | measured |
 |---|---|---|---|---|---|
-| #252 LFO (i64 rail) | 20 | 114–118 | 10 | 1 854–1 918 | 1 854, worst block 1 902 |
-| `FixedSinOscQ15`, `int32` | 17 | 86–90 | 10 | 1 403–1 467 | 1 403, worst block 1 451 |
-| `FixedSinOscQ15`, 32-bit frame counter | 14 | 76–80 | 10 | 1 240–1 304 | |
-| `SinOscQ15`, live `freq` | 39 | 78–82 | 10 | 1 297–1 361 | 1 297–1 318 |
-| 14 selects into a second `SinOscQ15`'s `freq` (2¹⁶ frame paths) | 53 | 237–241 | 10 | 3 855–3 919 | 3 855–3 879 |
+| #252 LFO (i64 rail) | 20 | 114–118 | 124–128 | 1 854–1 918 | 1 854, worst block 1 902 |
+| `FixedSinOscQ15`, `int32` | 17 | 86–90 | 96–100 | 1 403–1 467 | 1 403, worst block 1 451 |
+| `FixedSinOscQ15`, 32-bit frame counter | 14 | 76–80 | 86–90 | 1 240–1 304 | |
+| `SinOscQ15`, live `freq` | 39 | 78–82 | 88–92 | 1 297–1 361 | 1 297–1 318 |
+| 14 selects into a second `SinOscQ15`'s `freq` (2¹⁶ frame paths) | 53 | 237–241 | 247–251 | 3 855–3 919 | 3 855–3 879 |
 
 The last two rows were measured in the same emulator, from zero-wait
 memory, over 20 000 calls with random clocks and `freq` across the whole
@@ -736,7 +740,7 @@ semantics reads a format.
   `frac_bits`. τ carries `frac_bits: 16`. The object block's `ports` list
   each buffer's element, Q label, bytes and alignment.
 - *Disciplines.* Only `raw` applies to an integer param. `glide`, `anchor`
-  and `velocity` re-anchor in float arithmetic on f64 companions
+  and `velocity` read the param's real value and keep f64 companions
   (`host-param-dispatch.md`). Nothing attaches one to a typed port today
   (patch-bay params carry no discipline, and playground knobs are `float`),
   and `portError?` refuses one whose base or companion is a typed slot
@@ -790,8 +794,8 @@ semantics reads a format.
 **Gaps left open (smallest honest fix for each).**
 
 1. *Params are f64 by contract.* Closed by typed ports: a knob on a no-FPU
-   target is an `int32` word the kernel loads as one (`SinOscQ15`, 39 + 78–82
-   + 10 cycles per call).
+   target is an `int32` word the kernel loads as one (`SinOscQ15`, 39 + 15 × 78–82
+   + a last frame of 88–92 cycles per 16-frame call).
 2. *The int rail was i64.* Closed by the `int32` kind: the rounding shifts
    and the clamp are now 32-bit. The frame counter `%s` is now 32-bit too,
    which saves 10 cycles per frame on the M0+ (86 → 76): the add-with-carry
@@ -876,8 +880,8 @@ diffcli compile-object patch.json --out k.o --triple thumbv7em-none-eabihf \
   and a written float param.
 
 **Params at binary32 are written raw.** `glide`, `anchor` and `velocity`
-re-anchor on companions that hold sample counts and phases (`#t0`,
-`tau_base`, `#phase`), which binary32 does not hold exactly past 2²⁴, so
+keep companions binary32 does not hold exactly: a start sample (`#t0`), a
+clock origin (`tau_base`) and a 32-bit phase offset (`#phase`), so
 `Kernel.ofPlan` refuses a binary32 artifact whose plan has any non-raw
 entry in `param_disciplines`, by name. It walks that table directly, as
 `FlatPlan.portError?` does: a glided knob has no port of its own (its ports

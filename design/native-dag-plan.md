@@ -38,6 +38,11 @@ GATE: tropicaltest 12/12 + web wasm_vs_jit/web_plans_vs_jit bit-identical. Commi
 
 ## Phase B — DEFERRED (2026-06-28): blocked by the codec serialization seam
 
+*Update 2026-11-24 (#264): the seam below is gone. Registration adopts the
+post-strata program into the session store in place, and the
+`tropical_resolved_1` codec is deleted. The paragraphs below record why it
+blocked Phase B at the time.*
+
 Finding (from reading the consumers): `runStrataChecked`'s post-strata output is
 not consumed primarily by emit — it is **codec-encoded to `tropical_resolved_1`
 JSON** (`resolveProgramType → concreteEntry → adoptResolved` into the session

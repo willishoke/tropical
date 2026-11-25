@@ -1096,7 +1096,7 @@ def FlatPlan.disciplineError? (p : FlatPlan) : Option String := Id.run do
   converts one implicitly; every channel source of an integer output is
   `int32` (an `int` slot has no output element type);
 * only `raw` applies to an integer param: `glide`, `anchor` and `velocity`
-  re-anchor in float arithmetic on f64 companions (`host-param-dispatch.md`),
+  read the param's real value and keep f64 companions (`host-param-dispatch.md`),
   so a discipline other than `raw` naming a typed slot, as its base or as a
   companion, is refused rather than dropped.
 
@@ -1170,7 +1170,7 @@ def FlatPlan.portError? (p : FlatPlan) : Option String := Id.run do
         let idx? := p.slotNames.findIdx? (· == s!"param:{nm}")
         if let some idx := idx? then
           if let some f := isTypedParam idx then
-            return some s!"param '{d.name}': discipline '{d.discipline}' re-anchors in float arithmetic and is not defined on the {f.describe} slot '{nm}'; an integer param is written raw"
+            return some s!"param '{d.name}': discipline '{d.discipline}' reads the real value into f64 companions and is not defined on the {f.describe} slot '{nm}'; an integer param is written raw"
   return none
 
 end Tropical.Plan

@@ -55,8 +55,9 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
 
 /-- The direct lowering over the shared expression DAG (the inlining
     bloat never materializes), returning the `EArena` and root index.
-    The two exits — `run` (tree, for the codec/registration path) and
-    `runResolved` (the emit's `ExprArena`) — share this body. -/
+    The two exits — `run` (an arena `Program`, which registration adopts
+    into the session store) and `runResolved` (the emit's `ExprArena`) —
+    share this body. -/
 def runToEArena (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (EArena × ProgramIdx) := do
   assertAcyclic arena root

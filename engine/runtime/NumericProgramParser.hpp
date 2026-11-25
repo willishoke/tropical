@@ -191,6 +191,11 @@ struct ParsedPlan7
     std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
     bool                     has_clock = false; // the entry carries a "clock" key (any string, the empty one included)
     std::string              clock;            // anchor_clock: the velocity param of the phasor's clock
+    // anchor_clock: the slots of the clock's velocity param and of its origin
+    // companion, resolved here (the parser refuses a plan where they do not
+    // resolve). UINT32_MAX for every other discipline.
+    uint32_t                 clock_velocity_slot = UINT32_MAX;
+    uint32_t                 clock_origin_slot = UINT32_MAX;
   };
   std::vector<ParamDiscipline> param_disciplines;
 
@@ -461,6 +466,13 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
   if (plan.contains("slot_names"))
     for (const auto & n : plan["slot_names"])
       result.slot_names.push_back(n.get<std::string>());
+  // A slot is found by its name and then indexed into an array of
+  // slot_count cells (the param inputs, the anchor clock's slots), so every
+  // named slot must be one of them.
+  if (result.slot_names.size() > result.slot_count)
+    throw std::runtime_error(
+      "NumericProgramParser: slot_names lists " + std::to_string(result.slot_names.size())
+      + " slots but slot_count is " + std::to_string(result.slot_count));
   if (plan.contains("slot_defaults"))
     for (const auto & v : plan["slot_defaults"])
       result.slot_defaults.push_back(v.get<double>());
@@ -490,8 +502,9 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
   // clock is declared exactly on an `anchor_clock` (the key's presence is
   // what counts: an empty string is a clock, and names nothing), and names a
   // param that carries the velocity discipline, whose slot and origin
-  // companion's slot the plan has (host-param-dispatch.md, `anchor`).
-  for (const auto & pd : result.param_disciplines)
+  // companion's slot the plan has (host-param-dispatch.md, `anchor`). Those
+  // two slots are recorded on the entry, so a write never looks them up.
+  for (auto & pd : result.param_disciplines)
   {
     const std::string & k = pd.discipline;
     if (k != "raw" && k != "glide" && k != "anchor" && k != "anchor_clock" && k != "velocity")
@@ -504,18 +517,24 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
         + (k == "anchor_clock" ? "an anchor_clock discipline must name its clock"
                                : "only an anchor_clock discipline declares a clock"));
     if (k != "anchor_clock") continue;
-    auto has_slot = [&](const std::string & n) {
-      return std::find(result.slot_names.begin(), result.slot_names.end(), "param:" + n)
-        != result.slot_names.end();
+    auto slot_of = [&](const std::string & n) {
+      const auto it = std::find(result.slot_names.begin(), result.slot_names.end(), "param:" + n);
+      return it == result.slot_names.end()
+        ? UINT32_MAX : static_cast<uint32_t>(it - result.slot_names.begin());
     };
     const auto cd = std::find_if(
       result.param_disciplines.begin(), result.param_disciplines.end(),
       [&](const auto & e) { return e.name == pd.clock; });
-    if (cd == result.param_disciplines.end() || cd->discipline != "velocity"
-        || cd->companions.empty() || !has_slot(cd->name) || !has_slot(cd->companions.front()))
+    const bool velocity = cd != result.param_disciplines.end()
+      && cd->discipline == "velocity" && !cd->companions.empty();
+    const uint32_t vi = velocity ? slot_of(cd->name) : UINT32_MAX;
+    const uint32_t ti = velocity ? slot_of(cd->companions.front()) : UINT32_MAX;
+    if (vi == UINT32_MAX || ti == UINT32_MAX)
       throw std::runtime_error(
         "NumericProgramParser: param '" + pd.name + "': anchor clock '" + pd.clock
         + "' is not a velocity param with an origin companion in this plan");
+    pd.clock_velocity_slot = vi;
+    pd.clock_origin_slot = ti;
   }
 
   if (plan.contains("coeff_array_slots"))
@@ -711,9 +730,9 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     check_float_port(result.input_names[i], inputs.at(i).value("elem", std::string{}));
   check_float_port(out.value("name", std::string{"out"}), out_elem);
   // A binary32 artifact's params are written raw (`Kernel.ofPlan` refuses
-  // anything else at compile time): glide, anchor and velocity re-anchor on
-  // companions that hold sample counts and phases, which binary32 does not
-  // hold exactly. A manifest that pairs the two is refused here, once, at
+  // anything else at compile time): glide, anchor and velocity keep a start
+  // sample, a clock origin and a 32-bit phase offset, which binary32 does
+  // not hold exactly. A manifest that pairs the two is refused here, once, at
   // load; the per-write check in the dispatcher stays.
   if (float_format == "f32")
     for (const auto & d : result.plan.param_disciplines)

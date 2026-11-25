@@ -124,22 +124,19 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
       (if surface.2.2.isEmpty then [("state", Json.str "normalled")]
        else [("state", Json.str "wired"),
              ("sources", Json.arr (surface.2.2.map Json.str))])
+  -- A param's discipline is the one the plan carries for it
+  -- (`paramDisciplinesOf`, the plan's `param_disciplines`), so the report
+  -- names exactly the discipline a host will dispatch.
+  let table := paramDisciplinesOf raws
+  let discOf := fun (base : String) =>
+    ((table.find? (·.name == base)).map (·.discipline)).getD "raw"
   let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
     if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase"
         || (nm.splitOn "#t0#u").length > 1 then none
-    else if nm.endsWith "#v0" then
-      some (Json.mkObj [("name", Json.str (nm.dropEnd 3).toString),
-        ("value", Json.num v), ("discipline", Json.str "glide")])
     else
-      let disc :=
-        if nm == masterVelocityParam then "velocity"
-        else match nm.splitOn "." with
-          | [id, kname] =>
-            (raws.find? (·.id == id)).map (fun r => discStr (disciplineIn raws r kname))
-              |>.getD "raw"
-          | _ => "raw"
-      some (Json.mkObj [("name", Json.str nm),
-        ("value", Json.num v), ("discipline", Json.str disc)])
+      let base := if nm.endsWith "#v0" then (nm.dropEnd 3).toString else nm
+      some (Json.mkObj [("name", Json.str base),
+        ("value", Json.num v), ("discipline", Json.str (discOf base))])
   let tapsJ := taps.map fun tap =>
     Json.mkObj [("name", Json.str tap.name),
       ("instance", Json.str tap.sourceInstance),

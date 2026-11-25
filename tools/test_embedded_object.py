@@ -15,8 +15,11 @@ small enough to enumerate, and to closed forms past that:
   * the thumbv6m objects of the fixture patches, when `TROPICAL_DIFFCLI` and
     `TROPICAL_LLVM_BIN` name a diffcli and an LLVM bin directory (`make
     validate` and CI set both): the report equals the enumeration's on each
-    LFO, and on a chain of selects, which the enumeration refuses, the frame
-    range equals a top-down recursion's.
+    LFO, and on a chain of selects, which the enumeration refuses, the
+    entry, frame, last-frame and call ranges equal a top-down walk's;
+  * a kernel with two exits whose last frame is narrower than its frame: each
+    published range is attained by an enumerated path and contains every
+    other one.
 
     TROPICAL_DIFFCLI=lean/.lake/build/bin/diffcli \\
     TROPICAL_LLVM_BIN=/opt/homebrew/opt/llvm@22/bin python3 tools/test_embedded_object.py
@@ -39,28 +42,36 @@ SPEC.loader.exec_module(EO)
 FIXTURES = ["tests/fixtures/embedded_lfo.json", "tests/fixtures/embedded_lfo_knob.json"]
 # Fourteen selects on one LFO's output into a second LFO's frequency: Thumb-1
 # has no conditional move, so each select is a branch, and the frame loop
-# has 2^16 paths. The enumeration refuses it; a top-down recursion, a second
-# way to the same extremes, checks the bounds.
+# has 2^16 paths. The enumeration refuses it; a top-down walk, a second way
+# to the same extremes, checks the bounds.
 BRANCHY = "tests/fixtures/embedded_select_chain.json"
 
 
 def topdown(cfg, start, stop, region):
-    """{end: (lo, hi, n)} by memoized recursion from `start`, independent of
-    `bounds`' topological order. Loop-free graphs only."""
-    memo = {}
-    def go(k):
+    """{end: (lo, hi, n)} from `start`, each instruction's table built from
+    its successors' (a memoized depth-first walk with an explicit stack),
+    independent of `bounds`' topological order. Loop-free graphs only."""
+    memo, stack = {}, [start]
+    while stack:
+        k = stack[-1]
         if k in memo:
-            return memo[k]
+            stack.pop()
+            continue
+        todo = [s for s, _, _ in cfg.succ(k)
+                if not EO.ends(s, stop, region) and s not in memo]
+        if todo:
+            stack.extend(todo)
+            continue
+        stack.pop()
         acc = {}
         for s, c, _ in cfg.succ(k):
-            sub = {s: (0, 0, 1)} if EO.ends(s, stop, region) else go(s)
+            sub = {s: (0, 0, 1)} if EO.ends(s, stop, region) else memo[s]
             for e, (lo, hi, n) in sub.items():
                 a = acc.get(e)
                 v = (lo + c, hi + c, n)
                 acc[e] = v if a is None else (min(a[0], v[0]), max(a[1], v[1]), a[2] + n)
         memo[k] = acc
-        return acc
-    return go(start)
+    return memo[start]
 
 
 def enumerated_loop_report(insns, frames, wait):
@@ -149,6 +160,17 @@ def without_note(rep):
     return {k: v for k, v in rep.items() if k != "cycle_bounds"}
 
 
+def published(oracle):
+    """The oracle's report in the published fields. It reported the last
+    frame as `exit_cycles`/`exit_cycles_upper`, its excess over the cheapest
+    and the dearest frame; the report now publishes the last frame itself."""
+    rep = dict(oracle)
+    lo, hi = rep.pop("exit_cycles"), rep.pop("exit_cycles_upper")
+    rep["last_frame_cycles_lower"] = lo + rep["frame_cycles_lower"]
+    rep["last_frame_cycles_upper"] = hi + rep["frame_cycles_upper"]
+    return rep
+
+
 def diamonds(n):
     """A frame loop whose body is `n` diamonds in a row: each a compare and
     a conditional branch over one arm into the other. Per diamond the
@@ -218,9 +240,9 @@ class Synthetic(unittest.TestCase):
                 self.assertIn("more than 4096 paths", str(e))
                 continue
             got = EO.loop_report(insns, 16, 0)
-            self.assertEqual(without_note(got), want, f"trial {trial}")
+            self.assertEqual(without_note(got), published(want), f"trial {trial}")
             self.assertEqual(without_note(EO.loop_report(insns, 7, 2)),
-                             enumerated_loop_report(insns, 7, 2), f"trial {trial}, W=2")
+                             published(enumerated_loop_report(insns, 7, 2)), f"trial {trial}, W=2")
             compared += 1
         self.assertGreater(compared, 300)
 
@@ -237,7 +259,8 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(rep["frame_cycles_lower"], 4 * n + 3)
         self.assertEqual(rep["frame_cycles_upper"], 5 * n + 3)
         self.assertEqual((rep["entry_cycles"], rep["entry_cycles_upper"]), (4, 4))
-        self.assertEqual((rep["exit_cycles"], rep["exit_cycles_upper"]), (4, 4))
+        self.assertEqual((rep["last_frame_cycles_lower"], rep["last_frame_cycles_upper"]),
+                         (4 * n + 2 + 5, 5 * n + 2 + 5))
         self.assertEqual(rep["call_cycles_lower"], 4 + (frames - 1) * (4 * n + 3) + (4 * n + 2 + 5))
         self.assertEqual(rep["call_cycles_upper"], 4 + (frames - 1) * (5 * n + 3) + (5 * n + 2 + 5))
         # The wait-state estimate walks paths, so it refuses here.
@@ -249,7 +272,7 @@ class Synthetic(unittest.TestCase):
         for n in range(0, 12):
             insns = diamonds(n)
             self.assertEqual(without_note(EO.loop_report(insns, 16, 0)),
-                             enumerated_loop_report(insns, 16, 0))
+                             published(enumerated_loop_report(insns, 16, 0)))
 
     def test_an_inner_loop_is_refused(self):
         insns = assemble(["push {r4, lr}", "head:", "movs r2, #4", "inner:", "subs r2, #1",
@@ -279,6 +302,52 @@ class Synthetic(unittest.TestCase):
         self.assertEqual((rep["frame_cycles_lower"], rep["frame_cycles_upper"]), (4, 5))
 
 
+    def test_two_exits_publish_true_bounds(self):
+        # The loop tests its count at the head and has a second, early exit;
+        # both leave before the diamond, whose dearer arm adds six cycles.
+        # The last frame costs no more than the cheapest frame and its range
+        # is narrower, so the old "excess over a frame" terms came out
+        # exit > exit_upper here.
+        insns = assemble(["push {r4, lr}", "movs r3, #16", "head:",
+                          "subs r3, #1", "beq @done", "cmp r0, r2", "beq @early",
+                          "cmp r0, r1", "bge @else",
+                          "movs r2, #1", "movs r2, #1", "movs r2, #1", "movs r2, #1",
+                          "movs r2, #1", "movs r2, #1", "b @join",
+                          "else:", "movs r2, #2", "join:", "b @head",
+                          "done:", "movs r0, #0", "early:", "pop {r4, pc}"])
+        frames = 16
+        oracle = enumerated_loop_report(insns, frames, 0)
+        self.assertGreater(oracle["exit_cycles"], oracle["exit_cycles_upper"])
+        rep = EO.loop_report(insns, frames, 0)
+        self.assertEqual(without_note(rep), published(oracle))
+        self.assertNotIn("exit_cycles", rep)
+        # Every path of each part, enumerated: each published pair is the
+        # cheapest and the dearest of them, so each number is a bound that
+        # some path attains.
+        cfg = EO.Cfg(insns)
+        lo, hi = (int(a, 16) for a in rep["loop_range"])
+        inside = lambda k: k is not None and lo <= cfg.insns[k].addr <= hi
+        head = cfg.at[int(rep["loop_head"], 16)]
+        total = lambda p: sum(c for _, c, _ in p)
+        entry = [total(p) for p, s in EO.paths(cfg, 0, set(), region=lambda k: not inside(k))
+                 if s == head]
+        loop = EO.paths(cfg, head, {head}, region=inside)
+        frame = [total(p) for p, s in loop if s == head]
+        last = [total(p) + (0 if s is None else total(q))
+                for p, s in loop if s != head
+                for q, _ in ([([], None)] if s is None else EO.paths(cfg, s, set()))]
+        self.assertGreater(len({s for _, s in loop if s != head}), 1)
+        for name, costs in (("entry_cycles", entry), ("frame_cycles", frame),
+                            ("last_frame_cycles", last)):
+            low = rep[name] if name == "entry_cycles" else rep[name + "_lower"]
+            self.assertEqual((low, rep[name + "_upper"]), (min(costs), max(costs)), name)
+        self.assertLessEqual(rep["last_frame_cycles_upper"], rep["frame_cycles_lower"])
+        self.assertEqual(rep["call_cycles_lower"],
+                         min(entry) + (frames - 1) * min(frame) + min(last))
+        self.assertEqual(rep["call_cycles_upper"],
+                         max(entry) + (frames - 1) * max(frame) + max(last))
+
+
 @unittest.skipUnless(os.environ.get("TROPICAL_DIFFCLI") and os.environ.get("TROPICAL_LLVM_BIN"),
                      "set TROPICAL_DIFFCLI and TROPICAL_LLVM_BIN to compare compiled objects")
 class Objects(unittest.TestCase):
@@ -296,9 +365,10 @@ class Objects(unittest.TestCase):
                                    check=True, capture_output=True, text=True)
                     insns = EO.disasm(llvm, o)
                     got = EO.loop_report(insns, 16, 0)
-                    self.assertEqual(without_note(got), enumerated_loop_report(insns, 16, 0))
+                    self.assertEqual(without_note(got),
+                                     published(enumerated_loop_report(insns, 16, 0)))
                     self.assertEqual(without_note(EO.loop_report(insns, 16, 2)),
-                                     enumerated_loop_report(insns, 16, 2))
+                                     published(enumerated_loop_report(insns, 16, 2)))
                     self.assertGreaterEqual(got["frame_cycles_upper"], got["frame_cycles_lower"])
                     print(f"{patch}: {got['frame_paths']} frame paths, "
                           f"frame {got['frame_cycles_lower']}-{got['frame_cycles_upper']}, "
@@ -323,9 +393,23 @@ class Objects(unittest.TestCase):
         lo, hi = (int(a, 16) for a in rep["loop_range"])
         inside = lambda k: k is not None and lo <= cfg.insns[k].addr <= hi
         head = cfg.at[int(rep["loop_head"], 16)]
-        f_lo, f_hi, n = topdown(cfg, head, {head}, inside)[head]
+        loop = topdown(cfg, head, {head}, inside)
+        f_lo, f_hi, n = loop[head]
         self.assertEqual((rep["frame_cycles_lower"], rep["frame_cycles_upper"], rep["frame_paths"]),
                          (f_lo, f_hi, n))
+        e_lo, e_hi, _ = topdown(cfg, 0, set(), lambda k: not inside(k))[head]
+        self.assertEqual((rep["entry_cycles"], rep["entry_cycles_upper"]), (e_lo, e_hi))
+        lasts = []
+        for s, (l_lo, l_hi, _) in loop.items():
+            if s == head:
+                continue
+            p_lo, p_hi, _ = (0, 0, 1) if s is None else topdown(cfg, s, set(), None)[None]
+            lasts.append((l_lo + p_lo, l_hi + p_hi))
+        x_lo, x_hi = min(l for l, _ in lasts), max(h for _, h in lasts)
+        self.assertEqual((rep["last_frame_cycles_lower"], rep["last_frame_cycles_upper"]),
+                         (x_lo, x_hi))
+        self.assertEqual((rep["call_cycles_lower"], rep["call_cycles_upper"]),
+                         (e_lo + 15 * f_lo + x_lo, e_hi + 15 * f_hi + x_hi))
         print(f"{BRANCHY}: {rep['frame_paths']} frame paths, "
               f"frame {rep['frame_cycles_lower']}-{rep['frame_cycles_upper']}, "
               f"call {rep['call_cycles_lower']}-{rep['call_cycles_upper']}")

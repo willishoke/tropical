@@ -38,8 +38,8 @@ What it checks and reports:
     report says so). Any other cycle (an inner loop) has no bounded cost, and
     the script exits non-zero without a number. Calibrated against an
     ARMv6-M emulator on the TRM table: the #252 LFO object measured 20 +
-    114/frame + 10 (worst block 1902), the int32 LFO 17 + 86/frame + 10
-    (worst 1451); both lie in the computed ranges.
+    15 x 114 + 124 for the last frame (worst block 1902), the int32 LFO
+    17 + 15 x 86 + 96 (worst 1451); both lie in the computed ranges.
   * wait states (`--wait-states W`) — an estimate, not a bound, for code in
     flash: each flash access (a 32-bit instruction fetch, or a literal-pool
     load) costs W more cycles, and an instruction fetch hides behind the
@@ -86,8 +86,10 @@ CYCLE_BOUNDS = ("Bounds, not counts: each lower/upper pair is the cheapest and t
                 "longest/shortest path over the loop-free graph. Every graph path counts, "
                 "including paths no input can take (branches on correlated conditions), so "
                 "an upper bound may be loose and a lower bound may not be reached; entry_cycles "
-                "and exit_cycles are lower bounds, with _upper beside them. A call is assumed "
-                "to run the frame loop exactly `frames` times.")
+                "is a lower bound, with entry_cycles_upper beside it. The last frame runs from "
+                "the loop head out through an exit branch and the epilogue to the return. A "
+                "call is entry + (frames - 1) frames + the last frame, and is assumed to run "
+                "the frame loop exactly `frames` times.")
 COND = re.compile(r"b(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)$")
 
 
@@ -307,17 +309,16 @@ def loop_report(insns, frames, wait):
         e_lo, e_hi, _ = bounds(cfg, s, set(), what="epilogue")[None]
         return e_lo, e_hi
     frame_lo, frame_hi, frame_paths = around
+    # The last frame: from the head out through any exit branch, then the
+    # epilogue to the return. Its cheapest and dearest path over every exit.
     exits_lo, exits_hi = [], []
     for s, (l_lo, l_hi, _) in leave.items():
         e_lo, e_hi = epilogue(s)
         exits_lo.append(l_lo + e_lo)
         exits_hi.append(l_hi + e_hi)
-    # The exit cost is what the last frame adds over a frame on the same data
-    # path: the exit branch taken instead of not (+1) and the epilogue.
-    exit_extra = min(exits_lo) - frame_lo
-    exit_extra_hi = max(exits_hi) - frame_hi
-    lo_call = entry_lo + (frames - 1) * frame_lo + min(exits_lo)
-    hi_call = entry_hi + (frames - 1) * frame_hi + max(exits_hi)
+    last_lo, last_hi = min(exits_lo), max(exits_hi)
+    lo_call = entry_lo + (frames - 1) * frame_lo + last_lo
+    hi_call = entry_hi + (frames - 1) * frame_hi + last_hi
     body = [i for i in insns if lo <= i.addr <= hi]
     rep = {"loop_range": [hex(lo), hex(hi)], "loop_head": hex(cfg.insns[head].addr),
            "loop_instructions": len(body),
@@ -326,8 +327,8 @@ def loop_report(insns, frames, wait):
            "frame_paths": frame_paths,
            "entry_cycles": entry_lo, "entry_cycles_upper": entry_hi,
            "frame_cycles_lower": frame_lo,
-           "frame_cycles_upper": frame_hi, "exit_cycles": exit_extra,
-           "exit_cycles_upper": exit_extra_hi,
+           "frame_cycles_upper": frame_hi,
+           "last_frame_cycles_lower": last_lo, "last_frame_cycles_upper": last_hi,
            "frames": frames, "call_cycles_lower": lo_call, "call_cycles_upper": hi_call,
            "timing_model": TIMING_MODEL, "cycle_bounds": CYCLE_BOUNDS}
     if wait:
@@ -506,8 +507,9 @@ def main():
             man["object"]["m0plus_cycles"] = {
                 "entry": rep["entry_cycles"], "entry_upper": rep["entry_cycles_upper"],
                 "frame_lower": rep["frame_cycles_lower"],
-                "frame_upper": rep["frame_cycles_upper"], "exit": rep["exit_cycles"],
-                "exit_upper": rep["exit_cycles_upper"],
+                "frame_upper": rep["frame_cycles_upper"],
+                "last_frame_lower": rep["last_frame_cycles_lower"],
+                "last_frame_upper": rep["last_frame_cycles_upper"],
                 "call_lower": rep["call_cycles_lower"], "call_upper": rep["call_cycles_upper"],
                 "frames": a.frames, "wait_states": 0, "timing_model": TIMING_MODEL,
                 "cycle_bounds": CYCLE_BOUNDS}

@@ -79,8 +79,9 @@ export function kernelFloatFormat(manifest: KernelManifest): FloatFormat {
       throw new RangeError(`KernelManifest: port '${port.name}' is ${port.elem} in an artifact whose float format is ${fmt}`)
   if (fmt === 'f32') {
     // A binary32 artifact's params are written raw (the compiler refuses
-    // anything else): glide, anchor and velocity re-anchor on sample counts
-    // and phases binary32 does not hold exactly. Refused once, here; a
+    // anything else): glide, anchor and velocity keep a start sample, a
+    // clock origin and a 32-bit phase offset, which binary32 does not hold
+    // exactly. Refused once, here; a
     // glided knob has no port of its own, so the plan's table is read too.
     const named = [
       ...(manifest.plan?.param_disciplines ?? []),
