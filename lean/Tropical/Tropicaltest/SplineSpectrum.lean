@@ -438,7 +438,7 @@ def runVsCubic (arena : Arena) : IO Bool := do
       let cs := controls8 (b.scale * 101)
       outs := outs.push (← familyTerm b cs inc rate count)
       let phase ← mul (← sampleIndex) (← lit inc)
-      outs := outs.push (← splineSig b .wrap (← cs.mapM controlSig) phase)
+      outs := outs.push (← splineSig b (← cs.mapM controlSig) phase)
     pure outs
   let plan ← match compileMulti arena "spline_spectrum_vs_cubic" outs rate with
     | .ok plan => pure plan
@@ -491,7 +491,7 @@ def runAlias (arena : Arena) : IO Bool := do
     for (b, inc) in configs do
       let cs := controls8 (b.scale * 7 + 3)
       outs := outs.push (← familyTerm b cs inc rate count)
-      outs := outs.push (← splineSig b .wrap (← cs.mapM controlSig) (← mul (← sampleIndex) (← lit inc)))
+      outs := outs.push (← splineSig b (← cs.mapM controlSig) (← mul (← sampleIndex) (← lit inc)))
     pure outs
   let plan ← match compileMulti arena "spline_spectrum_alias" outs rate with
     | .ok plan => pure plan

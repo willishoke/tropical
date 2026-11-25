@@ -7,7 +7,7 @@ import Tropical.Exact
 # EmitArrow.SplineSpectrum — a periodic spline as its harmonics below Nyquist
 
 The band-limited realization of a periodic uniform cubic spline
-(`EmitArrow.Spline`, boundary `wrap`): the same curve, rendered as a partial
+(`EmitArrow.Spline`): the same curve, rendered as a partial
 family (`EmitArrow.Spectral`) instead of as a piecewise cubic. It is alias-free
 and takes the per-partial envelope `G(f, τ)` a harmonic family takes.
 `design/spline-spectrum.md` has the derivation, the alias bound and the cost.
@@ -176,7 +176,7 @@ def controlDft (controls : Array Sig) : BuildM (Array Sig × Array Sig) := do
 
 /-- The band-limited spline as a partial family: partials `n = 1..count` of
     the uniform fundamental `freq` on the clock `clk`, weights `2F_n`, and the
-    0 Hz term `F_0`. The curve is the periodic (`wrap`) spline of `controls`
+    0 Hz term `F_0`. The curve is the periodic spline of `controls`
     under `basis`, read at the family's fundamental phase. The DC edge is off
     (the low partials are the curve's shape at any rate); the Nyquist edge is
     the family's standard one. Refused for fewer than one control, a count

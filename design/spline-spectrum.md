@@ -5,7 +5,7 @@ partial family (`EmitArrow/Spectral.lean`, `design/spectral-family.md`).
 Gates: `lean/Tropical/Tropicaltest/SplineSpectrum.lean`
 (`tropicaltest --spline-spectrum-only`).
 
-A periodic uniform cubic spline (`design/spline.md`, boundary `wrap`) has two
+A periodic uniform cubic spline (`design/spline.md`) has two
 realizations. The time-domain cubic costs the same at every pitch and aliases
 at high pitch. Its Fourier series, cut at Nyquist, costs one partial per
 harmonic, does not alias while the controls are uniform within a kernel
@@ -179,13 +179,13 @@ window, and the measured energy agrees with the closed form to 0.1 dB.
   call, so the partial count and edges are fixed for the call. A spline read
   by a phase-modulated or swept clock within one call is the time-domain
   realization's job.
-- **Phantom-end splines.** Only the periodic spline has a Fourier series.
 - **Odd kernels and non-uniform knots.** These are refused or out of scope.
 - **A stdlib type.** The band-limited spline is a `--fixtures` program
   (`SplineSpectrumCatmullRom8`, `SplineSpectrumBSpline8`; inputs `f0`,
   `c0 … c7`, `clk`; 256 partials). No partial family is registered in the
-  stdlib yet, and the partial capacity is a structural choice the patch bay
-  cannot state.
+  stdlib yet. A registered band-limited spline would be a type family
+  (`Tropical/Family.lean`) like `PeriodicCatmullRom<K>`, sized by K and by its
+  partial capacity.
 
 ## The step at a crossover (measured, not built)
 
