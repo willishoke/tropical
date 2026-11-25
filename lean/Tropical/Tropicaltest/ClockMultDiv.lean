@@ -2,7 +2,10 @@ import Tropical.Tropicaltest.TypedPorts
 import Tropical.Testing.ClockMultDivLaws
 
 /-!
-# ClockMultDivQ15 against its big-integer model
+# Rational clocks against their big-integer model
+
+The first three gates cover `ClockMultDivQ15`; `RatioClock` read by splines
+is the last section.
 
 `ClockMultDivQ15` (`EmitArrow/Stdlib.lean`) is rendered by the JIT and
 compared, word for word, to `Testing.ClockMultDivLaws` — a model written over

@@ -1,7 +1,8 @@
 /-!
-# ClockMultDivQ15 — the ring model and its laws
+# Rational clocks — the ring model and its laws
 
-An independent model of `ClockMultDivQ15` (`EmitArrow/Stdlib.lean`) over
+An independent model of `RatioClock` and `ClockMultDivQ15`
+(`EmitArrow/Stdlib.lean`; both read `ratioRingPhase` of one Ψ) over
 big integers, written without the IR: the gate in `Tropicaltest/ClockMultDiv`
 renders the kernel and compares it to these definitions word for word. The
 theorems state, over the model:
