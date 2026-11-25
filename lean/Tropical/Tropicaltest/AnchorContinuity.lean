@@ -455,15 +455,6 @@ def cases : Array Case := #[
     patchBay := true
     steps := #[.render 2, .write "pitch" 330, .render 2,
       .seek 1099511627776, .render 2, .write "pitch" (-523.25), .render 2] },
-  -- Key tracking: the anchored pitch also sets the gain through an
-  -- expression. The output is not a function of the phase alone, so only the
-  -- lockstep check against the reference applies.
-  { label := "anchor-continuity/patch-bay-key-tracking"
-    graph := splineVoicePatch (keyTrack := true)
-    patchBay := true
-    continuity := false
-    steps := #[.render 2, .write "pitch" 330, .render 2,
-      .seek 1099511627776, .render 2, .write "pitch" 97, .render 2] },
   -- The same patch with the table stripped: the raw write jumps by the
   -- predicted amount.
   { label := "anchor-continuity/patch-bay-raw-jumps"

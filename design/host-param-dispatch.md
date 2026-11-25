@@ -198,28 +198,40 @@ The patch opts a param in with `"discipline": "anchor"` on its `paramDecl`
 The compile (`Session.anchorParams`) then adds a companion param
 `pitch#phase` (seeded 0), wires it into `ph.offset`, and lists
 `{ name: "pitch", discipline: "anchor", companions: ["pitch#phase"] }` in
-the plan. The host's bump moves only the phase offset; every other reader of
-`pitch` sees its new value exactly as after a raw write, so other reads are
-allowed (a pitch that also tracks a filter cutoff or a gain). The compile
-refuses, naming the wire, only a declaration it cannot deliver:
+the plan. The rule is strict: an anchored param is read only bare, and only
+by inputs that declare an `anchor`. The check sees one hop from the param and
+cannot look inside a type, so any other reader could integrate the value as a
+frequency (a `FixedSinOsc.freq`, which declares no anchor, or a `ClockPhasor`
+fed through a VCA) and click on every retune unannounced. The compile
+refuses, naming the wire:
 
 - an integer param (`int32`/`int`): written raw, as `portError?` says;
-- a param that no input declaring an `anchor` reads bare: there is nothing
-  to anchor;
-- a read through an expression (or through a lifted wire, the `__wire_N`
-  program an array literal becomes) into an input that declares an
-  `anchor`: that oscillator would be silently un-anchored;
-- a bare consumer whose clock input is not wired to `{op:'clock'}` (τ).
+- a read through an expression, or through a lifted wire (the `__wire_N`
+  program an array literal becomes), into any input;
+- a bare read into an input that declares no `anchor`;
+- a consumer whose clock input is not wired to `{op:'clock'}` (τ).
   `anchor` is the sample-clock identity `C = now·2¹⁶`; a `ClockPhasor`
   reading a scrubbed or warped clock steps by a different amount. Such a
   phasor's pitch param is written raw (no declaration). `anchor_clock`, the
   master-clock form, needs a velocity param with an origin companion, which
   patch-bay programs do not declare; it is not declarable on a `paramDecl`
   today, nor are `glide` and `velocity`;
-- a bare consumer whose phase input is wired (other than to its declared
+- a consumer whose phase input is wired (other than to its declared
   default), or claimed by another anchored param: the companion takes it;
 - any read of the companion's name (`pitch#phase`), declared or not;
 - the same param declared twice with different disciplines.
+
+A pitch param that must also drive something else (a filter cutoff, a gain)
+needs a second, raw param. A param declared `anchor` that nothing reads gets
+no companion and no table entry: it is raw until wired, so an edit session
+is not refused while its phasor is being rewired.
+
+A sound relaxation would need two things not built: a transitive dependency
+check over the session graph, for reads that reach an anchor-declaring input
+through other instances; and an `anchor?` on every input a type integrates
+as a frequency — at least `FixedSinOsc`, `MorphOsc` and `PluckedMorphOsc`
+(the playground already anchors these through `phasePort`), plus a decision
+on exported types whose phase input is not exposed.
 
 A param fanned out bare to several anchored inputs, all on τ, shares one
 companion: the bump depends on the param's value and the clock only. The

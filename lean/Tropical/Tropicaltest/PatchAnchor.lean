@@ -61,20 +61,33 @@ def runRefusals : IO Bool := do
     ("the param through an expression into an anchored input",
       patch [paramDecl "pitch" anchored,
         phasor "ph" ("{\"op\":\"mul\",\"args\":[" ++ pref "pitch" ++ ",2]}")] (refE "ph" "phase"),
-      "reads 'pitch' through an expression"),
+      "input 'ph.freq' reads it through an expression"),
     ("the param through an expression into a second phasor beside a bare one",
       patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
         phasor "ph2" ("{\"op\":\"mul\",\"args\":[" ++ pref "pitch" ++ ",2]}")] (refE "ph" "phase"),
-      "input 'ph2.freq' declares a phase anchor and reads 'pitch' through an expression"),
+      "input 'ph2.freq' reads it through an expression"),
     ("the param through a lifted wire (an array literal) into an anchored input",
       patch [paramDecl "pitch" anchored,
         phasor "ph" ("{\"op\":\"index\",\"args\":[[" ++ pref "pitch" ++ ",440],0]}")] (refE "ph" "phase"),
-      "reads 'pitch' through an expression"),
-    ("no anchored input reads the param",
+      "input 'ph.freq' reads it through an expression"),
+    ("key tracking (the gain reads the pitch through an expression)",
+      AnchorContinuity.splineVoicePatch (keyTrack := true),
+      "input 'vca.cv' reads it through an expression"),
+    ("the param bare into a type that integrates it but declares no anchor",
+      patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
+        inst "fs" "FixedSinOsc" ("\"freq\":" ++ pref "pitch" ++ ",\"clk\":" ++ clockE)]
+        (refE "fs" "sine"),
+      "input 'fs.freq' (FixedSinOsc) declares no phase anchor"),
+    ("the param through another instance into an anchored input",
+      patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
+        inst "vca" "VCA" ("\"audio\":1,\"cv\":{\"op\":\"mul\",\"args\":[" ++ pref "pitch" ++ ",2]}"),
+        phasor "c" (refE "vca" "out")] (refE "c" "phase"),
+      "input 'vca.cv' reads it through an expression"),
+    ("the param bare into an input with no anchor",
       patch [paramDecl "pitch" anchored, phasor "ph" "220",
         inst "vca" "VCA" ("\"audio\":" ++ refE "ph" "phase" ++ ",\"cv\":" ++ pref "pitch")]
         (refE "vca" "out"),
-      "there is nothing to anchor"),
+      "input 'vca.cv' (VCA) declares no phase anchor"),
     ("a phasor on a scrubbed clock",
       patch [paramDecl "pitch" anchored,
         inst "sc" "ScrubClock" "\"tau_base\":0,\"velocity\":0.5",
@@ -129,24 +142,21 @@ def runRefusals : IO Bool := do
       problems := problems.push s!"fan-out: table {(plan.paramDisciplines.map (·.toWire.compress))}"
     unless plan.slotNames.contains "param:pitch#phase" do
       problems := problems.push "fan-out: no companion slot"
-  -- Accepted: key tracking (the anchored pitch also read, bare and through
-  -- an expression, by inputs with no anchor), and a repeated identical
-  -- declaration (the first wins, as before).
-  let accepted : List (String × String) := [
-    ("key tracking", AnchorContinuity.splineVoicePatch (keyTrack := true)),
-    ("a bare read into an input with no anchor",
-      patch [paramDecl "pitch" anchored, phasor "ph" (pref "pitch"),
-        inst "vca" "VCA" ("\"audio\":" ++ refE "ph" "phase" ++ ",\"cv\":" ++ pref "pitch")]
-        (refE "vca" "out")),
-    ("a repeated identical declaration",
-      patch [paramDecl "pitch" anchored, paramDecl "pitch" anchored, phasor "ph" (pref "pitch")]
-        (refE "ph" "phase"))]
-  for (what, text) in accepted do
-    match AnchorContinuity.compilePatchBay text with
-    | .error e => problems := problems.push s!"{what}: refused: {firstLine e}"
-    | .ok (plan, _) =>
-      unless plan.paramDisciplines.size == 1 do
-        problems := problems.push s!"{what}: table {(plan.paramDisciplines.map (·.toWire.compress))}"
+  -- Accepted: a repeated identical declaration (the first wins, as
+  -- before); and an anchored param nothing reads, which is raw until wired
+  -- (no companion, no table entry).
+  match AnchorContinuity.compilePatchBay (patch [paramDecl "pitch" anchored,
+      paramDecl "pitch" anchored, phasor "ph" (pref "pitch")] (refE "ph" "phase")) with
+  | .error e => problems := problems.push s!"a repeated identical declaration: refused: {firstLine e}"
+  | .ok (plan, _) =>
+    unless plan.paramDisciplines.size == 1 do
+      problems := problems.push "a repeated identical declaration: not one table entry"
+  match AnchorContinuity.compilePatchBay (patch [paramDecl "pitch" anchored, phasor "ph" "220"]
+      (refE "ph" "phase")) with
+  | .error e => problems := problems.push s!"an anchored param nothing reads: refused: {firstLine e}"
+  | .ok (plan, _) =>
+    unless plan.paramDisciplines.isEmpty && !plan.slotNames.contains "param:pitch#phase" do
+      problems := problems.push "an anchored param nothing reads: has a companion or a table entry"
   -- Undeclared: the same patch is raw, with no companion.
   match AnchorContinuity.compilePatchBay (AnchorContinuity.splineVoicePatch none) with
   | .error e => problems := problems.push s!"undeclared: refused: {firstLine e}"
@@ -154,7 +164,7 @@ def runRefusals : IO Bool := do
     unless plan.paramDisciplines.isEmpty && !plan.slotNames.contains "param:pitch#phase" do
       problems := problems.push "undeclared: the plan carries a discipline or a companion"
   if problems.isEmpty then
-    passGate label s!"{cases.length} declarations refused, each for its own reason; fan-out shares one companion; key tracking and other reads into inputs with no anchor accepted; an undeclared param stays raw"
+    passGate label s!"{cases.length} declarations refused, each for its own reason; fan-out shares one companion; an anchored param nothing reads is raw; an undeclared param stays raw"
   else failGate label (String.intercalate "; " problems.toList)
 
 private def runE {α : Type} (act : Tropical.EngineM α) : IO (Except String α) := do
@@ -226,6 +236,20 @@ def runEngine : IO Bool := do
       | .ok m =>
         unless tableOf m.plan == tableOf original && !(tableOf original).isEmpty do
           problems := problems.push s!"save → load: table {tableOf m.plan}, was {tableOf original}"
+  -- Removing the only consumer leaves the session compiling (the anchored
+  -- param is raw until wired again).
+  match ← runE (Engine.handleLoad env (loadArgs (patch [paramDecl "pitch" anchored,
+      phasor "ph" (pref "pitch"), phasor "keep" "110"] (refE "keep" "phase")))) with
+  | .error e => problems := problems.push s!"load the removal patch: {firstLine e}"
+  | .ok _ =>
+    match ← runE (Engine.handleRemoveInstance env (Lean.Json.mkObj [("instance_name", "ph")])) with
+    | .error e => problems := problems.push s!"remove_instance of the only consumer: {firstLine e}"
+    | .ok _ =>
+      match ← runE (Engine.compileMirrorStaged env .fused) with
+      | .error e => problems := problems.push s!"compile after removing the only consumer: {firstLine e}"
+      | .ok m =>
+        unless m.plan.paramDisciplines.isEmpty do
+          problems := problems.push "after removing the only consumer the plan still anchors 'pitch'"
   -- export_program: the anchor survives when the phase and clock are exposed.
   -- (Exposed inputs take their wires as defaults, so the phasor is exported
   -- from a session where its freq is a literal.)
@@ -266,11 +290,11 @@ def runEngine : IO Bool := do
     match refusal with
     | none => problems := problems.push "exported FreqOnlyPhasor: an anchor with no exposed phase compiles"
     | some e =>
-      unless contains e "there is nothing to anchor" do
+      unless contains e "declares no phase anchor" do
         problems := problems.push s!"exported FreqOnlyPhasor: another reason: {firstLine e}"
   | .error e, _ | _, .error e => problems := problems.push s!"export: {firstLine e}"
   if problems.isEmpty then
-    passGate label "set_param moves the companion bit-exactly; the companion is refused by name; save writes the declaration and reloads to the same table; export keeps the anchor only with phase and clock exposed"
+    passGate label "set_param moves the companion bit-exactly; the companion is refused by name; save writes the declaration and reloads to the same table; removing the only consumer leaves the session compiling; export keeps the anchor only with phase and clock exposed"
   else failGate label (String.intercalate "; " problems.toList)
 
 def runPatchAnchor : IO Bool := do

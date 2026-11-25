@@ -352,27 +352,30 @@ private def readsThroughExpression (w : Wire) (p : String) (lifted : Array Strin
     (w.expr.paramNames.contains p || w.expr.deps.any lifted.contains)
 
 /-- Check every param the session declares `anchor` against its wiring, and
-    lower it. The host's bump `Φ(inc₀, C) − Φ(inc₁, C)` touches only the
-    consumer's phase offset and is computed from the param's own value and the
-    sample clock `C = now·2¹⁶`. Every other reader of the param sees its new
-    value as with a raw write, so other reads are allowed (a pitch param that
-    also tracks a filter cutoff). What is refused, naming the wire, is a
-    declaration that cannot be delivered:
+    lower it. The host's bump `Φ(inc₀, C) − Φ(inc₁, C)` is computed from the
+    param's own value and the sample clock `C = now·2¹⁶`, and it moves only
+    the phase offset an anchor-declaring input names. A reader the check
+    cannot see into — an input with no anchor, which may integrate the value
+    as a frequency inside its type, or an expression whose result may reach
+    one through other instances — would click on every retune unannounced.
+    So the rule is strict, and everything else is refused, naming the wire:
 
-    - an integer param (written raw);
-    - a param no input with a phase anchor (`InputDecl.anchor?`) reads bare;
-    - a read, through an expression or a lifted wire, into an input that
-      declares a phase anchor: that oscillator would be silently un-anchored;
-    - a bare consumer whose clock input is not τ itself (`{op:'clock'}`): the
+    - the param is a float (an integer param is written raw);
+    - it is read only bare, and only by inputs that declare a phase anchor
+      (`InputDecl.anchor?`): no expression, no lifted wire (`liftedReaders`),
+      no input without an anchor;
+    - each consumer's clock input is wired to τ itself (`{op:'clock'}`): the
       `anchor` identity is the sample clock's, and a phasor reading a warped
       or scrubbed clock steps by a different amount;
-    - a bare consumer whose phase input is wired (other than to its declared
-      default) or already claimed: the companion takes it;
-    - any read of the companion's name (`anchorCompanion`), declared or not.
+    - each consumer's phase input is free (unwired, or on its declared
+      default) and unclaimed: the companion takes it;
+    - nothing reads the companion's name (`anchorCompanion`), declared or not.
 
-    One companion serves every bare consumer: they share the clock, so the
-    bump depends on the param's value alone. Run on the session as it stands,
-    lifted wires included. -/
+    One companion serves every consumer: they share the clock, so the bump
+    depends on the param's value alone. A param declared `anchor` that nothing
+    reads gets no companion and no table entry (it is raw until wired), so an
+    edit session is not refused while its phasor is being rewired. Run on the
+    session as it stands, lifted wires included. -/
 def anchorParams (st : SessionSt) : Except String AnchorLowering := do
   let mut wires := st.wires
   let mut params := st.params
@@ -397,11 +400,13 @@ def anchorParams (st : SessionSt) : Except String AnchorLowering := do
         w.expr.paramNames.contains companion || w.expr.deps.any companionReaders.contains then
       throw s!"{what} but input '{w.instName}.{w.portName}' reads its phase companion '{companion}'; the companion is the host's, not the patch's"
     let anchoredInput := fun (w : Wire) => ((declOf w.instName w.portName).bind (·.2.anchor?)).isSome
-    if let some w := st.wires.find? fun w => anchoredInput w && readsThroughExpression w p lifted then
-      throw s!"{what} but input '{w.instName}.{w.portName}' declares a phase anchor and reads '{p}' through an expression, so that oscillator would not be anchored; wire '{p}' bare into it, or read a separate raw param"
-    let consumers := st.wires.filter fun w => w.expr == .param p && anchoredInput w
-    if consumers.isEmpty then
-      throw s!"{what} but no input that declares a phase anchor (ClockPhasor.freq) reads it bare; there is nothing to anchor — declare it raw"
+    if let some w := st.wires.find? fun w => readsThroughExpression w p lifted then
+      throw s!"{what} but input '{w.instName}.{w.portName}' reads it through an expression; an anchored param is read only bare, by the frequency inputs it retunes (the host computes the phase step from the param's own value) — drive anything else from a second, raw param"
+    if let some w := st.wires.find? fun w => w.expr == .param p && !anchoredInput w then
+      let ty := ((declOf w.instName w.portName).map (·.1)).getD "?"
+      throw s!"{what} but input '{w.instName}.{w.portName}' ({ty}) declares no phase anchor; an anchored param is read only by inputs that declare one (ClockPhasor.freq) — drive anything else from a second, raw param"
+    let consumers := st.wires.filter fun w => w.expr == .param p
+    if consumers.isEmpty then continue
     for w in consumers do
       let some info := st.findInstance? w.instName
         | throw s!"{what} but its wire into '{w.instName}' names no instance"
