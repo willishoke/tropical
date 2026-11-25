@@ -149,7 +149,7 @@ def runBand : IO Bool := do
       notes := notes.push s!"{basisLabel b} K = 8, {splineOscBudgetDb} dB: edge M = {band.edge} (worst alias there {fmt (dbOf band.worstAlias) 1} dB), {band.capacity} partials, band {fmt (24000.0 / band.capacity.toFloat) 1}–{fmt (24000.0 / band.edge.toFloat) 1} Hz at 48 kHz"
       -- the edge is the least M meeting the budget
       let ratios := b.aliasRatios 8 band.edge
-      if ratios[band.edge - 1]! > band.budget || (band.edge > 1 && ratios[band.edge - 2]! ≤ band.budget) then
+      if !withinDb band.budgetDb ratios[band.edge - 1]! || (band.edge > 1 && withinDb band.budgetDb ratios[band.edge - 2]!) then
         ok := false
   let refusals : Array (String × Except String SplineOscBand × String) := #[
     ("capacity at the edge", splineOscBand catmullRomBasis 8 60 (some 22), "no band meets"),
@@ -285,7 +285,7 @@ def budgetReport (configs : Array (SplineOscBand × Cfg × String)) (got : Array
     if db > worstDb then
       worstDb := db
       worstAt := s!"{basisLabel c.basis} {what} f0 = {fmt c.f0 1} Hz (w = {fmt (weightOf band c.f0).2 3})"
-    if ratio.isNaN || ratio > band.budget then
+    if ratio.isNaN || !withinDb band.budgetDb ratio then
       ok := false
   return (ok, worstDb, worstAt, sweepRows)
 

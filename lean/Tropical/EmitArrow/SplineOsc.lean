@@ -93,11 +93,22 @@ structure SplineOscBand where
   edge : Nat
   /-- The bank's partial count. -/
   capacity : Nat
-  /-- The budget, as a power ratio. -/
-  budget : Float
+  /-- The budget, in dB below the in-band power. -/
+  budgetDb : Nat
   /-- The cubic's worst-case alias ratio at `edge` (the band's top). -/
   worstAlias : Float
 deriving Repr, Inhabited
+
+/-- `10^d` by repeated multiplication (no libm; exact through `10²²`). -/
+def powTen (d : Nat) : Float := (List.replicate d 10.0).foldl (· * ·) 1.0
+
+/-- Is the power ratio `r` at least `db` dB down, `r ≤ 10^(−db/10)`? Decided
+    as `r¹⁰ · 10^db ≤ 1` with multiplications only, so no libm `pow` or
+    `log` touches the band. -/
+def withinDb (db : Nat) (r : Float) : Bool :=
+  let r2 := r * r
+  let r8 := (r2 * r2) * (r2 * r2)
+  r ≥ 0.0 && r8 * r2 * powTen db ≤ 1.0
 
 /-- The deepest budget the band derivation resolves. The aliased power of a
     class is its closed-form total minus its in-band terms, in f64; at
@@ -121,7 +132,6 @@ def splineOscBand (basis : SplineBasis) (k budgetDb : Nat)
     throw "spline oscillator: a 0 dB budget bounds nothing; declare the error budget in dB below the signal (e.g. 60)"
   if budgetDb > splineOscBudgetMaxDb then
     throw s!"spline oscillator: a {budgetDb} dB budget is past what the closed form resolves ({splineOscBudgetMaxDb} dB); the alias is a difference of f64 class sums"
-  let budget := Float.pow 10.0 (-(budgetDb.toFloat) / 10.0)
   -- the edge must leave room for a bank of at least edge + 1 partials
   let mMax := familyCapacity - 1
   -- search in doubling windows so a modest budget costs a few transforms
@@ -129,7 +139,7 @@ def splineOscBand (basis : SplineBasis) (k budgetDb : Nat)
   let mut found : Option (Nat × Float) := none
   while found.isNone do
     let ratios := basis.aliasRatios k (min window mMax)
-    found := (ratios.findIdx? (· ≤ budget)).map fun i => (i + 1, ratios[i]!)
+    found := (ratios.findIdx? (withinDb budgetDb)).map fun i => (i + 1, ratios[i]!)
     if found.isNone then
       if window ≥ mMax then
         throw s!"spline oscillator ({basis.name}, K = {k}): no band meets a {budgetDb} dB budget; the cubic would need more than {mMax} harmonics below Nyquist, past the phase rail's {familyCapacity} partials"
@@ -140,7 +150,7 @@ def splineOscBand (basis : SplineBasis) (k budgetDb : Nat)
     throw s!"spline oscillator ({basis.name}, K = {k}): no band meets a {budgetDb} dB budget with {capacity} partials; the cubic meets it only up to Nyquist/{edge}, and the bank covers only down to Nyquist/{capacity}; give at least {edge + 1} partials"
   if capacity > familyCapacity then
     throw s!"spline oscillator: {capacity} partials exceed the phase rail's capacity of {familyCapacity}"
-  pure { edge, capacity, budget, worstAlias := worst }
+  pure { edge, capacity, budgetDb, worstAlias := worst }
 
 /-- What the oscillator emits, with its parts for the gates: the mixed output,
     the two realizations, the crossfade weight `w` (bank) and the bank's live
