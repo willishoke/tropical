@@ -184,6 +184,26 @@ function spectralLowpassProgram(f0: number, lfoHz: number, q: number): ProgramFi
   }
 }
 
+// The band-limited spline fixtures (`Testing/SplineSpectrumFixtures.lean`,
+// registered by `--fixtures`): a periodic K = 8 spline rendered as its
+// harmonics below Nyquist — a family with complex weights (a data column times
+// a per-sample DFT table read at `n mod K`) and a 0 Hz term. Controls are
+// `param:` slots, so the DFT runs from live values on both targets.
+function splineSpectrumProgram(program: string, f0: number): ProgramFile {
+  const values = [0.5, -0.25, 0.75, 0.125, -0.875, 0.375, -0.5, 0.0625]
+  const params = values.map((value, j) => ({ op: 'paramDecl', name: `k${j}`, value }))
+  const inputs: Record<string, unknown> = { f0 }
+  values.forEach((_, j) => { inputs[`c${j}`] = { op: 'param', name: `k${j}` } })
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spline_spectrum',
+    body: { op: 'block', decls: [
+      ...params,
+      { op: 'instanceDecl', name: 'sp', program, inputs },
+    ], assigns: [dacOut('sp', 'out')] },
+  }
+}
+
 // The int32 kernels: `FixedSinOscQ15` (int32 throughout, an int32 output),
 // `Int32Zoo` (every int32 op at runtime, seeded from the sample index's low
 // word; registered by `--fixtures`), and `Int32Zoo` with its int32 input wired
@@ -419,6 +439,19 @@ describe('wasm vs native JIT', () => {
     expect(wasm.length).toBe(nat.length)
     for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
+
+  for (const [program, f0] of [['SplineSpectrumCatmullRom8', 196], ['SplineSpectrumBSpline8', 1250]] as const) {
+    test(`${program} (band-limited spline, complex weights) — WASM matches JIT`, async () => {
+      const prog = splineSpectrumProgram(program, f0)
+      const wire = compileViaLean(prog)
+      const N = 512
+      const nat = runNative(wire, N)
+      expectAudible(program, nat)
+      const wasm = await runWasm(prog, wire, N)
+      expect(wasm.length).toBe(nat.length)
+      for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    })
+  }
 
   test('FixedSinOscQ15 (int32 datapath, int32 output) — WASM ≡ JIT bit for bit', async () => {
     await expectBitIdentical('FixedSinOscQ15', q15Program(1234.567, 0.3), 512)

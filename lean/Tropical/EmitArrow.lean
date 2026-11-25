@@ -6,6 +6,7 @@ import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spectral
 import Tropical.EmitArrow.Spline
 import Tropical.EmitArrow.PhaseClip
+import Tropical.EmitArrow.SplineSpectrum
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
@@ -41,6 +42,8 @@ The modules:
   (Catmull-Rom or B-spline; `design/spline.md`).
 * `PhaseClip` — the pulse width of a clock as a phase warp, and its gate: a
   periodic spline read through it is an envelope (`design/spline.md`).
+* `SplineSpectrum` — the periodic spline as its harmonics below Nyquist, a
+  partial family with complex weights (`design/spline-spectrum.md`).
 * `Modal` / `Patch` / `Gong` — the ID-valued modal
   compiler, graph lowering seam, and struck-register authoring.
 The recursive authoring representation has been retired; this is the single

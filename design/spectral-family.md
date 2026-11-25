@@ -18,7 +18,11 @@ cost, and what S4 to S6 need. The plan itself is the spectral handoff
 - one phasor on the exact integer phase rail, with partial `k`'s phase
   `k·φ` taken from it;
 - weights `a_k` as a coefficient table (one `Sig` per partial, constant
-  or live), or as a closed form in `k`;
+  or live), or as a closed form in `k`, or complex (`a_k + i·b_k`, read
+  from tables of any length, so a partial carries its own phase; added
+  2026-11-25 for the band-limited spline, `design/spline-spectrum.md`);
+- an optional 0 Hz term `a_0`, added as `a_0·Re G(0)` (cosine families
+  with the DC edge off);
 - an optional phase offset (partial `k` is offset by `k·phase`, so one
   anchor keeps every partial locked);
 - an optional live partial count, clamped to `K`;

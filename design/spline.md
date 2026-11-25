@@ -142,6 +142,12 @@ construction. Whether LLVM removes it depends on its range analysis of
 sample even when the controls are knobs, because arrays are not hoisted
 into the coefficient kernel in v1 (`Ir/Stage0.lean`).
 
+## The band-limited realization
+
+A periodic spline also renders as its Fourier series cut at Nyquist, a
+partial family with complex weights: `design/spline-spectrum.md`
+(`EmitArrow/SplineSpectrum.lean`).
+
 ## Not built
 
 - Spline integrals, speed-to-position warps.
@@ -154,7 +160,6 @@ into the coefficient kernel in v1 (`Ir/Stage0.lean`).
   onset and a flat finish). Every spline is now periodic, so an envelope
   starts and ends at the same value with the same slope.
 - Sample playback, table ports.
-- Fourier resynthesis of the spline.
 - Editors.
 - A playground node kind. Playground port tables are static per kind
   (`Playground/VocabularyMetadata.lean`), so a node whose knob count is the
