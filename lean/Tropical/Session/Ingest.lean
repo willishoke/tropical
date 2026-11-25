@@ -35,12 +35,13 @@ def InstanceResolution.toInstanceInfo
   resolvedIdx := resolved.resolvedIdx? }
 
 /-- The type families, for an unknown-type message: empty when there are
-    none. -/
+    none. Names only, so the message stays within the envelope's 200
+    characters as families are added; `list_programs` carries each range. -/
 private def familiesHint (st : SessionSt) : String :=
   if st.families.isEmpty then ""
   else
-    let names := st.families.map fun f => s!"{f.name} ({f.rangeText})"
-    s!". Type families (name a member as <family><size>): {String.intercalate ", " names.toList}"
+    let names := st.families.map (·.name)
+    s!". Type families (a member is <family><size>): {String.intercalate ", " names.toList}"
 
 /-- A type-family spelling that names no member (bare family name, size out
     of range, leading zeros), already classified: its refusal, in the ingest
@@ -107,8 +108,14 @@ def resolveInstanceMeta (programName : String)
     let suggestion := match nearestMatch programName options with
       | some s => s!". Did you mean '{s}'?"
       | none => ""
+    -- The family list only when there is no suggestion and it fits the
+    -- envelope's 200 characters; `list_programs` always carries it.
+    let base := s!"Invalid {programParam}: {(Json.str (shownName programName)).compress}{noSize}"
+    let withFamilies := base ++ familiesHint st
+    let message := if suggestion.isEmpty && withFamilies.length ≤ 200 then withFamilies
+      else base ++ suggestion
     throwEnum .unknownProgram programParam (Json.str programName) options
-      (message := some s!"Invalid {programParam}: {(Json.str (shownName programName)).compress}{noSize}{familiesHint st}{suggestion}")
+      (message := some message)
   | some pm =>
     -- No generics: no program declares `type_params`, so `type_args` is always
     -- rejected. Return the concrete metadata + its resolved snapshot.

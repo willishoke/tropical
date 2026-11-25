@@ -45,6 +45,7 @@ import Tropical.Tropicaltest.Spline
 import Tropical.Tropicaltest.TypeFamily
 import Tropical.Tropicaltest.PhaseClip
 import Tropical.Tropicaltest.SplineSpectrum
+import Tropical.Tropicaltest.SplineOsc
 import Tropical.Tropicaltest.Int32
 import Tropical.Tropicaltest.TypedPorts
 import Tropical.Tropicaltest.Float32
@@ -150,6 +151,14 @@ def main (args : List String) : IO UInt32 := do
         return 1
     | .ok (arena, _) =>
         let (_, bad) ← Tropical.Tropicaltest.SplineSpectrum.runSplineSpectrum arena
+        return if bad == 0 then 0 else 1
+  if args.contains "--spline-osc-only" then
+    match Tropical.Playground.stdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, _) =>
+        let (_, bad) ← Tropical.Tropicaltest.SplineOsc.runSplineOsc arena
         return if bad == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
@@ -439,6 +448,18 @@ def main (args : List String) : IO UInt32 := do
       IO.println s!"  FAIL  spline-spectrum  stdlib: {error}"
   | .ok (arena, _) =>
       let (n, bad) ← Tropical.Tropicaltest.SplineSpectrum.runSplineSpectrum arena
+      total := total + n
+      failed := failed + bad
+
+  -- ── (g⁗) One spline oscillator, alias-bounded at every pitch (EmitArrow/SplineOsc.lean) ──
+  IO.println "spline oscillator (band, oracle, budget sweep, continuity, trip count, live control):"
+  match Tropical.Playground.stdlib with
+  | .error error =>
+      total := total + 6
+      failed := failed + 6
+      IO.println s!"  FAIL  spline-osc  stdlib: {error}"
+  | .ok (arena, _) =>
+      let (n, bad) ← Tropical.Tropicaltest.SplineOsc.runSplineOsc arena
       total := total + n
       failed := failed + bad
 

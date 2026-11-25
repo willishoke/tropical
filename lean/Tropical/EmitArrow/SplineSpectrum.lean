@@ -134,7 +134,7 @@ def SplineBasis.kernelTransform (basis : SplineBasis) (num den : Nat) : Float :=
   return (DyadicI.div re (DyadicI.ofNat basis.scale)).toFloat
 
 /-- `cos` and `sin` of `2π·r/K` for an integer `r`, exact at quarter turns. -/
-private def unitRoot (r k : Nat) : Float × Float :=
+def unitRoot (r k : Nat) : Float × Float :=
   let r := r % k
   if (4 * r) % k == 0 then
     match 4 * r / k with

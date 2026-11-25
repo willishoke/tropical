@@ -1,5 +1,6 @@
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Spline
+import Tropical.EmitArrow.SplineOsc
 import Tropical.Family
 import Tropical.EmitArrow.PhaseClip
 
@@ -635,9 +636,63 @@ def periodicCatmullRomFamily : TypeFamily :=
 def periodicBSplineFamily : TypeFamily :=
   periodicSplineFamily "PeriodicBSpline" uniformBSplineBasis
 
+/-- The error budget of the registered spline oscillators, in dB below the
+    in-band power (`EmitArrow.SplineOsc`, `design/spline-osc.md`). It is part
+    of the families' contract: the member name does not carry it, so changing
+    it changes the band and partial count of every existing
+    `SplineOsc…<K>` instance. -/
+def splineOscBudgetDb : Nat := 60
+
+/-- A spline oscillator program (`splineOscSig`): inputs `f0` (Hz, uniform,
+    either sign), `phase` (cycles, uniform; the anchor offset), `K` float
+    control values `c0 …` (live when wired from `param:` slots) and `clk`; the
+    band and the partial count are derived from `basis`, `K` and
+    `splineOscBudgetDb` at assemble time. -/
+def splineOscProgram (arena : Arena) (name : String) (basis : SplineBasis) (k : Nat) :
+    Except String (Arena × ProgramIdx) := do
+  let band ← splineOscBand basis k splineOscBudgetDb
+  assemble arena name #[floatOut] #[] do
+    let f0 ← inputRef ⟨0⟩
+    let phase ← inputRef ⟨1⟩
+    let controls ← (Array.range k).mapM fun j => inputRef ⟨j + 2⟩
+    let clk ← inputRef ⟨k + 2⟩
+    let parts ← splineOscSig basis band controls f0 clk (some phase)
+    let zero ← lit 0
+    pure {
+      inputs := #[← freqDecl "f0" 110, floatDecl "phase" zero] ++
+        (Array.range k).map (fun j => floatDecl s!"c{j}" zero) ++
+        #[clockInDecl "clk" (← clockSig)]
+      assigns := #[(.port ⟨0⟩, parts.out)] }
+
+/-- The size range of a spline oscillator family. One control point is a
+    constant curve with no harmonics, so the least is 2. The partial count
+    grows about linearly with `K` (Catmull-Rom: 54 at K = 8, 124 at 16, 692
+    at 64), so the range stops at 16, where the bank is still small
+    (`design/spline-osc.md`, "Cost"). -/
+def splineOscSizes : Nat × Nat := (2, 16)
+
+private def splineOscFamily (name : String) (basis : SplineBasis) : TypeFamily where
+  name
+  sizeMin := splineOscSizes.1
+  sizeMax := splineOscSizes.2
+  sizeMeaning := "control points"
+  ports := s!"inputs f0 (Hz, uniform), phase (cycles, uniform), c0 … c<size−1> (float control values, {basis.name} basis) and clk; output out (float), its error at least {splineOscBudgetDb} dB below the in-band power at every f0"
+  portsAt := fun k => k + 4
+  build := fun member k arena _ => splineOscProgram arena member basis k
+
+/-- `SplineOscCatmullRom<K>`: the periodic Catmull-Rom spline read by a clock,
+    time-domain at low fundamentals and band-limited at high ones. -/
+def splineOscCatmullRomFamily : TypeFamily :=
+  splineOscFamily "SplineOscCatmullRom" catmullRomBasis
+
+/-- `SplineOscBSpline<K>`: the same with the uniform cubic B-spline. -/
+def splineOscBSplineFamily : TypeFamily :=
+  splineOscFamily "SplineOscBSpline" uniformBSplineBasis
+
 /-- The stdlib's type families (`Tropical.Family`), booted beside
     `stdlibBuilders`. -/
-def stdlibFamilies : Array TypeFamily := #[periodicCatmullRomFamily, periodicBSplineFamily]
+def stdlibFamilies : Array TypeFamily := #[periodicCatmullRomFamily, periodicBSplineFamily,
+  splineOscCatmullRomFamily, splineOscBSplineFamily]
 
 /-- The size-8 member, registered at boot by the family's own builder. -/
 def buildPeriodicCatmullRom8 (arena : Arena) (resolved : Array (String × ProgramIdx)) :
