@@ -592,9 +592,14 @@ The family is not gated on Metal (neither is the harmonic family).
 
 - *A playground kind.* A `partials` kind with structural `ratios` and
   `table` fields and a `freq` knob would map one to one onto this
-  mechanism. Giving `harmonic` a `ratios` field would not, because its
-  weight law reads the partial number (`k^(−tilt)`, `k` even). The law
-  would first need a defined meaning over a ratio column.
+  mechanism. It was left out to keep the change narrow: a new kind moves
+  the served vocabulary (its count and fingerprint, pinned in
+  `Testing/EmitArrow.lean`, and the uniform-inlet list in
+  `Tropicaltest/Vocabulary.lean`). The vocabulary gate's minimal patch
+  would also need a default column. Giving `harmonic` a `ratios` field
+  would not map one to one, because its weight law reads the partial
+  number (`k^(−tilt)`, `k` even). That law would first need a defined
+  meaning over a ratio column.
 - *Anchored retune* of rational and free families (above).
 - *Live ratios* (above).
 - *Relation to the modal surface.* A modal mode (`ModalMode`,
