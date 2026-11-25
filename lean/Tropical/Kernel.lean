@@ -265,7 +265,7 @@ def binary32DisciplineError? (plan : FlatPlan) : Option String := Id.run do
   for d in plan.paramDisciplines do
     if d.discipline != "raw" then
       let slots := String.intercalate ", " ((#[d.name] ++ d.companions).toList.map (s!"param:{·}"))
-      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are sample counts and phases, which binary32 does not hold exactly)"
+      return some s!"param '{d.name}' has the '{d.discipline}' discipline (slots {slots}); a binary32 artifact's params are written raw (its companions are a start sample, a clock origin or a 32-bit phase offset, which binary32 does not hold exactly)"
   return none
 
 /-- Derive the kernel type of a plan compiled for `frames` samples per call,

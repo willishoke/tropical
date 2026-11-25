@@ -420,6 +420,12 @@ static void test_manifest_boundary()
   ASSERT(load_fails_with(
     rt, ir, kernel_manifest(16, {"param:missing"}, {"out"}, plan_json(1, {}, {})),
     "kernel input 'param:missing' names no slot of the nested plan"));
+  // Every named slot is a cell: names past slot_count are refused at decode.
+  ASSERT(load_fails_with(
+    rt, ir,
+    kernel_manifest(16, {}, {"out"},
+      plan_json(1, {"param:a", "param:b"}, {0.0, 0.0}, R"({"slot_count":1})")),
+    "slot_names lists 2 slots but slot_count is 1"));
   ASSERT(load_fails_with(
     rt, "define void @not_the_port() {\nentry:\n  ret void\n}\n",
     constant_manifest(16),

@@ -466,6 +466,13 @@ inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
   if (plan.contains("slot_names"))
     for (const auto & n : plan["slot_names"])
       result.slot_names.push_back(n.get<std::string>());
+  // A slot is found by its name and then indexed into an array of
+  // slot_count cells (the param inputs, the anchor clock's slots), so every
+  // named slot must be one of them.
+  if (result.slot_names.size() > result.slot_count)
+    throw std::runtime_error(
+      "NumericProgramParser: slot_names lists " + std::to_string(result.slot_names.size())
+      + " slots but slot_count is " + std::to_string(result.slot_count));
   if (plan.contains("slot_defaults"))
     for (const auto & v : plan["slot_defaults"])
       result.slot_defaults.push_back(v.get<double>());
@@ -723,9 +730,9 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     check_float_port(result.input_names[i], inputs.at(i).value("elem", std::string{}));
   check_float_port(out.value("name", std::string{"out"}), out_elem);
   // A binary32 artifact's params are written raw (`Kernel.ofPlan` refuses
-  // anything else at compile time): glide, anchor and velocity re-anchor on
-  // companions that hold sample counts and phases, which binary32 does not
-  // hold exactly. A manifest that pairs the two is refused here, once, at
+  // anything else at compile time): glide, anchor and velocity keep a start
+  // sample, a clock origin and a 32-bit phase offset, which binary32 does
+  // not hold exactly. A manifest that pairs the two is refused here, once, at
   // load; the per-write check in the dispatcher stays.
   if (float_format == "f32")
     for (const auto & d : result.plan.param_disciplines)

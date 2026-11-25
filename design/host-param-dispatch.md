@@ -140,7 +140,9 @@ The web writer knows `glide` and `velocity` but does not write them: a write
 to such a param is refused by name. The playground declares `anchor_clock`
 on every anchored knob, and its compile report (`load_patch_graph`) names
 each param's discipline from the same table; plain `anchor` keeps its
-sample-clock meaning.
+sample-clock meaning. `get_vocabulary` names the authored port class
+(`anchor`); the plan and the compile report name the discipline a host
+dispatches (`anchor_clock`).
 
 On the f64 lanes (the JIT and wasm) the phase is then bit-exactly continuous
 at `now`: the oscillator continues from its pre-write phase with the new
