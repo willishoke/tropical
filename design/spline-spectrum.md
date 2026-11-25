@@ -8,8 +8,11 @@ Gates: `lean/Tropical/Tropicaltest/SplineSpectrum.lean`
 A periodic uniform cubic spline (`design/spline.md`, boundary `wrap`) has two
 realizations. The time-domain cubic costs the same at every pitch and aliases
 at high pitch. Its Fourier series, cut at Nyquist, costs one partial per
-harmonic, does not alias, and takes the per-partial envelope `G(f, τ)` that a
-harmonic family takes. This note covers the second.
+harmonic, does not alias while the controls are uniform within a kernel
+call, and takes the per-partial envelope `G(f, τ)` that a harmonic family
+takes. This note covers the second. Controls modulated at audio rate are
+evaluated per sample; the sidebands that modulation adds are not culled at
+Nyquist.
 
 ## The formula
 
@@ -31,7 +34,9 @@ and `f(x) = F_0 + Σ_{n≥1} Re(2F_n e^{2πinx})`.
   (`Tropical.Exact`), not libm. A basis without an even kernel is refused, because its
   `φ̂` is complex. The gate checks the matrix route against both closed forms.
   Both kernels give `φ̂(m) = 0` for every nonzero integer `m`, because they
-  reproduce constants, so harmonics `K, 2K, …` are exactly zero.
+  reproduce constants (checked exactly on the matrix), so harmonics
+  `K, 2K, …` are zero. The column holds exact zeros there; the enclosure's
+  midpoint would otherwise be a residue near 10⁻³⁸.
 - **Weights.** Partial `n` gets the complex weight `2F_n`: a real data column
   `(2/K)·φ̂(n/K)` times one of `K` complex values `C[m]`. Each `C[m]` is a
   fixed linear combination of the live controls. Only `m ≤ K/2` is computed;
@@ -43,8 +48,9 @@ and `f(x) = F_0 + Σ_{n≥1} Re(2F_n e^{2πinx})`.
   partials are the shape. A `dc` term with a DC edge is refused.
 - **Phase.** The family reads its own phasor from `freq` and `clk`. Partial
   `n` is at `n·P` on the integer rail, so the band-limited curve equals the
-  time-domain curve read at the fundamental's Q0.32 phase. Gate 3 checks this
-  against `splineSig` driven by `n·inc`.
+  time-domain curve read at the fundamental's Q0.32 phase. The
+  `spline-spectrum-vs-cubic` gate checks this against `splineSig` driven by
+  `n·inc`.
 
 ## What changed in the family
 
@@ -55,7 +61,8 @@ weight is one more complex factor next to the envelopes. This is general (any
 per-partial phase, any periodic table) and contains nothing spline-specific.
 Real-weight families take the same code path as before.
 
-`PartialFamily.dc`: the optional 0 Hz term described above.
+`PartialFamily.dc`: the optional 0 Hz term described above. A family with no
+partials (`count = 0`) still plays it, as a live count of 0 does.
 
 ## Stage 0
 
@@ -76,7 +83,7 @@ With `T = min(⌊Nyquist/f0⌋, count)` partials evaluated per sample:
 
 | | cost |
 |---|---|
-| time-domain cubic | per sample: `K + 3` stores, 4 reads, ~12 multiply-adds, 1 divide, independent of pitch (`design/spline.md`) |
+| time-domain cubic | per call: the `K + 3`-entry table pack (slot controls); per sample: 4 reads, ~12 multiply-adds, 1 divide, independent of pitch (`design/spline.md`) |
 | band-limited | per call: the DFT, `(K/2 + 1)·K` multiply-adds for each of Re and Im, minus exact zeros and ±1 entries; per sample: the `count`-entry literal column pack (above) and the family's invariants; then per partial: 3 table reads, 1 `mod K` (a mask when K is a power of two), 2 multiplies for the weight, one fixed-point sine **and** one cosine, 2 multiplies + 1 add for the projection, the Nyquist edge (~5 ops) |
 
 A harmonic family with real weights and no envelope needs one sine per
@@ -106,13 +113,41 @@ and the aliased power, `Σ_{n>M} 2|F_n|²`, by `2‖c‖₁²K⁶/(7π⁸M⁷)` 
 B-spline and `4(‖c‖₁/K)²·(4K⁶/(5π⁶M⁵) + 9K⁸/(7π⁸M⁷))` for Catmull-Rom.
 
 So yes, cubics alias by a bounded amount, and the bound is the decay of
-`φ̂`. The B-spline is C². Its worst-case alias amplitude falls as `M⁻³`
-(18 dB per octave of pitch), and its alias power as `M⁻⁷` (21 dB per
-octave). Catmull-Rom is only C¹. Its amplitude falls as `M⁻²` (12 dB per
-octave), and its power as `M⁻⁵` (15 dB per octave). Both bounds are
-functions of `M/K`. A curve with `K` points per cycle has most of its energy
-in harmonics `n ≲ K`, so once `K·f0` nears Nyquist the cubic aliases about
-as much as it plays in band (the last row below).
+`φ̂`. The B-spline is C². Its worst-case alias amplitude falls as `M⁻³`,
+and its power as `M⁻⁷`. Catmull-Rom is only C¹. Its amplitude falls as
+`M⁻²`, and its power as `M⁻⁵`. Those are envelopes. The alias itself is a
+staircase in `M`, not a power law. It depends on `f0` only through
+`M = ⌊fs/2f0⌋`. It is flat while `M` crosses the weak harmonics near
+multiples of `K` (where `φ̂` vanishes), and it falls in a step as `M` passes
+the strong harmonics between them, near odd multiples of `K/2`: 12, 20 and 28
+for K = 8. Both bounds are functions of `M/K`.
+A curve with `K` points per cycle has most of its energy in harmonics
+`n ≲ K`, so once `K·f0` nears Nyquist the cubic aliases about as much as it
+plays in band.
+
+The closed-form alias `Σ_{n>M} 2|F_n|² / Σ_{1≤n≤M} 2|F_n|²` against `M`,
+for K = 8 and the alias gate's controls, at 48 kHz (`f0` is the top of each
+step, `fs/2M`):
+
+| M | f0 (Hz) | Catmull-Rom (dB) | B-spline (dB) |
+|---|---|---|---|
+| 3 | 8000 | −0.4 | −19.4 |
+| 4 | 6000 | −17.7 | −37.0 |
+| 5 | 4800 | −31.4 | −46.5 |
+| 6 | 4000 | −39.7 | −55.7 |
+| 8 | 3000 | −40.0 | −56.0 |
+| 10 | 2400 | −40.3 | −56.6 |
+| 11 | 2182 | −40.3 | −57.3 |
+| 12 | 2000 | −46.2 | −68.3 |
+| 14 | 1714 | −55.5 | −73.8 |
+| 16 | 1500 | −55.6 | −73.8 |
+| 19 | 1263 | −56.2 | −74.7 |
+| 20 | 1200 | −59.2 | −82.7 |
+| 21 | 1143 | −63.4 | −84.4 |
+| 24 | 1000 | −64.9 | −85.2 |
+| 28 | 857 | −67.4 | −92.1 |
+| 32 | 750 | −71.4 | −93.6 |
+| 40 | 600 | −76.5 | −100.2 |
 
 Measured (`spline-spectrum-alias`, K = 8, 48 kHz): the aliased energy of the
 time-domain render matches the closed form `Σ_{n>M} 2|F_n|²` to within
@@ -131,9 +166,9 @@ in [−1, 1]). Values are in dB relative to the in-band signal power:
 | B-spline | 2966.6 | 8 | −56.0 | −56.0 | −179.4 |
 | B-spline | 6300.8 | 3 | −19.4 | −19.4 | −179.4 |
 
-The fundamentals are `fs/f0 ≈ 48.618, 16.18, 7.618`. With those ratios no
-aliased component lands within `0.23·f0` of a harmonic, so the residual's
-energy is the alias energy and nothing cancels it.
+The fundamentals are `fs/f0 ≈ 48.618, 16.18, 7.618`. These are irrational-looking
+ratios, so no aliased component lands on a harmonic over the 65536-sample
+window, and the measured energy agrees with the closed form to 0.1 dB.
 
 ## Not built
 
@@ -154,12 +189,32 @@ energy is the alias energy and nothing cancels it.
 
 ## The step at a crossover (measured, not built)
 
-If a sweep switched from the band-limited render to the cubic at pitch
-`f0`, the step would be their difference. Above 20 Hz with 256 partials, the
-band-limited render's own tail is far below the cubic's alias (gate 3: under
-`1.5·10⁻⁵` for Catmull-Rom and `1.3·10⁻⁸` for the B-spline at 1024
-partials). So the step is the cubic's alias, and the table above is the step
-energy. Measured `cubic − band-limited` on the same phase:
+If a sweep switched realizations at pitch `f0`, the step would be the
+difference between the two renders. There are two regimes, and they meet
+where the bank's capacity runs out.
+
+**Low pitch: the bank is capacity-limited.** Below `fs/(2·(count + 1))`
+(93 Hz at 48 kHz with 256 partials), the bank stops at `count` and drops the
+in-band harmonics `count + 1 … M`. At these pitches the cubic aliases far less
+than the bank drops. Closed form, K = 8, the alias gate's controls, 256
+partials, in dB relative to the in-band power:
+
+| f0 (Hz) | M | Catmull-Rom: bank missing 257…M | Catmull-Rom: cubic alias | B-spline: bank missing | B-spline: cubic alias |
+|---|---|---|---|---|---|
+| 20 | 1200 | −117.1 | −150.7 | −156.3 | −203.3 |
+| 50 | 480 | −117.3 | −130.8 | −156.4 | −175.4 |
+| 80 | 300 | −119.8 | −120.6 | −157.9 | −161.4 |
+| 93 | 258 | −134.2 | −117.2 | −177.6 | −156.3 |
+
+The two errors cross near 80 Hz for Catmull-Rom and near 85 Hz for the
+B-spline. Below that point the cubic is the more accurate realization as
+well as the cheaper one. The `spline-spectrum-vs-cubic` gate uses 1024
+partials so that its 20 Hz comparison is not capacity-limited.
+
+**High pitch: the cubic is alias-limited.** Above the capacity point, the
+bank's own error is the rounding floor, so the step is the cubic's alias,
+which is the staircase above. Measured `cubic − band-limited` on the same
+phase:
 
 | basis | f0 (Hz) | step, rms (dB re signal) | step, peak | signal rms |
 |---|---|---|---|---|
@@ -170,8 +225,12 @@ energy. Measured `cubic − band-limited` on the same phase:
 | B-spline | 2966.6 | −56.0 | 1.6·10⁻³ | 0.44 |
 | B-spline | 6300.8 | −19.4 | 7.5·10⁻² | 0.44 |
 
-A crossover set by a step budget of −60 dB rms would sit near 1.2 kHz for
-Catmull-Rom and near 2.5 kHz for the B-spline, at K = 8 with these
-controls. These figures are interpolated from the slopes above, not
-measured at those pitches. The crossover pitch scales with `1/K` and
-depends on the controls through `‖c‖`.
+Take a step budget of −60 dB rms. From the closed-form table, the cubic
+meets it up to `M = 21`, that is up to `f0 = 24000/21 ≈ 1143 Hz`, for
+Catmull-Rom (`M = 20` is −59.2 dB). For the B-spline it meets it up to
+`M = 12`, `f0 = 2000 Hz`; just above 2 kHz the alias jumps from −68.3 to
+−57.3 dB. So the natural layout is the cubic from 0 Hz to the crossover and
+the bank above it. The bank then needs only enough capacity for the pitches
+above the crossover, which is a few dozen partials, not 256. All of these
+figures are for K = 8 and these controls: the crossover scales with `1/K`
+and depends on the controls through `C`.

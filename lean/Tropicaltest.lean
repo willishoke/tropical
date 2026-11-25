@@ -401,11 +401,11 @@ def main (args : List String) : IO UInt32 := do
   failed := failed + bad
 
   -- ── (g‴) The periodic spline as its harmonics below Nyquist (EmitArrow/SplineSpectrum.lean) ──
-  IO.println "spline spectrum (closed form, oracle, envelope, vs cubic, alias, live control):"
+  IO.println "spline spectrum (closed form, oracle, envelope, family, vs cubic, alias, live control):"
   match Tropical.Playground.stdlib with
   | .error error =>
-      total := total + 6
-      failed := failed + 6
+      total := total + 7
+      failed := failed + 7
       IO.println s!"  FAIL  spline-spectrum  stdlib: {error}"
   | .ok (arena, _) =>
       let (n, bad) ← Tropical.Tropicaltest.SplineSpectrum.runSplineSpectrum arena

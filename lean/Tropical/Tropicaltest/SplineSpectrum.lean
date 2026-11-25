@@ -18,11 +18,17 @@ import Tropical.Tropicaltest.Spline
 * **spline-spectrum-oracle** — the JIT render of the band-limited spline
   against an independent f64 reference that sums the same harmonics (closed
   form `φ̂`, the same integer phase rail, libm `cos`/`sin`, the family's
-  Nyquist edge and trip count), both bases, K = 8, at three fundamentals.
+  Nyquist edge and trip count), both bases, K = 8 at three fundamentals, and
+  K = 7 and 5 (the `mod K` path).
 * **spline-spectrum-envelope** — the band-limited spline under the complex
   SVF lowpass and highpass envelopes (`svfEnvelope`): each partial is
   `Re(2F_n·G(n·f0)·e^{iθ_n})` and the 0 Hz term is `F_0·Re G(0)` (1 for the
   lowpass, 0 for the highpass), against the same f64 reference.
+* **spline-spectrum-family** — the family extensions on their own: a complex
+  weight under the `sine` projection against `Σ a_p sin θ_p + b_p cos θ_p`; a
+  family with no partials and a 0 Hz term renders `a₀` (and `a₀·Re G(0) = 0`
+  under a highpass); a 0 Hz term on a sine family or with a DC edge is
+  refused.
 * **spline-spectrum-vs-cubic** — at a 20 Hz fundamental with 1024 partials
   (every partial below the Nyquist edge), the band-limited render against the
   time-domain `splineSig` render on the same phase, within the tail bound
@@ -161,6 +167,14 @@ def runClosedForm : IO Bool := do
         worstF := max worstF d
         scale := max scale (max want.1.abs want.2.abs)
         count := count + 1
+  -- harmonics K, 2K, … are baked as exact zeros
+  let mut nonzero := 0
+  for basis in bases do
+    for k in #[3, 4, 7, 8, 16] do
+      for j in [1:5] do
+        if basis.kernelTransform (j * k) k != 0.0 then nonzero := nonzero + 1
+  if nonzero != 0 then
+    return ← failGate label s!"{nonzero} values of φ̂ at nonzero integer ξ are not baked as exact zeros"
   IO.println s!"        φ̂ from the matrix vs closed form, ξ ∈ [0, 40]: worst |Δ| {sci worstT} · F_n vs brute-force integral ({count} harmonics, |F_n| up to {sci scale}): worst |Δ| {sci worstF}"
   -- φ̂ sums four O(1) pieces, so a few ulp of 1; F_n is the build's φ̂ times
   -- an exact DFT of m/64 values.
@@ -227,9 +241,12 @@ def runOracle (arena : Arena) : IO Bool := do
   let count := 256
   let incs : Array Nat := #[9842332, 89478485, 447392427]  -- ≈ 110 Hz, 1 kHz, 5 kHz
   let bases := #[catmullRomBasis, uniformBSplineBasis]
-  let configs := bases.flatMap fun b => incs.map fun inc => (b, inc)
-  let outs : BuildM (Array Sig) := configs.mapM fun (b, inc) =>
-    familyTerm b (controls8 (inc % 1000)) inc rate count
+  -- K = 8 at every fundamental; K = 7 and 5 take the `mod K` path (not a mask)
+  let configs := (bases.flatMap fun b => incs.map fun inc => (b, inc, 8)) ++
+    #[(catmullRomBasis, 89478485, 7), (uniformBSplineBasis, 89478485, 7),
+      (catmullRomBasis, 9842332, 5)]
+  let outs : BuildM (Array Sig) := configs.mapM fun (b, inc, k) =>
+    familyTerm b (controlsOf (inc % 1000) k) inc rate count
   let plan ← match compileMulti arena "spline_spectrum_oracle" outs rate with
     | .ok plan => pure plan
     | .error e => return ← failGate label s!"compile: {firstLine e}"
@@ -238,8 +255,8 @@ def runOracle (arena : Arena) : IO Bool := do
   let mut worstRatio := 0.0
   let mut worstAbs := 0.0
   for ci in [0:configs.size] do
-    let (b, inc) := configs[ci]!
-    let cs := (controls8 (inc % 1000)).map controlFloat
+    let (b, inc, k) := configs[ci]!
+    let cs := (controlsOf (inc % 1000) k).map controlFloat
     let want := ns.map (referenceAt b cs inc rate count true)
     let err := maxAbsDiff got[ci]! want
     let f0 := freqOfInc inc rate
@@ -251,7 +268,7 @@ def runOracle (arena : Arena) : IO Bool := do
     worstAbs := max worstAbs err
   IO.println s!"        worst |Δ| {sci worstAbs}; worst |Δ| / (rail bound {sci railEps}·Σ2|F_n| + 1e-13) = {fmt worstRatio 3}"
   if worstRatio ≤ 1.0 then
-    passGate label s!"{configs.size} configurations (both bases, f0 ≈ 110 Hz, 1 kHz, 5 kHz) × {ns.size} samples ≡ the f64 harmonic sum within the sine rail's bound"
+    passGate label s!"{configs.size} configurations (both bases, K = 8 at f0 ≈ 110 Hz, 1 kHz, 5 kHz; K = 7 and 5) × {ns.size} samples ≡ the f64 harmonic sum within the sine rail's bound"
   else
     failGate label s!"error exceeds the rail bound by {fmt worstRatio 3}×"
 
@@ -326,6 +343,75 @@ def runEnvelope (arena : Arena) : IO Bool := do
     passGate label "under the SVF lowpass and highpass envelopes, the band-limited spline ≡ Σ Re(2F_n·G(n·f0)·e^{iθ_n}) + F_0·Re G(0) within the sine rail's bound"
   else
     failGate label s!"error exceeds the rail bound by {fmt worstRatio 3}×"
+
+-- ── spline-spectrum-family ───────────────────────────────────────────────
+
+/-- `some msg` when compiling `outs` does not refuse with `needle`. -/
+def expectRefusal (arena : Arena) (name needle : String) (outs : BuildM (Array Sig)) :
+    Option String :=
+  match compileMulti arena name outs 48000 with
+  | .ok _ => some s!"{name}: compiled, expected a refusal containing '{needle}'"
+  | .error e => if (e.splitOn needle).length > 1 then none else some s!"{name}: refused with '{firstLine e}'"
+
+def runFamily (arena : Arena) : IO Bool := do
+  let label := "spline-spectrum-family"
+  let rate := 48000
+  let inc := 89478485  -- ≈ 1 kHz: 16 partials stay below the Nyquist edge
+  let count := 16
+  let aOf := fun (p : Nat) => 1.0 / p.toFloat
+  let bOf := fun (p : Nat) => 0.5 / (p * p).toFloat
+  -- (1) a complex weight under the sine projection: Σ a_p sin θ_p + b_p cos θ_p
+  let sineFamily : BuildM PartialFamily := do
+    let aCol ← (Array.range count).mapM fun i => litExact (aOf (i + 1))
+    let bCol ← (Array.range count).mapM fun i => litExact (bOf (i + 1))
+    pure { name := "complex-sine", freq := ← litExact (freqOfInc inc rate), clk := ← tau, count
+           weights := .complex #[aCol, bCol] (fun t k _ _ => do
+             pure (← index t[0]! k, ← index t[1]! k))
+           wave := .sine }
+  -- (2) count 0 with a 0 Hz term: the term alone, bare and under a highpass
+  let dcOnly : BuildM PartialFamily := do
+    pure { name := "dc-only", freq := ← lit 1000, clk := ← tau, count := 0
+           weights := .table #[], wave := .cosine, edges := { dc := .off }
+           dc := some (← lit 375 3) }
+  let outs : BuildM (Array Sig) := do
+    let s ← emitTerm (.family (← sineFamily))
+    let d ← emitTerm (.family (← dcOnly))
+    let h ← emitTerm (normalize (svfEnvelope .highpass (.konst (← lit 500)) (.konst (← lit 1))
+      (.family (← dcOnly))))
+    pure #[s, d, h]
+  let plan ← match compileMulti arena "spline_spectrum_family" outs rate with
+    | .ok plan => pure plan
+    | .error e => return ← failGate label s!"compile: {firstLine e}"
+  let ns := scattered 2048
+  let got ← renderAt plan 3 ns
+  let want := ns.map fun n => Id.run do
+    let base := (inc * n) % 4294967296
+    let mut v := 0.0
+    for p in [1:count + 1] do
+      let theta := 2.0 * piF * ((p * base) % 4294967296).toFloat / 4294967296.0
+      v := v + aOf p * Float.sin theta + bOf p * Float.cos theta
+    return v
+  let mass := (Array.range count).foldl (fun acc i =>
+    acc + Float.sqrt (aOf (i + 1) * aOf (i + 1) + bOf (i + 1) * bOf (i + 1))) 0.0
+  let errSine := maxAbsDiff got[0]! want
+  let errDc := maxAbsDiff got[1]! (ns.map fun _ => 0.375)
+  let errHp := peakOf got[2]!
+  -- (3) the refusals
+  let sineDc : BuildM (Array Sig) := do
+    let f ← sineFamily
+    pure #[← emitTerm (.family { f with dc := some (← lit 1), edges := { dc := .off } })]
+  let edgeDc : BuildM (Array Sig) := do
+    let f ← sineFamily
+    pure #[← emitTerm (.family { f with dc := some (← lit 1), wave := .cosine })]
+  let refusals := #[
+    expectRefusal arena "dc_on_sine" "a 0 Hz term needs the cosine projection" sineDc,
+    expectRefusal arena "dc_with_edge" "a 0 Hz term with a DC edge" edgeDc].filterMap id
+  IO.println s!"        complex weight, sine projection: |Δ| {sci errSine} (rail bound {sci (railEps * mass)}) · count 0 + dc: |Δ| {sci errDc}, under a highpass: peak {sci errHp} · {2 - refusals.size}/2 refusals"
+  if errSine ≤ railEps * mass + 1e-13 && errDc == 0.0 && errHp == 0.0 && refusals.isEmpty
+      && got[0]!.size == ns.size then
+    passGate label "a complex weight under the sine projection ≡ Σ a sin θ + b cos θ; a family with no partials plays its 0 Hz term (a₀, and a₀·Re G(0) = 0 under a highpass); a 0 Hz term on a sine family or with a DC edge is refused"
+  else
+    failGate label s!"sine {sci errSine}, dc {sci errDc}, highpass {sci errHp}, refusals: {refusals}"
 
 -- ── spline-spectrum-vs-cubic ─────────────────────────────────────────────
 
@@ -536,7 +622,8 @@ def runLive : IO Bool := do
     failGate label s!"before {sci err0}, after {sci err1}, moved {sci moved}"
 
 def runSplineSpectrum (arena : Arena) : IO (Nat × Nat) := do
-  let results := #[← runClosedForm, ← runOracle arena, ← runEnvelope arena, ← runVsCubic arena,
+  let results := #[← runClosedForm, ← runOracle arena, ← runEnvelope arena, ← runFamily arena,
+    ← runVsCubic arena,
     ← runAlias arena, ← runLive]
   pure (results.size, results.filter (!·) |>.size)
 

@@ -221,11 +221,39 @@ private def smoothEdge (v : Sig) : BuildM Sig := do
   let shaped ← sub (← lit 3) (← mul (← lit 2) t)
   mul (← mul t t) shaped
 
+/-- The 0 Hz partial `a_0·Re G(0)`, given each envelope law with its prepared
+    scalars. -/
+private def zeroHzTerm (a0 : Sig) (laws : Array (EnvelopeLaw × Array Sig)) :
+    BuildM Sig := do
+  let zero ← lit 0
+  let mut g0? : Option (Sig × Sig) := none
+  for (law, prepared) in laws do
+    let gi ← law.gain prepared zero zero
+    g0? := some (← match g0? with
+      | some acc => cmulPair acc gi
+      | none => pure gi)
+  match g0? with
+  | some (gre, _) => mul a0 gre
+  | none => pure a0
+
 /-- The family's region, given its (already warped) clock and the envelopes
     applied to it, each with its control signals already emitted. -/
 def familySig (f : PartialFamily) (clock : Clock)
     (envelopes : Array (EnvelopeLaw × Array Sig)) : BuildM Sig := do
-  if f.count == 0 then return ← lit 0
+  if f.dc.isSome then
+    unless f.wave == .cosine do
+      throw s!"partial family '{f.name}': a 0 Hz term needs the cosine projection (a sine is zero at 0 Hz)"
+    unless f.edges.dc matches .off do
+      throw s!"partial family '{f.name}': a 0 Hz term with a DC edge; the edge would fade it to zero, so set the DC edge off"
+  if f.count == 0 then
+    -- No partials; the 0 Hz term, if any, still plays (as it does at a live
+    -- count of 0).
+    return ← match f.dc with
+      | none => lit 0
+      | some a0 => do
+          let laws ← envelopes.mapM fun (law, controls) => do
+            pure (law, ← law.prepare controls f.freq)
+          zeroHzTerm a0 laws
   if f.count > familyCapacity then
     throw s!"partial family '{f.name}': {f.count} partials exceed the phase rail's capacity of {familyCapacity}"
   unless ← sigIsUniform f.freq do
@@ -233,11 +261,6 @@ def familySig (f : PartialFamily) (clock : Clock)
   if let some phase := f.phase then
     unless ← sigIsUniform phase do
       throw s!"partial family '{f.name}': the phase offset must be uniform"
-  if f.dc.isSome then
-    unless f.wave == .cosine do
-      throw s!"partial family '{f.name}': a 0 Hz term needs the cosine projection (a sine is zero at 0 Hz)"
-    unless f.edges.dc matches .off do
-      throw s!"partial family '{f.name}': a 0 Hz term with a DC edge; the edge would fade it to zero, so set the DC edge off"
   let weightTable? ← match f.weights with
     | .table ws =>
         if ws.size != f.count then
@@ -387,17 +410,8 @@ def familySig (f : PartialFamily) (clock : Clock)
   match f.dc with
   | none => pure region
   | some a0 =>
-    -- The 0 Hz partial: `a_0·Re G(0)`, per sample, outside the region.
-    let mut g0? : Option (Sig × Sig) := none
-    for (law, prepared) in envelopes.zip envPrepared do
-      let gi ← law.1.gain prepared zero zero
-      g0? := some (← match g0? with
-        | some acc => cmulPair acc gi
-        | none => pure gi)
-    let term ← match g0? with
-      | some (gre, _) => mul a0 gre
-      | none => pure a0
-    add region term
+    -- The 0 Hz partial, per sample, outside the region.
+    add region (← zeroHzTerm a0 ((envelopes.zip envPrepared).map fun (e, p) => (e.1, p)))
 
 /-- The saw's weights `1/k`, `k = 1..count`, as an exact coefficient table. -/
 def sawWeights (count : Nat) : BuildM PartialWeights := do

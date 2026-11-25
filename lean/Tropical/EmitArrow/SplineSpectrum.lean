@@ -28,7 +28,12 @@ with `φ̂(ξ) = ∫ φ(u) e^{−2πiuξ} du`. So `f(x) = F_0 + Σ_{n≥1} Re(2F
   `dc` term);
 * `φ̂` is computed at assemble time from the basis matrix itself, for any
   basis with an even kernel (both provided bases are even), in the exact
-  carrier (`Tropical.Exact`), so no platform `libm` touches the column.
+  carrier (`Tropical.Exact`), so no platform `libm` touches the column. For a
+  basis that reproduces constants, harmonics `K, 2K, …` are baked as exact
+  zeros.
+* the realization is alias-free when the controls are uniform within a
+  kernel call. Controls modulated at audio rate are evaluated per sample, and
+  the sidebands they add are not culled at Nyquist.
 -/
 
 namespace Tropical.EmitArrow
@@ -59,6 +64,14 @@ private def reflect (a : Array Int) : Array Int := Id.run do
 def SplineBasis.kernelIsEven (basis : SplineBasis) : Bool :=
   let p := basis.pieces
   (Array.range 4).all fun w => p[w]! == reflect p[3 - w]!
+
+/-- Does the basis reproduce constants (`Σ_j φ(u − j) = 1`)? Exact, on the
+    integer matrix: the pieces sum to `scale` (`Σ_w rows[0][w] = scale`, and
+    `Σ_w rows[k][w] = 0` for `k ≥ 1`). By Poisson summation this is
+    `φ̂(m) = 0` at every nonzero integer `m`. Both provided bases do. -/
+def SplineBasis.reproducesConstants (basis : SplineBasis) : Bool :=
+  (Array.range 4).all fun k =>
+    basis.rows[k]!.foldl (· + ·) 0 == (if k == 0 then (basis.scale : Int) else 0)
 
 /-- `∫₀¹ tᵏ e^{−iat} dt` for `k = 0..3`, as `(re, im)` enclosures. Small `|a|`:
     the Taylor series `Σ_r (−ia)^r / (r!·(k + r + 1))` (60 terms; at `|a| < 4`
@@ -97,8 +110,12 @@ private def momentIntegrals (a : DyadicI) : Array (DyadicI × DyadicI) := Id.run
 /-- `φ̂(ξ) = ∫ φ(u) e^{−2πiuξ} du` of the basis kernel at `ξ = num/den`, from
     its matrix: `Σ_w e^{−ia(1−w)} Σ_k p_w[k]·I_k(a)` with `a = 2πξ`, in the
     exact carrier (`Tropical.Exact`). Real for an even kernel (the imaginary
-    part is dropped). -/
+    part is dropped). At a nonzero integer `ξ` of a basis that reproduces
+    constants the value is exactly 0, and it is returned as 0 (the enclosure's
+    midpoint would be a residue near 1e-38). -/
 def SplineBasis.kernelTransform (basis : SplineBasis) (num den : Nat) : Float := Id.run do
+  if num != 0 && den != 0 && num % den == 0 && basis.reproducesConstants then
+    return 0.0
   let a := DyadicI.div (DyadicI.mul twoPiI (DyadicI.ofNat num)) (DyadicI.ofNat den)
   let moments := momentIntegrals a
   let p := basis.pieces
