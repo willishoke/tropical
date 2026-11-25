@@ -78,7 +78,11 @@ The kernel type names its channels (`out.channels`, e.g.
 in host order, and `build_patches.ts` fails on a kernel with more than one
 channel that does not declare them (a one-channel kernel is `[0]`). The
 player sends only those to the worklet (`WasmKernel.process(outputs, n,
-channels)`); one audio channel plays on every speaker. A display may still
+channels)`); one audio channel plays on every speaker. The safe default
+holds below the build too: `RenderAhead.adopt` and `startHost`'s
+`loadPatch` refuse a multichannel kernel without its list (a stale
+`index.json`, another consumer of the runtime). Low-level `process` with no
+list still plays every channel. A display may still
 draw a tap: that is what taps are for. Carrying the distinction in the
 kernel type (a role per output channel, set by the compiler, which knows
 which assigns are taps) would remove the declaration; it is a core gap, not
@@ -226,11 +230,11 @@ the playhead: the last report advanced by the time since.
 
 | Message | Path | Effect |
 |---------|------|--------|
-| `{type:'load', wasm, manifest, audio}` | host → renderer | instantiate; splice in after the current patch fades out; play only the `audio` channels |
+| `{type:'load', wasm, manifest, audio}` | host → renderer | instantiate; splice in after the current patch fades out; play only the `audio` channels (a multichannel kernel without them is refused) |
 | `{type:'param', name, value}` | host → renderer | write at the next splice |
 | `{type:'fadeIn'}` / `{type:'fadeOut'}` | host → renderer | envelope from the next splice |
-| `{type:'display', displays, points}` | host → renderer | draw one cycle of each listed channel; `[]` stops |
-| `{type:'curve', index, cycle, tau0, freq, data}` | renderer → host | display `index`'s points over clock cycle `cycle`, from clock word `tau0` |
+| `{type:'display', displays, points, generation}` | host → renderer | draw one cycle of each listed channel; `[]` stops |
+| `{type:'curve', generation, index, cycle, tau0, freq, data}` | renderer → host | display `index`'s points over clock cycle `cycle`, from clock word `tau0`; the host drops a curve of an older generation |
 | `{type:'chunk', epoch, start, data}` | renderer → worklet | planar f32 frames from `start`; a newer epoch overwrites the frames it covers, an older one is dropped |
 | `{type:'playhead', frame}` | worklet → renderer | the next frame the worklet will play, every 4 quanta |
 | `{type:'mute'}` | host → worklet | a short local fade before the host closes the context |
@@ -252,8 +256,14 @@ build on a display whose channel or param the kernel does not have.
 
 - **Which cycle.** The clock is read by the stdlib phasor law, the one the
   anchor discipline also uses: `inc = trunc(f·2³²/rate)`, phase
-  `⌊inc·τ/2¹⁶⌋ mod 2³²` (a `ClockPhasor` on τ with offset 0; a clock with
-  an offset or another law would be drawn rotated). The curve is the cycle
+  `⌊inc·τ/2¹⁶⌋ mod 2³²` (a `ClockPhasor` on τ with offset 0). This is the
+  host's copy of the law, so a clock with an offset or another law is drawn
+  rotated or stretched: `build_patches.ts` refuses a `freqParam` with a
+  non-raw discipline (an `anchor` param carries a `#phase` offset; an
+  `anchor_clock` one runs on the master clock). In a binary32 artifact the
+  kernel's increment can differ from the host's by one and the picture
+  slowly drifts. The kernel-sourced fix is to tap the clock's phase as a
+  channel and pick phase 0 from kernel output; not built. The curve is the cycle
   that contains the renderer's estimate of the playhead, from its phase 0:
   point `j` is the first clock word at or after phase `cycle + j/512`, so
   its phase is exact to within one word's advance (`inc/2¹⁶` phase units,
@@ -281,7 +291,9 @@ build on a display whose channel or param the kernel does not have.
   per 33 ms; a knob write marks the curves stale and is coalesced into the
   next round; no round runs while the renderer is behind its lookahead, and
   none while a load is pending (so an old kernel is never drawn under a new
-  patch). Two curves at 30 rounds a second are about 0.7× real time of
+  patch); a failed load drops the new patch's displays, and each display
+  list is a generation, so a curve still in flight from the previous list
+  is dropped by the host. Two curves at 30 rounds a second are about 0.7× real time of
   kernel work, so their share of a core is 0.7× the patch's render cost
   (see the per-chunk cost table in `render_ahead.test.ts`, which also times
   one curve): negligible for the spline patches. It is not counted in
@@ -295,6 +307,17 @@ build on a display whose channel or param the kernel does not have.
 - Kernels are compiled at 44.1 kHz and played at the AudioContext's rate
   with no resampling: on 48 kHz hardware everything plays 8.8% sharp and
   fast. The display's Hz are in kernel time (the manifest's `rate`).
+- Taps outside the player. The spline patches are 3-channel programs (audio
+  plus two taps) and `spectral-filter-fm` is 2-channel (audio plus a tap).
+  Only the player knows which channels are sound, from `audio`. The native
+  DAC (`engine/dac/TropicalDAC.hpp`, read, not run) maps plan channel `c` to
+  device channel `c` (a mono plan upmixes): MCP `start_audio` opens 2
+  channels by default, so `spectral-filter-fm` loaded there would play its
+  cutoff tap on the right channel, and a 3-channel spline patch is refused
+  when the stream opens ("requires 3 device output channels") or plays
+  silence if swapped into a running stereo stream; with 3 or more device
+  channels the taps go to channels 1 and 2. Same core gap as above: the
+  kernel type does not carry audio-vs-tap.
 
 ## Equivalence gates
 

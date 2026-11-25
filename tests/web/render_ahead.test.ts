@@ -26,7 +26,7 @@ import { readFileSync, existsSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, ParamWriter, type KernelManifest } from '../../web/runtime/index'
-import { RENDER_AHEAD_DEFAULTS } from '../../web/worker/render_ahead'
+import { RENDER_AHEAD_DEFAULTS, RenderAhead } from '../../web/worker/render_ahead'
 import { cycleCurve } from '../../web/worker/curve'
 import {
   simulate, zeroQuanta, maxStep, firstDiff, stallSchedule, type SimConfig,
@@ -197,6 +197,21 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
       expect(peak).toBeGreaterThan(0)
       expect(peak).toBeLessThan(1)
     }
+  })
+
+  // The safe default: a multichannel kernel without its audio list (another
+  // consumer, a stale index.json) is refused rather than playing its taps.
+  test('a multichannel kernel without its audio channels is refused', async () => {
+    const ra = new RenderAhead(44100, () => {}, () => 0)
+    const tap = await load('spectral-filter-fm')
+    const t1 = ra.beginLoad()
+    expect(() => ra.adopt(t1, tap.k, tap.m)).toThrow(/audio channels/)
+    expect(() => ra.adopt(t1, tap.k, tap.m, [2])).toThrow(RangeError)
+    expect(() => ra.adopt(t1, tap.k, tap.m, [0])).not.toThrow()
+    const mono = await load('pure-sine-440')
+    expect(mono.k.outputChannelCount).toBe(1)
+    const t2 = ra.beginLoad()
+    expect(() => ra.adopt(t2, mono.k, mono.m)).not.toThrow()
   })
 
   test('spectral-filter-fm: a knob drag whose splices land late crossfades', async () => {

@@ -25,9 +25,10 @@ export type TropicalHost = {
   node: AudioWorkletNode
   worker: Worker
   /** Load a precompiled patch; it is spliced in after the current one fades
-   *  out. `audio` names the kernel channels that are sound, in host order
-   *  (default: all); the others are observation channels (taps) and never
-   *  reach the device. */
+   *  out. `audio` names the kernel channels that are sound, in host order;
+   *  the others are observation channels (taps) and never reach the device.
+   *  A kernel with more than one channel must name them (refused otherwise);
+   *  a one-channel kernel needs no list. */
   loadPatch(wasm: ArrayBuffer, manifest: KernelManifest, audio?: number[]): void
   fadeIn(): void
   /** Resolves once the fade-out has reached the speakers. */
@@ -36,7 +37,8 @@ export type TropicalHost = {
   setParam(name: string, value: number): void
   /** Ask the renderer for one cycle of each listed channel at `points`
    *  points (`worker/curve.ts`), or stop with `[]`; curves arrive at
-   *  `onCurve`. */
+   *  `onCurve`, only those of the newest list (each list is a generation, and
+   *  a curve still in flight from an older one is dropped). */
   setDisplay(displays: CycleDisplay[], points?: number): void
   onCurve: ((curve: Curve) => void) | null
   dispose(): Promise<void>
@@ -81,7 +83,9 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
 
   const worker = new Worker(opts.rendererUrl, { type: 'module' })
   worker.onmessage = (e) => {
-    if (e.data?.type === 'curve') host.onCurve?.(e.data as Curve)
+    if (e.data?.type === 'curve') {
+      if ((e.data as Curve).generation === displayGeneration) host.onCurve?.(e.data as Curve)
+    }
     else log(e, 'renderer')
   }
   worker.onerror = (e) => console.error('[tropical-renderer]', e.message)
@@ -112,13 +116,18 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     ahead.marginMs + (FADE_FRAMES / ctx.sampleRate) * 1000
     + ((ctx.baseLatency ?? 0) + (ctx.outputLatency ?? 0)) * 1000 + 20
 
+  let displayGeneration = 0
   const host: TropicalHost = {
     onCurve: null,
     context: ctx,
     node,
     worker,
     loadPatch(wasm, manifest, audio) {
-      const required = audio?.length ?? kernelOutputChannelCount(manifest)
+      const channels = kernelOutputChannelCount(manifest)
+      if (audio === undefined && channels > 1)
+        throw new RangeError(
+          `a ${channels}-channel patch needs its audio channels named; its other channels are taps`)
+      const required = audio?.length ?? 1
       if (required > 1 && required > outputChannels)
         throw new RangeError(
           `patch requires ${required} output channels; host has ${outputChannels}`)
@@ -130,7 +139,9 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
       return new Promise((resolve) => setTimeout(resolve, fadeOutMs()))
     },
     setParam(name, value) { worker.postMessage({ type: 'param', name, value }) },
-    setDisplay(displays, points = 512) { worker.postMessage({ type: 'display', displays, points }) },
+    setDisplay(displays, points = 512) {
+      worker.postMessage({ type: 'display', displays, points, generation: ++displayGeneration })
+    },
     async dispose() {
       // Whatever is still queued, fade it locally rather than cut it.
       node.port.postMessage({ type: 'mute' })

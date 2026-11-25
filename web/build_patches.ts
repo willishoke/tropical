@@ -123,8 +123,17 @@ for (const { slug, title, description, knobs, audio: declaredAudio, displays } o
       throw new Error(`${slug}: display needs exactly one of freq and freqParam`)
     if (display.freq !== undefined && !(display.freq > 0))
       throw new Error(`${slug}: display freq must be positive`)
-    if (display.freqParam !== undefined && !kernelType.inputs.some((p) => p.name === `param:${display.freqParam}`))
-      throw new Error(`${slug}: display freqParam '${display.freqParam}' names no param of the kernel`)
+    if (display.freqParam !== undefined) {
+      const port = kernelType.inputs.find((p) => p.name === `param:${display.freqParam}`)
+      if (!port) throw new Error(`${slug}: display freqParam '${display.freqParam}' names no param of the kernel`)
+      // The display reads the clock by the plain phasor law; an anchored
+      // param carries a phase offset (`#phase`) and an `anchor_clock` one
+      // runs on the master clock, so its curve would be drawn rotated or
+      // stretched.
+      const d = port.discipline?.discipline ?? 'raw'
+      if (d !== 'raw')
+        throw new Error(`${slug}: display freqParam '${display.freqParam}' has discipline '${d}'; a display reads only a raw frequency`)
+    }
   }
 
   index.push({ slug, title, description, ...(knobs ? { knobs } : {}), audio, ...(displays ? { displays } : {}), wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })

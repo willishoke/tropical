@@ -8,13 +8,15 @@
  *     over it and playhead reports come back, so the main thread is not in
  *     the audio path
  *   - { type: 'load', wasm, manifest, audio? } — instantiate, splice in, fade
- *     in; `audio` names the kernel channels that are sound (default: all),
- *     the rest (taps) are never sent to the worklet
+ *     in; `audio` names the kernel channels that are sound, the rest (taps)
+ *     are never sent to the worklet; a multichannel kernel without it is
+ *     refused
  *   - { type: 'param', name, value } — a knob write, at the next splice
  *   - { type: 'fadeIn' } / { type: 'fadeOut' }
- *   - { type: 'display', displays, points } — draw one cycle of each listed
- *     channel (`curve.ts`); `[]` stops. The renderer answers
- *     { type: 'curve', index, cycle, tau0, freq, data } per display, at most
+ *   - { type: 'display', displays, points, generation } — draw one cycle of
+ *     each listed channel (`curve.ts`); `[]` stops. The renderer answers
+ *     { type: 'curve', generation, index, cycle, tau0, freq, data } per
+ *     display, at most
  *     ~30 rounds a second: each point is the kernel itself at a chosen τ
  *     (`WasmKernel.renderAt`) under the newest spliced knob values, over the
  *     clock cycle that contains the playhead estimate, from its phase 0.
@@ -32,7 +34,7 @@ type RendererMsg =
   | { type: 'param'; name: string; value: number }
   | { type: 'fadeIn' }
   | { type: 'fadeOut' }
-  | { type: 'display'; displays: CycleDisplay[]; points: number }
+  | { type: 'display'; displays: CycleDisplay[]; points: number; generation: number }
 
 declare const self: {
   onmessage: ((e: MessageEvent<RendererMsg>) => void) | null
@@ -50,6 +52,7 @@ let ra: RenderAhead | null = null
 // per CURVE_INTERVAL_MS, a knob change is coalesced into the next round, and
 // no round is drawn while the renderer is behind its lookahead.
 let displays: CycleDisplay[] = []
+let generation = 0
 let points = 512
 const kernelRate = new WeakMap<WasmKernel, number>()
 let lastCurveAt = -Infinity
@@ -75,7 +78,9 @@ function maybeCurves(): void {
     if (freq === null || d.channel >= src.kernel.outputChannelCount) return
     const c = cycleCurve(src.kernel, rate, src.frame, d.channel, freq, points)
     if (!c) return
-    const msg: Curve = { type: 'curve', index, cycle: Number(c.cycle), tau0: c.taus[0]!.toString(), freq, data: c.data }
+    const msg: Curve = {
+      type: 'curve', generation, index, cycle: Number(c.cycle), tau0: c.taus[0]!.toString(), freq, data: c.data,
+    }
     self.postMessage(msg, [c.data.buffer])
   })
 }
@@ -131,13 +136,15 @@ self.onmessage = (e) => {
         curveDirty = true
         wake()
       })
-      .catch((err) => { r.cancelLoad(token); error(err) })
+      // A failed load leaves the old patch playing; the displays were the new
+      // patch's, so drop them rather than draw the old kernel under them.
+      .catch((err) => { r.cancelLoad(token); displays = []; error(err) })
   }
   else if (msg.type === 'param') { r.setParam(msg.name, msg.value); curveDirty = true }
   else if (msg.type === 'display') {
     if (!Number.isInteger(msg.points) || msg.points < 2 || msg.points > MAX_CURVE_POINTS)
       error(`display points must be an integer in [2, ${MAX_CURVE_POINTS}]`)
-    else { displays = msg.displays; points = msg.points; curveDirty = true }
+    else { displays = msg.displays; points = msg.points; generation = msg.generation; curveDirty = true }
   }
   else if (msg.type === 'fadeIn') r.fadeIn()
   else if (msg.type === 'fadeOut') r.fadeOut()

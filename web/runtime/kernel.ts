@@ -370,10 +370,12 @@ export class WasmKernel {
 
   /** Render `n` frames into planar host outputs (f32 audio) with the anti-click
    *  fade and the device-boundary clamp. `channels` picks the kernel channels
-   *  that are sound, in host order (omitted: all of them); a patch's
-   *  observation channels (taps) are left out, so they never reach a host
-   *  output. One played channel is upmixed to every host channel; more map
-   *  one to one.
+   *  to play, in host order; a patch's observation channels (taps) are left
+   *  out, so they never reach a host output. One played channel is upmixed
+   *  to every host channel; more map one to one. This is the low-level
+   *  primitive: omitting `channels` plays every channel, taps included. A
+   *  host that plays a patch passes its audio list; `RenderAhead.adopt` and
+   *  `startHost`'s `loadPatch` refuse a multichannel kernel without one.
    *
    *  The clamp lives HERE and not in `render` on purpose: `render` returns the
    *  kernel's own f64 output — the value of `f(τ)` — and that is the surface the

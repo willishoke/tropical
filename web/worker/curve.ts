@@ -11,11 +11,12 @@ import { CLOCK_FRAC_BITS, type WasmKernel } from '../runtime/index.js'
  *  `param:` prefix). `label` captions it. */
 export type CycleDisplay = { channel: number; freq?: number; freqParam?: string; label?: string }
 
-/** Renderer → host: curve `index` of the patch's displays — `data` holds
- *  `points` samples of cycle `cycle` of the clock, starting at clock word
- *  `tau0` (kernel τ, Q48.16, as a decimal string). */
+/** Renderer → host: curve `index` of display list `generation` — `data`
+ *  holds `points` samples of cycle `cycle` of the clock, starting at clock
+ *  word `tau0` (kernel τ, Q48.16, as a decimal string). */
 export type Curve = {
-  type: 'curve'; index: number; cycle: number; tau0: string; freq: number; data: Float64Array
+  type: 'curve'; generation: number; index: number; cycle: number; tau0: string; freq: number
+  data: Float64Array
 }
 
 /** The most points one curve may ask for. */

@@ -142,10 +142,17 @@ export class RenderAhead {
   }
 
   /** The loaded kernel, spliced in after the current one fades out.
-   *  `audio` names the kernel channels that are sound (default: all). */
-  adopt(token: number, kernel: WasmKernel, manifest: KernelManifest,
-      audio: number[] = Array.from({ length: kernel.outputChannelCount }, (_, c) => c)): void {
+   *  `audio` names the kernel channels that are sound, in host order. A
+   *  kernel with more than one channel must name them (its others are taps,
+   *  which never reach the device), so one without a list is refused; a
+   *  one-channel kernel plays its channel. */
+  adopt(token: number, kernel: WasmKernel, manifest: KernelManifest, audio?: number[]): void {
     if (token !== this.loadToken) return
+    if (audio === undefined) {
+      if (kernel.outputChannelCount > 1)
+        throw new RangeError(`a ${kernel.outputChannelCount}-channel kernel needs its audio channels named; its other channels are taps`)
+      audio = [0]
+    }
     if (audio.length === 0 || audio.some((c) => !Number.isInteger(c) || c < 0 || c >= kernel.outputChannelCount))
       throw new RangeError(`audio channels [${audio}] are not channels of a ${kernel.outputChannelCount}-channel kernel`)
     this.incoming = { kernel, manifest, audio }
