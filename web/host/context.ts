@@ -18,6 +18,7 @@ import {
   kernelOutputChannelCount, FADE_FRAMES, type KernelManifest,
 } from '../runtime/index.js'
 import { RENDER_AHEAD_DEFAULTS, type RenderAheadOptions } from '../worker/render_ahead.js'
+import type { CycleDisplay, Curve } from '../worker/curve.js'
 
 export type TropicalHost = {
   context: AudioContext
@@ -31,6 +32,10 @@ export type TropicalHost = {
   fadeOut(): Promise<void>
   /** Write a live param (a `param:` slot name) under its discipline. */
   setParam(name: string, value: number): void
+  /** Ask the renderer for one cycle of a channel at `points` points
+   *  (`worker/curve.ts`), or stop with `null`; curves arrive at `onCurve`. */
+  setDisplay(display: CycleDisplay | null, points?: number): void
+  onCurve: ((curve: Curve) => void) | null
   dispose(): Promise<void>
 }
 
@@ -72,7 +77,10 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
   node.port.onmessage = (e) => log(e, 'worklet')
 
   const worker = new Worker(opts.rendererUrl, { type: 'module' })
-  worker.onmessage = (e) => log(e, 'renderer')
+  worker.onmessage = (e) => {
+    if (e.data?.type === 'curve') host.onCurve?.(e.data as Curve)
+    else log(e, 'renderer')
+  }
   worker.onerror = (e) => console.error('[tropical-renderer]', e.message)
   // The audio thread runs a device buffer of quanta back to back, so the
   // margin must cover one buffer or every splice lands late (and crossfades).
@@ -101,7 +109,8 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     ahead.marginMs + (FADE_FRAMES / ctx.sampleRate) * 1000
     + ((ctx.baseLatency ?? 0) + (ctx.outputLatency ?? 0)) * 1000 + 20
 
-  return {
+  const host: TropicalHost = {
+    onCurve: null,
     context: ctx,
     node,
     worker,
@@ -118,6 +127,7 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
       return new Promise((resolve) => setTimeout(resolve, fadeOutMs()))
     },
     setParam(name, value) { worker.postMessage({ type: 'param', name, value }) },
+    setDisplay(display, points = 512) { worker.postMessage({ type: 'display', display, points }) },
     async dispose() {
       // Whatever is still queued, fade it locally rather than cut it.
       node.port.postMessage({ type: 'mute' })
@@ -127,4 +137,5 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
       await ctx.close()
     },
   }
+  return host
 }

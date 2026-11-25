@@ -55,6 +55,12 @@
     .knob span { color: var(--muted); }
     .knob input[type=range] { width: 100%; accent-color: var(--accent); }
     .knob output { text-align: right; font-variant-numeric: tabular-nums; }
+    .curve { margin-top: 1.5rem; }
+    .curve canvas {
+      display: block; width: 100%; height: 160px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    }
+    .curve p { color: var(--muted); font-size: 12px; margin: 0.4rem 0 0; }
     @media (max-width: 480px) {
       .knob { grid-template-columns: 5rem 1fr 5rem; gap: 0.5rem; }
     }
@@ -73,6 +79,11 @@
   </div>
 
   <p id="patch-meta" class="patch-meta"></p>
+
+  <div id="curve" class="curve" hidden>
+    <canvas id="curve-canvas"></canvas>
+    <p id="curve-caption"></p>
+  </div>
 
   <div id="knobs" class="knobs"></div>
 

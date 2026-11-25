@@ -139,6 +139,31 @@ describe('render-ahead playout (virtual time, no audio device)', () => {
     }
   })
 
+  // A spline control point and the envelope's pulse width are plain `param:`
+  // slots: a write at the splice is the in-place write at that frame.
+  test('spline-voice: a control-point write and a width write land at the splice', async () => {
+    const slug = 'spline-voice', dur = 3000, at = 1000
+    for (const [name, value] of [['param:c3', -0.7], ['param:width', 0.8]] as const) {
+      const controls = [{ at, msg: { type: 'param' as const, name, value } }]
+      const base = await run(slug, { variant: 'ahead', durationMs: dur })
+      const moved = await run(slug, { variant: 'ahead', durationMs: dur, controls })
+      const heard = (at * base.rate) / 1000 - DEVICE_FRAMES
+      const margin = Math.round((RENDER_AHEAD_DEFAULTS.marginMs * base.rate) / 1000)
+      expect(firstDiff(base.out, moved.out) - heard).toBeGreaterThanOrEqual(margin)
+      const { k, m } = await load(slug)
+      const S = moved.splices[1]! - moved.origin
+      const N = moved.out.length - moved.origin
+      const ref = new Float32Array(N)
+      k.beginFadeIn(0)
+      k.process([ref.subarray(0, S)], S)
+      new ParamWriter(m).write(k, name, value, k.frame)
+      k.process([ref.subarray(S)], N - S)
+      expect(firstDiff(ref, moved.out.subarray(moved.origin))).toBe(-1)
+      // and the write did change what plays after the splice
+      expect(firstDiff(base.out, moved.out)).toBeGreaterThanOrEqual(moved.splices[1]!)
+    }
+  })
+
   test('spectral-filter-fm: a knob drag whose splices land late crossfades', async () => {
     const slug = 'spectral-filter-fm', dur = 3000
     const drag = Array.from({ length: 40 }, (_, i) => ({

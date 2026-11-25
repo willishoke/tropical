@@ -38,7 +38,7 @@ web/
   runtime/             The extractable runtime package (→ @tropical/runtime-wasm)
     manifest.ts          KernelManifest — the consumption contract
     layout.ts            computeLayout: KernelManifest → linear-memory regions
-    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade) + setParam/getParam
+    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + renderAt(τ words) + seek + process(f32+fade) + setParam/getParam
     params.ts            ParamWriter: live param writes under raw/anchor disciplines
     index.ts             public surface
   patches/             Source demo patches (tropical_program_2 JSON or PatchGraph) + manifest.json
@@ -51,10 +51,11 @@ web/
   worker/              Render-ahead thread
     render_ahead.ts      RenderAhead: the kernel, the splice, the lookahead (no Worker API; tested in virtual time)
     renderer.ts          the Worker shell around it
+    curve.ts             one cycle of an output channel via renderAt, for the page's curve display
   worklet/             Audio thread
     processor.ts         AudioWorkletProcessor: copies queued chunks out; underrun concealment
   site/                Browser UI
-    app.ts               patch picker, play/stop, fetch .wasm + manifest
+    app.ts               patch picker, play/stop, knobs, the curve canvas, fetch .wasm + manifest
     index.html
 ```
 
@@ -113,7 +114,10 @@ master clock for `anchor_clock`, which playground knobs declare). Companions,
 discipline or a bad `clock` is refused when the writer is built. A glide's discipline
 sits on a base name with no port, so the kernel type cannot carry it; a
 playable knob is therefore a `knob` node (raw, or anchor when it feeds a
-freq inlet). `build_patches.ts` fails the build on a knob that names no
+freq inlet). A `tropical_program_2` patch's params are all raw: a
+`paramDecl` cannot declare a discipline and the session compile attaches
+none, so a frequency param there jumps the phase on a write (`spline-voice`
+and `spline-tremolo` ship their pitch knob this way). `build_patches.ts` fails the build on a knob that names no
 param or a discipline the player cannot write. Writes are messages, so the
 demo still needs no COOP/COEP and deploys as plain static files.
 
@@ -137,6 +141,15 @@ chunking a longer window over the same closed form, and returns a copy of
 the output as f64, an `f32` or `i32` output widened exactly (what the
 WASM≡JIT gate compares); `process(out, n)`
 applies the fade and downcasts to the f32 worklet buffer.
+
+`renderAt(taus)` evaluates the kernel at caller-chosen clock values: each
+entry of the `BigInt64Array` is the port's own Q48.16 word, passed through
+unchanged, one output frame per τ, in any order or spacing. A fractional
+frame is exact to 2⁻¹⁶ of a frame and the value is `f(τ)` itself, not an
+interpolation. At whole frames (`n << 16`) it is `render` bit for bit. It
+does not move the frame counter or apply the fade. `tauOfFrame(x)` gives the
+word for a frame `x` and refuses one that is not a multiple of 2⁻¹⁶ below
+2³⁷ (build a larger word as a BigInt).
 
 ## Render-ahead and underrun concealment
 
@@ -183,15 +196,18 @@ renderer cannot keep up at all, the measured cost is the hook for degrading
 gracefully, by lowering a live cost knob such as a spectral family's
 `partials`.
 
-Nothing in the player reads a playback position today. A visual that wants
-to sync to the audio must use the worklet's playhead (the played frame), not
-the renderer's frame, which runs ahead by up to the lookahead.
+A visual that wants to sync to the audio must use the worklet's playhead
+(the played frame), not the renderer's frame, which runs ahead by up to the
+lookahead. The curve display (below) starts at the renderer's estimate of
+the playhead: the last report advanced by the time since.
 
 | Message | Path | Effect |
 |---------|------|--------|
 | `{type:'load', wasm, manifest}` | host → renderer | instantiate; splice in after the current patch fades out |
 | `{type:'param', name, value}` | host → renderer | write at the next splice |
 | `{type:'fadeIn'}` / `{type:'fadeOut'}` | host → renderer | envelope from the next splice |
+| `{type:'display', display, points}` | host → renderer | draw one cycle of a channel; `display: null` stops |
+| `{type:'curve', frame, freq, data}` | renderer → host | the cycle's points, from kernel frame `frame` |
 | `{type:'chunk', epoch, start, data}` | renderer → worklet | planar f32 frames from `start`; a newer epoch overwrites the frames it covers, an older one is dropped |
 | `{type:'playhead', frame}` | worklet → renderer | the next frame the worklet will play, every 4 quanta |
 | `{type:'mute'}` | host → worklet | a short local fade before the host closes the context |
@@ -199,6 +215,34 @@ the renderer's frame, which runs ahead by up to the lookahead.
 We post raw wasm *bytes* and the renderer compiles them. (When the worklet
 rendered, bytes were forced: Chrome silently drops worklet messages
 containing a `WebAssembly.Module`.)
+
+## The curve display
+
+A patch's `manifest.json` entry may declare `display: {channel, freq |
+freqParam}`: draw one cycle (`rate / freq` frames, `freq` fixed or the
+current value of a param) of that output channel. The page sends it to the
+renderer (`{type:'display'}`), which evaluates the cycle with
+`renderAt` at 512 τ values from the played frame (`worker/curve.ts`), under
+the knob values the kernel is rendering with, and posts the points back
+(`{type:'curve'}`) about 30 times a second and after each spliced knob
+write. The page only draws them. `build_patches.ts` fails the build on a
+display whose channel or param the kernel does not have. The display reads a
+kernel output channel, so a curve that is not itself audible would need its
+own channel, and the player plays every channel (a wider kernel maps channel
+`c` to host channel `c`).
+
+What it shows: the patch's output over one cycle of the declared clock,
+starting at the played frame. What it does not show: the shape of one
+component at one instant. A patch has one τ, so sweeping τ across a cycle
+also advances every other clock in the patch by one cycle: in
+`spline-voice` the envelope moves on by 1/220 s across the drawn wave, and a
+modulator as fast as the drawn clock is drawn as part of the shape. Drawing
+"the wave at instant τ₀, modulators frozen" needs the oscillator's phase as
+a kernel input separate from τ, which the port does not have. The smallest
+change that would give it: a second, optional per-frame input on the port
+(say `phase:i64q16[N]`, defaulting to τ) that the compiler routes to the
+clocks a display names, so a host could hold τ at τ₀ and sweep the phase.
+Not built.
 
 ## Equivalence gates
 
@@ -233,8 +277,15 @@ compare the kernel's output against the JIT (`WasmKernel.render` vs
   direct-render processor against render-ahead under one seeded stall
   schedule: zero-filled quanta, the largest step against the patch's own, a
   sustained overload resuming at the wall-clock τ, ahead ≡ in place sample for
-  sample, a knob splice ≡ an in-place write at its frame, late splices, patch
-  swaps, and each shipped patch's per-chunk render cost.
+  sample, a knob splice ≡ an in-place write at its frame (also a spline
+  control point and a `PhaseClip` width on `spline-voice`), late splices,
+  patch swaps, and each shipped patch's per-chunk render cost.
+- `render_at.test.ts` — `renderAt`: one period of a spline oscillator
+  (Catmull-Rom, K = 12; B-spline, K = 5) at 1000 fractional-frame τ values
+  equals the f64 reference spline at each τ's exact integer phase within
+  1e-12, at τ = 0 and ten hours in; at whole frames it is `render` bit for
+  bit (and on the shipped `spline-voice`); `cycleCurve`, the display's path,
+  returns those same points.
 - `runtime_params.test.ts` — `ParamWriter`: an anchored re-pitch ten hours in
   is continuous and plays the new pitch (a raw one jumps); companions and
   unimplemented disciplines are refused.

@@ -112,6 +112,15 @@ export class RenderAhead {
     return this.reported + Math.max(0, this.frames(this.now() - this.reportedAt))
   }
 
+  /** The newest patch's kernel and its own frame at the playhead (0 before
+   *  it starts), for a display that evaluates the kernel off the audio path.
+   *  The kernel holds the newest knob values once they are spliced. */
+  displaySource(): { kernel: WasmKernel; frame: number } | null {
+    const seg = this.segments[this.segments.length - 1]
+    if (!seg) return null
+    return { kernel: seg.kernel, frame: Math.max(0, this.estimate() - seg.origin) }
+  }
+
   /** A patch load started; returns the token `adopt` must present. Writes
    *  posted before it were for the old patch. */
   beginLoad(): number {

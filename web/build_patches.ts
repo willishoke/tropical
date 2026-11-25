@@ -33,7 +33,12 @@ const diffcli = process.env.TROPICAL_DIFFCLI
  *  prefix) and its slider range. The player writes it under the discipline
  *  the kernel manifest declares; only raw and anchor params are playable. */
 type Knob = { param: string; label: string; min: number; max: number; log?: boolean; unit?: string }
-type Entry = { slug: string; title: string; description: string; knobs?: Knob[] }
+/** The curve the player draws for a patch: one cycle of output `channel`,
+ *  evaluated by the kernel itself (`WasmKernel.renderAt`). The cycle is
+ *  `rate / freq` frames, `freq` a fixed value or the current value of the
+ *  param `freqParam`. */
+type Display = { channel: number; freq?: number; freqParam?: string }
+type Entry = { slug: string; title: string; description: string; knobs?: Knob[]; display?: Display }
 
 // Ensure the Lean compiler CLI exists (incremental; fast if already built).
 if (!process.env.TROPICAL_DIFFCLI && !existsSync(diffcli)) {
@@ -53,7 +58,7 @@ for (const f of readdirSync(distDir)) {
 }
 
 const index: Array<Entry & { wasmPath: string; manifestPath: string }> = []
-for (const { slug, title, description, knobs } of manifest) {
+for (const { slug, title, description, knobs, display } of manifest) {
   const src = resolve(patchesDir, `${slug}.json`)
 
   // 1. Lower the source to a wasm32 module in-process (Lean IR → engine
@@ -81,6 +86,7 @@ for (const { slug, title, description, knobs } of manifest) {
   // fails the build rather than becoming a dead slider.
   const kernelType = JSON.parse(k.stdout.toString()) as {
     inputs: { name: string; discipline?: { discipline: string } }[]
+    outputs: { shape: number[] }[]
   }
   for (const knob of knobs ?? []) {
     const port = kernelType.inputs.find((p) => p.name === `param:${knob.param}`)
@@ -92,7 +98,20 @@ for (const { slug, title, description, knobs } of manifest) {
       throw new Error(`${slug}: knob '${knob.label}' has a bad range [${knob.min}, ${knob.max}]`)
   }
 
-  index.push({ slug, title, description, ...(knobs ? { knobs } : {}), wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })
+  // A display names a channel the kernel has and exactly one cycle source.
+  if (display) {
+    const channels = kernelType.outputs[0]?.shape[1] ?? 1
+    if (!Number.isInteger(display.channel) || display.channel < 0 || display.channel >= channels)
+      throw new Error(`${slug}: display channel ${display.channel} is not one of the kernel's ${channels} channels`)
+    if ((display.freq === undefined) === (display.freqParam === undefined))
+      throw new Error(`${slug}: display needs exactly one of freq and freqParam`)
+    if (display.freq !== undefined && !(display.freq > 0))
+      throw new Error(`${slug}: display freq must be positive`)
+    if (display.freqParam !== undefined && !kernelType.inputs.some((p) => p.name === `param:${display.freqParam}`))
+      throw new Error(`${slug}: display freqParam '${display.freqParam}' names no param of the kernel`)
+  }
+
+  index.push({ slug, title, description, ...(knobs ? { knobs } : {}), ...(display ? { display } : {}), wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })
   console.log(`built ${slug.padEnd(22)} ${statSync(wasmPath).size.toString().padStart(7)} B wasm`)
 }
 
