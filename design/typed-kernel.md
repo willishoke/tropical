@@ -468,22 +468,48 @@ with the increment signed, so a frequency is taken modulo the rate into
 `BL` 3). `MULS` at one cycle assumes the M0+ is built with the single-cycle
 multiplier. The small iterative multiplier is a build option that takes 32
 cycles, which adds 31 cycles per `MULS` (279 per frame for `SinOscQ15`'s
-nine). Each report states the assumption as `timing_model`. The script
-enumerates every path once around the frame loop, data-dependent branches
-included, and adds the path that enters the loop and the one that leaves
-it. The enumeration is exhaustive or the script exits non-zero: a path that
-revisits an instruction (an inner loop) has no bounded cost, and past the
-path limit the set is not known to be complete, so in either case no range
-is printed. The epilogue's cheapest and dearest paths both enter the call
-range (`exit_cycles` and `exit_cycles_upper`). An ARMv6-M emulator on the same table measured two objects, and
-both measurements fall inside the computed ranges:
+nine). Each report states the assumption as `timing_model`.
+
+The script builds the control-flow graph of `tropical_kernel` from the
+disassembly. An instruction's cycles sit on the edge that leaves it, so a
+conditional branch has a 2-cycle taken edge and a 1-cycle fall-through
+edge. Cut at the frame loop's back edge, the graph must be loop-free. The
+per-frame range is then the shortest and the longest path once around the
+loop, found by dynamic programming in topological order. That is linear in
+the size of the graph, however many paths it has, so a chain of selects
+that Thumb-1 compiles into a chain of branches, 2²⁰ paths for twenty of
+them, costs no more than its instructions. The entry, from the first
+instruction to the loop head, and the exit, out of the loop and through the
+epilogue to the return, are found the same way. The numbers are exactly
+those of the path enumeration the script used before.
+`tools/test_embedded_object.py` keeps that enumeration as its oracle and
+checks the two agree on the fixture objects and on random graphs.
+
+Every path of the graph counts, including paths that no input can take. If
+two branches test correlated conditions, the dearest path may take both
+arms that cannot run together. So each range is a pair of bounds, not a
+count: the upper bound may be loose, and nothing says the lower one is
+reached. The report says so in `cycle_bounds`. A call is also assumed to
+run the frame loop exactly N times. Any other cycle, such as an inner loop,
+has no bounded cost: the script names an instruction on it and exits
+non-zero, with no range printed. The epilogue's cheapest and dearest paths
+both enter the call range (`exit_cycles` and `exit_cycles_upper`, and
+`entry_cycles` beside `entry_cycles_upper`; the manifest's `m0plus_cycles`
+carries both ends of each). An ARMv6-M emulator on the same table measured
+four objects, and every measurement falls inside the computed range:
 
 | object (N = 16) | entry | frame | exit | call | measured |
 |---|---|---|---|---|---|
 | #252 LFO (i64 rail) | 20 | 114–118 | 10 | 1 854–1 918 | 1 854, worst block 1 902 |
 | `FixedSinOscQ15`, `int32` | 17 | 86–90 | 10 | 1 403–1 467 | 1 403, worst block 1 451 |
 | `FixedSinOscQ15`, 32-bit frame counter | 14 | 76–80 | 10 | 1 240–1 304 | |
-| `SinOscQ15`, live `freq` | 39 | 78–82 | 10 | 1 297–1 361 | |
+| `SinOscQ15`, live `freq` | 39 | 78–82 | 10 | 1 297–1 361 | 1 297–1 318 |
+| 14 selects into a second `SinOscQ15`'s `freq` (2¹⁶ frame paths) | 53 | 237–241 | 10 | 3 855–3 919 | 3 855–3 879 |
+
+The last two rows were measured in the same emulator, from zero-wait
+memory, over 20 000 calls with random clocks and `freq` across the whole
+`int32` range. The last is `tests/fixtures/embedded_select_chain.json`,
+which the path enumeration refused.
 
 The cheapest path holds the sample inside the clamp. Holding it at -32767
 costs one cycle more and at +32767 three more; the upper bound adds the
@@ -495,8 +521,11 @@ per frame too high.
 `--wait-states W` estimates code in flash: each 32-bit fetch and each
 literal-pool load costs W more cycles. The low end lets a fetch hide behind
 the execution of the word before it, and the high end does not. This is an
-estimate, not a bound. For the `int32` object at W = 2 it gives 2 152–3 010
-cycles per call, and the emulator measured 2 245.
+estimate, not a bound. A fetch's stall depends on the words before it on
+the same path, which does not add up edge by edge, so the estimate still
+enumerates paths and exits non-zero past 4 096 of them. For the `int32`
+object at W = 2 it gives 2 152–3 010 cycles per call, and the emulator
+measured 2 245.
 
 `SinOscQ15`'s frame loop is 67 instructions, 9 of them `MULS`: three for the
 phase, because the increment is a variable now, and six for the sine. At
@@ -508,7 +537,8 @@ calls the kernel. `llvm-nm -u` lists nothing: no `__aeabi_*`, no
 JIT sample for sample over 65 536 frames at 2, 1 234.5, -440.25, 23 999 and
 0.0001 Hz, and again from τ = 2⁴⁰. The wasm32 object, linked with `wasm-ld`
 and run in Bun, matches the host object. `make validate` and CI run
-`tools/embedded_object.py --check-only` on both LFOs.
+`tools/embedded_object.py --check-only` on both LFOs, and
+`tools/test_embedded_object.py` on their cycle bounds.
 
 **Formats and cost.** Q15 × Q15 fits one 1-cycle `MULS` (16 × 16 → 32).
 Q31 × Q31 needs the high word of a 64-bit product. ARMv6-M has no `UMULL`,
