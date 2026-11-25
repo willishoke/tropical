@@ -45,7 +45,7 @@ envelope. The spline owns no clock: its phase is any integer phase signal.
   arithmetic. No backend needs the spline as data.
 - **Registered set.** The periodic splines are type families over K
   (`design/type-family.md`): `PeriodicCatmullRom<K>` and
-  `PeriodicBSpline<K>`, `1 ≤ K ≤ 2³¹ − 1`, e.g. `PeriodicCatmullRom12`.
+  `PeriodicBSpline<K>`, `1 ≤ K ≤ 1024`, e.g. `PeriodicCatmullRom12`.
   Each has inputs `phase` (int, Q0.32) and `c0 … c(K−1)` (float, live when
   wired from `param:` slots) and output `out`. The size-8 members are also
   registered at boot. The phantom-end splines are registered at K = 8 only:

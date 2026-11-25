@@ -155,14 +155,20 @@ ingest (`load` / `merge`) is the exception: a decode failure there is a
 property of the whole document, not of a named tool argument, so it
 keeps `internal_error` with the verbatim message.
 
-**Type-family spellings.** A `program` that spells a type family
-(`design/type-family.md`) but names no member is refused with
-`invalid_value` on `program`: the bare family name (needs a size), a size
-written with leading zeros, and a size on a type that is not a family are
-bare refusals; a size outside the family's range carries
-`valid: {kind: 'predicate', expected: {min, max}, got: size}`. A family
-name nobody registered is `unknown_program`, whose message lists the
-families. File ingest reports the same messages as `internal_error`.
+**Type-family spellings.** A `program` that spells a member of a
+registered type family (`design/type-family.md`) but names none is refused
+with `invalid_value` on `program`, before anything is assembled: the bare
+family name (needs a size) and a size written with leading zeros are bare
+refusals; a size outside the family's range carries
+`valid: {kind: 'predicate', expected: {min, max}, got: size}` (`got` is
+omitted for a size with more digits than the family's largest). Any other
+unregistered name is `unknown_program`. Its message lists the families, and
+says so when the name is a registered type followed by digits (`VCA3`: "'VCA'
+is not a type family and takes no size"). Its options add each family's
+member at the size the name ends in, so a misspelt member gets the right
+suggestion (`PeriodicCatmulRom12` → `PeriodicCatmullRom12`). File ingest
+reports the same messages as `internal_error`. Messages cut names past 64
+characters.
 
 ## Suggestion computability
 

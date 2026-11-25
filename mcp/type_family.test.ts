@@ -143,7 +143,7 @@ describe('type families — listing and instantiation', () => {
   test('list_programs lists each family with its size range', async () => {
     const programs = (await client.callOk('list_programs')) as Array<Record<string, any>>
     const cr = programs.find((p) => p.program_name === 'PeriodicCatmullRom')
-    expect(cr?.family).toMatchObject({ member: 'PeriodicCatmullRom<size>', size_min: 1, size_max: 2147483647 })
+    expect(cr?.family).toMatchObject({ member: 'PeriodicCatmullRom<size>', size_min: 1, size_max: 1024 })
     expect(programs.find((p) => p.program_name === 'PeriodicBSpline')?.family?.size_min).toBe(1)
     // The size-8 members are boot-registered concrete types, as before.
     expect(programs.find((p) => p.program_name === 'PeriodicCatmullRom8')?.inputs?.length).toBe(9)
@@ -179,6 +179,30 @@ describe('type families — listing and instantiation', () => {
   })
 })
 
+describe('type families — merge and replicate', () => {
+  test('merge brings in a member', async () => {
+    await client.callOk('load', { program: patch([
+      { op: 'instanceDecl', name: 'm0', program: 'VCA' }]) })
+    await client.callOk('merge', { program: patch([
+      { op: 'instanceDecl', name: 'm1', program: 'PeriodicBSpline7', inputs: {
+        phase: { op: 'mul', args: [{ op: 'sampleIndex' }, 89478485] }, ...controls(7) } }]) })
+    const instances = (await client.callOk('list_instances')) as Array<Record<string, any>>
+    expect(instances.map((i) => [i.name, i.type_name])).toEqual([['m0', 'VCA'], ['m1', 'PeriodicBSpline7']])
+    expect(instances[1]!.inputs.length).toBe(8)
+  })
+
+  test('replicate makes several instances of a member', async () => {
+    const data = await client.callOk('replicate', { program: 'PeriodicCatmullRom3', count: 2, name_prefix: unique('rep') })
+    expect(data.created).toHaveLength(2)
+    for (const c of data.created) {
+      expect(c.type_name).toBe('PeriodicCatmullRom3')
+      expect(c.inputs).toEqual(['phase', 'c0', 'c1', 'c2'])
+    }
+    const env = await client.callError('replicate', { program: 'PeriodicCatmullRom0', count: 1 })
+    expect(env.code).toBe('invalid_value')
+  })
+})
+
 describe('type families — refusals', () => {
   test('bare family name: invalid_value, needs a size', async () => {
     const env = await client.callError('add_instance', { program: 'PeriodicCatmullRom', instance_name: unique('x') })
@@ -191,7 +215,7 @@ describe('type families — refusals', () => {
     const env = await client.callError('add_instance', { program: 'PeriodicCatmullRom0', instance_name: unique('x') })
     expect(env.code).toBe('invalid_value')
     expect(env.valid?.kind).toBe('predicate')
-    expect(env.valid?.expected).toEqual({ min: 1, max: 2147483647 })
+    expect(env.valid?.expected).toEqual({ min: 1, max: 1024 })
     expect(env.valid?.got).toBe(0)
   })
 
@@ -201,23 +225,38 @@ describe('type families — refusals', () => {
     expect(env.message).toContain("'PeriodicBSpline12'")
   })
 
-  test('a size on a type that is not a family: invalid_value', async () => {
-    const env = await client.callError('add_instance', { program: 'VCA3', instance_name: unique('x') })
+  test('size past the cap (1025): refused before anything is built', async () => {
+    const env = await client.callError('add_instance', { program: 'PeriodicBSpline1025', instance_name: unique('x') })
     expect(env.code).toBe('invalid_value')
-    expect(env.message).toContain("'VCA' is not a type family")
+    expect(env.valid?.got).toBe(1025)
+    const programs = (await client.callOk('list_programs')) as Array<Record<string, any>>
+    expect(programs.some((p) => p.program_name === 'PeriodicBSpline1025')).toBe(false)
   })
 
-  test('unknown family: unknown_program, and the message lists the families', async () => {
+  test('a size on a type that is not a family: unknown_program, says why, suggests the type', async () => {
+    const env = await client.callError('add_instance', { program: 'VCA3', instance_name: unique('x') })
+    expect(env.code).toBe('unknown_program')
+    expect(env.message).toContain("'VCA' is not a type family")
+    expect(env.suggestion).toBe('VCA')
+  })
+
+  test('a misspelt member is suggested at the size written', async () => {
+    const env = await client.callError('add_instance', { program: 'PeriodicCatmulRom12', instance_name: unique('x') })
+    expect(env.code).toBe('unknown_program')
+    expect(env.suggestion).toBe('PeriodicCatmullRom12')
+  })
+
+  test('an unregistered name: unknown_program, and the message lists the families', async () => {
     const env = await client.callError('add_instance', { program: 'PeriodicHermite12', instance_name: unique('x') })
     expect(env.code).toBe('unknown_program')
-    expect(env.message).toContain('PeriodicCatmullRom (1 to 2147483647 control points)')
+    expect(env.message).toContain('PeriodicCatmullRom (1 to 1024 control points)')
   })
 
   test('load of a refused spelling: internal_error with the reason', async () => {
     const env = await client.callError('load', { program: patch([
       { op: 'instanceDecl', name: 'x', program: 'PeriodicCatmullRom2147483648' }]) })
     expect(env.code).toBe('internal_error')
-    expect(env.message).toContain('size 2147483648 is out of range')
+    expect(env.message).toContain("'PeriodicCatmullRom2147483648': the size is out of range")
   })
 
   test('export_program may not take a family name or member spelling', async () => {

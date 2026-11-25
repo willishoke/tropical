@@ -129,7 +129,8 @@ specialization cache) are gone; every registered program is concrete.
   member by `<family><size>` (`PeriodicCatmullRom12`: ports `phase`,
   `c0 … c11`). The member is assembled once per session and is then an
   ordinary registered type (`design/type-family.md`). A family spelling that
-  names no member is refused with `invalid_value` (`ERRORS.md`). Validates
+  names no member (no size, a size out of range, leading zeros) is refused
+  with `invalid_value` before anything is built (`ERRORS.md`). Validates
   uniqueness. Since no program declares `type_params`, passing
   `type_args` is always rejected with `invalid_type_args`.
 - `remove_instance` — delete an instance, cascade-clean wiring that
@@ -169,9 +170,9 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
   reusable `ProgramType`. Current wiring becomes input defaults.
   Optionally removes the exported instances. It builds the resolved IR
   **directly** off the session mirror — there is no JSON round-trip.
-  This is the only tool that registers a new program type at runtime
-  (wire lifting registers anonymous `__wire_N` programs internally, and
-  naming a type-family member registers that member). A family's name and
+  It registers a new, named program type at runtime; so does naming a
+  type-family member (which registers that member), and wire lifting
+  registers anonymous `__wire_N` programs internally. A family's name and
   every `<family><size>` spelling are reserved: exporting under one is
   refused with `invalid_value`.
 - `load` — `tropical_program_2` JSON (path or inline). Stops audio,
