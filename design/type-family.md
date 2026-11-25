@@ -51,6 +51,10 @@ it or derive the name from it. With the size in the name:
   members, with no aliases. They are still registered at boot, by the
   family's own builder (`family.build "…8" 8`), so patches, goldens and the
   boot catalog do not move.
+- `SplineOscCatmullRom<K>` and `SplineOscBSpline<K>` (`design/spline-osc.md`,
+  sizes 1 to 64) are families too. A member derives its partial count from
+  `K` and the registered error budget, so the size fixes more than the port
+  list. No member is registered at boot.
 
 `type_args` is not used. It is the spelling of the retired generics and stays
 refused, so there is one way to name a member.
