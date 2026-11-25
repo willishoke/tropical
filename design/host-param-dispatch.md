@@ -168,6 +168,62 @@ If the `#phase` companion is absent from the loaded plan, degrade to `raw`.
 A hot-swap does not carry `#phase`: the fresh plan seeds it with 0, so an
 oscillator retuned by anchored writes jumps at the next structural edit.
 
+### Patch-bay params
+
+A `tropical_program_2` patch (the JSON front door, `save`, every MCP
+session) gets `anchor` from two declarations, one by the type and one by the
+patch, and the session compile checks one against the other.
+
+The registered type declares, on its frequency input, which sibling inputs
+are that phasor's phase offset and clock (`InputDecl.anchor?`, a
+`PortAnchor`; the type's catalog entry carries it as the input's `anchor`). The stdlib
+`ClockPhasor` declares `freq: { phase: "offset", clock: "clk" }`: its phase
+is `Φ(trunc(freq·2³²/SR), clk) + trunc(offset·2³²)`, the formula above.
+
+The patch opts a param in with `"discipline": "anchor"` on its `paramDecl`
+(absent or `"raw"` is raw; `save` writes it back):
+
+```json
+{ "op": "paramDecl", "name": "pitch", "value": 220, "discipline": "anchor" },
+{ "op": "instanceDecl", "name": "ph", "program": "ClockPhasor",
+  "inputs": { "clk": { "op": "clock" }, "freq": { "op": "param", "name": "pitch" } } }
+```
+
+The compile (`Session.anchorParams`) then adds a companion param
+`pitch#phase` (seeded 0), wires it into `ph.offset`, and lists
+`{ name: "pitch", discipline: "anchor", companions: ["pitch#phase"] }` in
+the plan. It refuses, naming the wire, a declaration it cannot honour:
+
+- an integer param (`int32`/`int`): written raw, as `portError?` says;
+- a wire that reads the param through an expression, or bare into an input
+  with no `anchor`: the host computes the phase step from the param's own
+  value, so it must be the consumer's frequency exactly;
+- a consumer whose clock input is not wired to `{op:'clock'}` (τ). `anchor`
+  is the sample-clock identity `C = now·2¹⁶`; a `ClockPhasor` reading a
+  scrubbed or warped clock steps by a different amount. Such a phasor's
+  pitch param is written raw (no declaration), or the patch is refused if it
+  declares `anchor`. `anchor_clock`, the master-clock form, needs a velocity
+  param with an origin companion, which patch-bay programs do not declare;
+  it is not declarable on a `paramDecl` today, nor are `glide` and
+  `velocity`;
+- a consumer whose phase input is wired (other than to its declared
+  default), or claimed by another anchored param: the companion takes it;
+- a param named like the companion (`pitch#phase`).
+
+A param fanned out bare to several anchored inputs, all on τ, shares one
+companion: the bump depends on the param's value and the clock only. A param
+declared `anchor` but wired nowhere has no slot and nothing to dispatch. The
+companion is not a session param: `list_params` and `save` do not show it,
+and `set_param` refuses it by name.
+
+The playground does not read this declaration yet: its port table
+(`Playground/VocabularyMetadata.lean`, `discipline := .anchor`) and its voice
+table (`Playground/Vocabulary.lean`, `phasePort`) say the same thing for its
+own node kinds, and its generators read the master clock (`anchor_clock`).
+`export_program` carries `anchor?` onto an exported input when the inner
+phasor's phase and clock inputs are exposed too (under their exposed names);
+otherwise the exported frequency input declares no anchor.
+
 ## `velocity` — master-clock re-base
 
 The master clock is the Q48.16 value

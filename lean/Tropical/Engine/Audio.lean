@@ -123,6 +123,11 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
   if let some e := (st.paramFormat name).rangeError? valueJ.compress value then
     throwBare .invalidValue s!"set_param: param '{name}': {e}"
       (param := some "value") (value := some valueJ)
+  -- An anchored param's phase companion is the discipline's, not the
+  -- patch's: the host moves it on each write of the param.
+  if let some (p, _) := st.paramDisciplines.find? (fun (p, _) => Tropical.Session.anchorCompanion p == name) then
+    throwBare .invalidValue s!"set_param: '{name}' is the phase companion of the anchored param '{p}'; write '{p}' and the host moves it"
+      (param := some "name") (value := some (Json.str name))
   let write ← match ← (env.host.setParam name value).toBaseIO with
     | .ok (some w) => pure w
     | .ok none =>

@@ -317,6 +317,89 @@ private def checkWireFormats (st : SessionSt) : SessionM Unit := do
       if src.kind == dst.kind && src.kind.isInteger && src.fracBits != dst.fracBits then
         internalError s!"Format mismatch: input '{w.instName}.{w.portName}' is {dst.describe} but {what} is {src.describe}; a value crosses a port bare only at its own format — convert it with arithmetic in the wire (a shift by the difference in fraction bits)"
 
+-- ── Anchored params (design/host-param-dispatch.md, "Patch-bay params") ─────
+
+/-- The companion slot of an anchored param: the phase offset the host moves
+    when it retunes the param. -/
+def anchorCompanion (name : String) : String := s!"{name}#phase"
+
+/-- What the compile adds for the session's anchored params: each companion
+    param (seeded 0) wired into the phase input its consumers declare, and the
+    plan's discipline table. Session state is untouched — the companions are
+    the discipline's implementation, not the patch, so `save` writes only the
+    `paramDecl`'s `discipline`. -/
+structure AnchorLowering where
+  wires : Array Wire
+  params : Array (String × Json)
+  disciplines : Array Tropical.Plan.ParamDiscipline
+
+/-- Check every param the session declares `anchor` against its wiring, and
+    lower it. The host's bump `Φ(inc₀, C) − Φ(inc₁, C)` is computed from the
+    param's own value and the sample clock `C = now·2¹⁶`, so it is the
+    consumer's phase step only when (refused otherwise, naming the wire):
+
+    - the param is a float (an integer param is written raw);
+    - every wire that reads it reads it bare, into an input whose type
+      declares a phase anchor (`InputDecl.anchor?`) — through arithmetic the
+      host cannot know the consumer's increment, and an input with no anchor
+      has no phase to move;
+    - each consumer's clock input is wired to τ itself (`{op:'clock'}`): the
+      `anchor` identity is the sample clock's, and a phasor reading a warped
+      or scrubbed clock would step by a different amount;
+    - each consumer's phase input is free (unwired, or on its declared
+      default), since the companion takes it.
+
+    One companion serves every consumer: they share the clock, so the bump
+    depends on the param's value alone. A param declared `anchor` but wired
+    nowhere has no slot and nothing to anchor. -/
+def anchorParams (st : SessionSt) : Except String AnchorLowering := do
+  let mut wires := st.wires
+  let mut params := st.params
+  let mut disciplines : Array Tropical.Plan.ParamDiscipline := #[]
+  let mut claimed : Array (String × String) := #[]
+  for (p, disc) in st.paramDisciplines do
+    unless disc == "anchor" do continue
+    let what := s!"param '{p}' is declared anchor"
+    let f := st.paramFormat p
+    unless f.isDefault do
+      throw s!"{what} but is {f.describe}; a phase anchor is a float frequency, and an integer param is written raw"
+    let companion := anchorCompanion p
+    if st.params.any (·.1 == companion) then
+      throw s!"{what}, and its phase companion '{companion}' is also declared as a param; rename that param"
+    let consumers := st.wires.filter (·.expr == .param p)
+    if let some w := st.wires.find? fun w => w.expr != .param p && w.expr.paramNames.contains p then
+      throw s!"{what} but input '{w.instName}.{w.portName}' reads it through an expression; an anchored param is wired straight into the frequency inputs it retunes (the host computes the phase step from the param's own value)"
+    if consumers.isEmpty then continue
+    for w in consumers do
+      let some info := st.findInstance? w.instName
+        | throw s!"{what} but its wire into '{w.instName}' names no instance"
+      let some prog := info.resolvedIdx.bind st.arena.program?
+        | throw s!"{what}: instance '{w.instName}' has no resolved type (engine bug)"
+      let some decl := prog.inputs.find? (·.name == w.portName)
+        | throw s!"{what} but '{w.instName}' ({prog.name}) has no input '{w.portName}'"
+      let some a := decl.anchor?
+        | throw s!"{what} but input '{w.instName}.{w.portName}' ({prog.name}) declares no phase anchor; only a phasor frequency input that declares one (ClockPhasor.freq) can be anchored"
+      match st.findWire? w.instName a.clock with
+      | some cw =>
+        unless cw.expr == .clock do
+          throw s!"{what} but '{w.instName}.{w.portName}' reads the clock '{w.instName}.{a.clock}', which is wired from '{cw.expr.opName}'; the anchor discipline holds on the sample clock only — wire '{w.instName}.{a.clock}' to \{op:'clock'}, or write '{p}' raw"
+      | none =>
+        throw s!"{what} but '{w.instName}.{a.clock}' (the clock '{w.instName}.{w.portName}' reads) is unwired; the anchor discipline holds on the sample clock only — wire it to \{op:'clock'}"
+      let portDefault := (info.progMeta.inputs.find? (·.name == a.phase)).bind (·.default)
+      if let some pw := st.findWire? w.instName a.phase then
+        unless some pw.expr == portDefault do
+          throw s!"{what} but the phase input '{w.instName}.{a.phase}' of '{w.instName}.{w.portName}' is wired from '{pw.expr.opName}'; an anchored frequency owns its phase input (its companion '{companion}' is wired there)"
+      if let some (_, other) := claimed.find? (·.1 == s!"{w.instName}.{a.phase}") then
+        throw s!"{what} but the phase input '{w.instName}.{a.phase}' is already the companion of anchored param '{other}'"
+      claimed := claimed.push (s!"{w.instName}.{a.phase}", p)
+      wires := match wires.findIdx? (fun x => x.instName == w.instName && x.portName == a.phase) with
+        | some i => wires.set! i { instName := w.instName, portName := a.phase, expr := .param companion }
+        | none => wires.push { instName := w.instName, portName := a.phase, expr := .param companion }
+    params := params.push (companion, toJson (0 : Nat))
+    disciplines := disciplines.push
+      { name := p, discipline := "anchor", companions := #[companion] }
+  return { wires, params, disciplines }
+
 /-- Build the `SessionInput` from the engine's current session mirror: allocate,
     assert acyclic, rewrite each instance's `programName` to its stored program's
     name, build the first-instance-wins name→idx resolver, construct the resolved
@@ -332,10 +415,15 @@ def buildSessionInput (ctx : String)
     (mode : Tropical.Plan.CompilationMode := .fused) :
     SessionM Tropical.Compile.SessionInput := do
   let st ← get
-  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let wiresPost := st.wires
-  Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
+  Tropical.Lowering.assertSessionAcyclic st.instances st.wires
   checkWireFormats st
+  -- Anchored params: checked against their wiring, then each companion is
+  -- wired into its consumers' phase inputs (`anchorParams`).
+  let anchored ← match anchorParams st with
+    | .error e => internalError s!"{ctx}: {e}"
+    | .ok r => pure r
+  let wiresPost := anchored.wires
+  let alloc := Tropical.Lowering.allocate (anchored.params.map (·.1)) st.instances
 
   -- Preserved historical parity: the retired parsed-session path emitted the
   -- stored program name here.
@@ -387,8 +475,9 @@ def buildSessionInput (ctx : String)
     instances := coreInstances
     wiresPost
     graphOutputs := st.graphOutputs
-    params := st.params
+    params := anchored.params
     paramTypes := st.paramTypes
+    paramDisciplines := anchored.disciplines
     alloc
     root := rootCore
     arena := rootArena

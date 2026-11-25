@@ -131,6 +131,11 @@ structure SessionSt where
       `params` is the real value; the compile encodes it to the word
       (`Kernel.encodeWord`). -/
   paramTypes   : Array (String × Tropical.PortFormat) := #[]
+  /-- The write discipline each param declares (`paramDecl`'s `discipline`);
+      a param not listed is `raw`. Only `anchor` is declarable on a patch-bay
+      param; the compile checks it against the ports the param is wired into
+      (`Session.anchorParams`). -/
+  paramDisciplines : Array (String × String) := #[]
   nameCounters : Std.HashMap String Nat := {}
   /-- The typed store: every registered program's post-strata resolved IR,
       left where strata appended it (`adoptResolved`). The arena only ever
@@ -191,6 +196,10 @@ def nextName (st : SessionSt) (prefix' : String) : SessionSt × String :=
 /-- The declared format of param `name` (`float` when undeclared). -/
 def paramFormat (st : SessionSt) (name : String) : Tropical.PortFormat :=
   ((st.paramTypes.find? (·.1 == name)).map (·.2)).getD {}
+
+/-- The declared write discipline of param `name` (`raw` when undeclared). -/
+def paramDiscipline (st : SessionSt) (name : String) : String :=
+  ((st.paramDisciplines.find? (·.1 == name)).map (·.2)).getD "raw"
 
 def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
   match st.params.findIdx? (·.1 == name) with

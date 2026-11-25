@@ -743,8 +743,8 @@ semantics reads a format.
 - *Disciplines.* Only `raw` applies to an integer param. `glide`, `anchor`
   and `velocity` read the param's real value and keep f64 companions
   (`host-param-dispatch.md`). Nothing attaches one to a typed port today
-  (patch-bay params carry no discipline, and playground knobs are `float`),
-  and `portError?` refuses one whose base or companion is a typed slot
+  (a patch-bay param declared `anchor` must be a float, refused at compile
+  otherwise, and playground knobs are `float`), and `portError?` refuses one whose base or companion is a typed slot
   rather than dropping it. The C++ dispatcher and the web `ParamWriter`
   refuse it too, over every slot the discipline touches: the base, the
   companions the manifest lists, and those it implies by name. An integer `anchor` is the natural next form: with the

@@ -36,6 +36,7 @@ import Tropical.Tropicaltest.FractionalTau
 import Tropical.Tropicaltest.LongHorizon
 import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.AnchorContinuity
+import Tropical.Tropicaltest.PatchAnchor
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
@@ -97,7 +98,9 @@ def main (args : List String) : IO UInt32 := do
     match Tropical.Playground.stdlib with
     | .error e => IO.println s!"  FAIL  anchor-continuity  stdlib: {firstLine e}"; return 1
     | .ok (arena, resolved) =>
-      return if ← Tropical.Tropicaltest.AnchorContinuity.runAnchorContinuity arena resolved then 0 else 1
+      let a ← Tropical.Tropicaltest.AnchorContinuity.runAnchorContinuity arena resolved
+      let b ← Tropical.Tropicaltest.PatchAnchor.runPatchAnchor
+      return if a && b then 0 else 1
   if args.contains "--reexport-only" then
     return if ← Tropical.Tropicaltest.ReexportFailure.runReexportFailure then 0 else 1
   if args.contains "--routed-only" then
@@ -805,6 +808,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← Tropical.Tropicaltest.AnchorContinuity.runAnchorContinuity arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.PatchAnchor.runPatchAnchor) then
       failed := failed + 1
     total := total + 1
     if !(← runGaugeStage arena resolved) then

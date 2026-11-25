@@ -120,8 +120,12 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
     let interval := match d.interval? with
       | some i => [("interval", Json.str i.label)]
       | none => []
+    let anchor := match d.anchor? with
+      | some a => [("anchor", Json.mkObj [("phase", Json.str a.phase),
+          ("clock", Json.str a.clock)])]
+      | none => []
     .ok <| Json.mkObj ([("name", Json.str d.name), ("type", t),
-      ("type_obj", tObj), ("default", dflt)] ++ interval)
+      ("type_obj", tObj), ("default", dflt)] ++ interval ++ anchor)
   let outputs := prog.outputs.map fun d =>
     let (t, tObj) := match d.type? with
       | some pt => (Json.str (portTypeStr pt), portTypeObjF d.fracBits pt)

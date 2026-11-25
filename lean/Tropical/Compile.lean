@@ -581,6 +581,9 @@ structure SessionInput where
   params : Array (String × Json)
   /-- Typed params' formats (`SessionSt.paramTypes`); unlisted is `float`. -/
   paramTypes : Array (String × Tropical.PortFormat) := #[]
+  /-- The plan's write-discipline table (`Session.anchorParams`); empty
+      means every param is written raw. -/
+  paramDisciplines : Array Tropical.Plan.ParamDiscipline := #[]
   /-- Allocation (params, top-level outputs). -/
   alloc : Tropical.Lowering.Alloc
   /-- The elaborated session root, downcast to Core. -/
@@ -777,7 +780,9 @@ def compileSessionStaged (input : SessionInput) :
     slotCount
     slotNames
     slotDefaults
-    slotTypes := paramSlotTypes ++ outSlotTypes }
+    slotTypes := paramSlotTypes ++ outSlotTypes
+    paramDisciplines := input.paramDisciplines }
+  if let some e := plan.disciplineError? then throw s!"compileSession: {e}"
   -- One output buffer has one element type, an integer channel one source,
   -- an integer param only `raw` (`FlatPlan.portError?`): refused here, where
   -- the patch is, not first at an emitter.

@@ -104,9 +104,13 @@ tools read and mutate:
   relowering).
 - `paramTypes` — the declared format of each typed param (`int32` or `int`
   with `frac_bits`); a param not listed is `float`.
+- `paramDisciplines` — the params a patch declares `"discipline": "anchor"`
+  (a phasor frequency retuned without a phase jump); a param not listed is
+  `raw`. The compile checks each against the input it is wired into and adds
+  its `#phase` companion (`design/host-param-dispatch.md`, "Patch-bay params").
 
-The `raw`, `glide`, `anchor`, `anchor_clock`, or `velocity` dispatch metadata is not session
-state: the loaded plan carries it (`param_disciplines`).
+What a host dispatches is the loaded plan's `param_disciplines` table; the
+companion slots it moves are not session params.
 
 The engine environment also owns the native runtime handle and a DAC created
 lazily on first `start_audio`.

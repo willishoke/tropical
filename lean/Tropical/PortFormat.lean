@@ -171,4 +171,17 @@ def label (i : PortInterval) : String :=
   s!"{if i.loOpen then "(" else "["}{i.lo}, {i.hi}{if i.hiOpen then ")" else "]"}"
 
 end PortInterval
+
+/-- A phasor-frequency input's anchoring, declared by the type on the input
+    (`design/host-param-dispatch.md`, "Patch-bay params"). The type promises
+    that its phase is `Φ(inc, C) + off` with `inc = trunc(f·2³²/SR)` read from
+    this input, `off = trunc(φ·2³²)` from the input named `phase`, and `C` the
+    Q48.16 clock read from the input named `clock`, so a host can retune the
+    frequency without a phase jump by moving `phase` (the `anchor` discipline).
+    The session checks a param's declared discipline against it at compile. -/
+structure PortAnchor where
+  phase : String
+  clock : String
+deriving Repr, Inhabited, BEq
+
 end Tropical
