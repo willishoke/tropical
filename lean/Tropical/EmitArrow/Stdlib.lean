@@ -165,7 +165,11 @@ def buildClockPhasor (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
     let one ← lit 1
     let body ← clampE phase zero one
     let clkInput := clockInDecl "clk" zero
-    let freqInput ← freqDecl "freq" 440
+    -- The phase is `Φ(inc(freq), clk) + trunc(offset·2³²)`: a param wired
+    -- to `freq` can be written under the `anchor` discipline, `offset`
+    -- carrying its companion (`PortAnchor`).
+    let freqInput := { (← freqDecl "freq" 440) with
+      anchor? := some { phase := "offset", clock := "clk" } }
     let offsetInput ← unipolarDecl "offset"
     pure {
       inputs := #[clkInput, freqInput, offsetInput]

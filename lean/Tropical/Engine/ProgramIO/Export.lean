@@ -40,9 +40,13 @@ def saveDocument (st : SessionSt) : Json := Id.run do
       if f.isDefault then []
       else [("type", Json.str f.kind.wire)] ++
         (if f.fracBits == 0 then [] else [("frac_bits", Lean.toJson f.fracBits)])
+    let disciplineFields : List (String × Json) :=
+      match st.paramDiscipline name with
+      | .raw => []
+      | d => [("discipline", Json.str d.wire)]
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)] ++ typeFields ++
-      [("value", value)]
+      disciplineFields ++ [("value", value)]
   for (name, info) in st.instances do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
@@ -402,8 +406,14 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | .ok (eid, exprs') =>
         exprs := exprs'
         default? := some eid
+    -- A phasor frequency stays anchorable when its phase and clock inputs
+    -- are exposed too: the exported input names them by their exposed names.
+    let exposedAs := fun (port : String) =>
+      (exposed.find? fun e => e.instanceName == input.instanceName && e.portName == port).map (·.name)
+    let anchor? : Option Tropical.PortAnchor := (tgt.inputs[pos]!.anchor?).bind fun a => do
+      pure { phase := ← exposedAs a.phase, clock := ← exposedAs a.clock }
     inputDecls := inputDecls.push
-      { name := input.name, type?, default?, fracBits, interval? := tgt.inputs[pos]!.interval? }
+      { name := input.name, type?, default?, fracBits, interval? := tgt.inputs[pos]!.interval?, anchor? }
   let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
   let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
   for k in [0:outputPairs.size] do

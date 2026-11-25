@@ -222,6 +222,23 @@ private def paramFormatOf (context name : String) (d : JsonV) :
       internalError s!"{context}: paramDecl '{name}': {e}"
   pure f
 
+/-- A `paramDecl`'s declared write discipline: `discipline`, absent or
+    `"raw"` (written as is) or `"anchor"` (a phasor frequency retuned without
+    a phase jump; `design/host-param-dispatch.md`). Which ports make an
+    `anchor` valid is the compile's check, where the wiring is known. The
+    other disciplines a host knows are not declarable here: `glide` needs a
+    smoothing expression in the kernel, `anchor_clock` and `velocity` a
+    master-clock transport that patch-bay programs do not have. -/
+private def paramDisciplineOf (context name : String) (d : JsonV) :
+    SessionM (Option ParamWrite) := do
+  match d.getField? "discipline" with
+  | none | some (.str "raw") => pure none
+  | some (.str "anchor") => pure (some .anchor)
+  | some (.str s) =>
+    internalError s!"{context}: paramDecl '{name}': discipline '{s}' is not declarable on a patch-bay param (raw or anchor)"
+  | some _ =>
+    internalError s!"{context}: paramDecl '{name}': discipline must be a string (raw or anchor)"
+
 /-- Walk a normalized v2 node into the session (additive; `loadPatch`
     clears first). Canonical order is body parameter declarations,
     instances (+ wires), defaults, then body graph outputs. -/
@@ -261,15 +278,27 @@ def ingestProgram (node : JsonV) (merge : Bool) : SessionM Unit := do
         s!"{context}: programDecl '{subName}': program definitions over the wire are retired — " ++
         "programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types."
 
-  -- Params before instances (instances may reference them). Idempotent
-  -- per name. A typed param records its format beside its value.
+  -- Params before instances (instances may reference them). A typed param
+  -- records its format beside its value, an anchored one its discipline.
+  -- A name declared twice keeps its first declaration (as its value does);
+  -- two that disagree on the discipline are refused.
+  let mut seen : Array (String × Option ParamWrite) := #[]
   for d in jvBodyEntries node "decls" do
     if jvOp? d == some "paramDecl" then
       if let some name := jvStr? d "name" then
         let f ← paramFormatOf context name d
+        let disc? ← paramDisciplineOf context name d
+        if let some (_, first) := seen.find? (·.1 == name) then
+          if first != disc? then
+            internalError s!"{context}: paramDecl '{name}' is declared twice with different disciplines ({(first.getD .raw).wire}, then {(disc?.getD .raw).wire}); declare each param once"
+          continue
+        seen := seen.push (name, disc?)
         let st ← get
         if !st.params.any (·.1 == name) && !f.isDefault then
           modify fun st => { st with paramTypes := st.paramTypes.push (name, f) }
+        if let some disc := disc? then
+          if !st.params.any (·.1 == name) then
+            modify fun st => { st with paramDisciplines := st.paramDisciplines.push (name, disc) }
   for (name, value) in paramSpecs do
     let st ← get
     if !st.params.any (·.1 == name) then
@@ -357,7 +386,8 @@ def normalizePatch (text : String) : SessionM JsonV := do
 def loadPatch (node : JsonV) : SessionM Unit := do
   modify fun st =>
     { st with instances := #[], wires := #[], graphOutputs := #[],
-              params := #[], paramTypes := #[], nameCounters := {} }
+              params := #[], paramTypes := #[], paramDisciplines := #[],
+              nameCounters := {} }
   ingestProgram node (merge := false)
 
 /-- `merge`: fold the document's graph into the session's. -/

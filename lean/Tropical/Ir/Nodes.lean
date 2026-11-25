@@ -461,13 +461,19 @@ theorem ExprArena.forall_children_lt {a : ExprArena} (hw : a.wf = true)
 
     `interval?` is the real interval the input is defined on, when it is
     narrower than its type (`Tropical.PortInterval`). It is port metadata
-    too: the session refuses a bare literal outside it. -/
+    too: the session refuses a bare literal outside it.
+
+    `anchor?` declares a phasor-frequency input whose write can be anchored
+    (`Tropical.PortAnchor`): which sibling inputs carry its phase offset and
+    its clock. Port metadata as well; the session reads it when a param
+    declared `anchor` is wired into the input. -/
 structure InputDecl where
   name : String
   type? : Option PortType := none
   default? : Option ExprId := none
   fracBits : Nat := 0
   interval? : Option Tropical.PortInterval := none
+  anchor? : Option Tropical.PortAnchor := none
 deriving Repr, Inhabited
 
 structure OutputDecl where

@@ -138,6 +138,49 @@ describe('ParamWriter', () => {
     expect(() => new ParamWriter(withDiscipline('anchor', undefined))).not.toThrow()
   })
 
+  test('a patch-bay program: an anchored re-pitch of a spline voice is continuous, a raw one jumps', async () => {
+    // design/host-param-dispatch.md, "Patch-bay params": `pitch` declares
+    // `anchor` on its paramDecl and is wired into ClockPhasor.freq, whose
+    // `clk` is τ. The compile adds `pitch#phase` on the phasor's `offset`.
+    // The sample at the write frame is a function of the phase alone: an
+    // anchored write leaves it unchanged, a raw one moves it.
+    const patch = (discipline?: string) => ({
+      schema: 'tropical_program_2', name: 'spline_voice',
+      body: { op: 'block', decls: [
+        { op: 'paramDecl', name: 'pitch', value: 220, ...(discipline ? { discipline } : {}) },
+        { op: 'instanceDecl', name: 'ph', program: 'ClockPhasor',
+          inputs: { clk: { op: 'clock' }, freq: { op: 'param', name: 'pitch' } } },
+        { op: 'instanceDecl', name: 'wave', program: 'PeriodicCatmullRom8', inputs: {
+          phase: { op: 'toInt', args: [{ op: 'mul', args: [{ op: 'ref', instance: 'ph', output: 'phase' }, 4294967296] }] },
+          c0: 0, c1: 0.5, c2: 0.6, c3: 0.2, c4: -0.1, c5: -0.5, c6: -0.4, c7: -0.2 } },
+      ], assigns: [{ op: 'outputAssign', name: 'dac.out', expr: { op: 'ref', instance: 'wave', output: 'out' } }] },
+    })
+    const { k, manifest } = await load(patch('anchor'))
+    const port = manifest.inputs.find((p) => p.name === 'param:pitch') as { discipline?: { discipline: string; companions?: string[] } }
+    expect(port.discipline?.discipline).toBe('anchor')
+    expect(port.discipline?.companions).toEqual(['pitch#phase'])
+    const writer = new ParamWriter(manifest)
+    expect(writer.check('param:pitch')).toBeNull()
+    const names = kernelParams(manifest).map((p) => p.name)
+    const at = (frame: number) => { k.seek(frame); return k.render(2) }
+    // ~265 days in, then a negative frequency
+    for (const [now, f1] of [[2 ** 40 + 7, 523.25], [2 ** 40 + 99_991, -110]] as const) {
+      const before = at(now)
+      writer.write(k, 'param:pitch', f1, now)
+      const after = at(now)
+      expect(Object.is(after[0], before[0])).toBe(true)
+      expect(after[1]).not.toBe(before[1])
+    }
+    // The same write raw (the companion untouched) jumps.
+    const before = at(2 ** 40 + 7)
+    k.setParam(names.indexOf('param:pitch'), 330)
+    const after = at(2 ** 40 + 7)
+    expect(after[0]).not.toBe(before[0])
+    // Undeclared, the param is raw and has no companion.
+    const plain = await load(patch())
+    expect(kernelParams(plain.manifest).map((p) => p.name)).not.toContain('param:pitch#phase')
+  })
+
   test('raw: the write is the value; companions and unimplemented disciplines are refused', async () => {
     const { k, manifest } = await load({ ...sineFamily, nodes: [...sineFamily.nodes,
       { id: 'g', kind: 'knob', params: { value: 0.5 } },

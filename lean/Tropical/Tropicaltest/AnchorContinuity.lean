@@ -5,6 +5,7 @@ import Tropical.PlanDecode
 import Tropical.Playground
 import Tropical.Tropicaltest.Gates
 import Tropical.Tropicaltest.Reversibility
+import Tropical.Session.Compile
 
 /-!
 # Anchor continuity: live frequency writes in the rendered audio
@@ -93,7 +94,7 @@ private def incOf (freq rate : Float) : Int := truncF ((freq * 4294967296.0) / r
 
 /-- The `#phase` value that keeps the phase continuous across `f₀ → f₁` at
     sample `now` on the clock `(velocity, tauBase)`. -/
-private def anchoredPhase (f0 f1 phi velocity tauBase rate : Float) (now : Nat) : Float :=
+def anchoredPhase (f0 f1 phi velocity tauBase rate : Float) (now : Nat) : Float :=
   let c := masterClockAt velocity tauBase rate now
   let q := (truncF (phi * 4294967296.0) + phaseQ (incOf f0 rate) c
     - phaseQ (incOf f1 rate) c) % twoPow32
@@ -129,12 +130,26 @@ structure Case where
   /-- An expected failure: the reason, reported as XFAIL while it fails at or
       after the structural edit (`reload`) and nowhere before it. -/
   xfail : Option String := none
+  /-- `graph` is a `tropical_program_2` patch compiled through the session
+      (`Session.compilePatch`), not a playground graph. With no master-clock
+      slots the model's clock is the sample clock `now·2¹⁶`. -/
+  patchBay : Bool := false
+
+/-- A patch-bay document through the whole front door over a booted registry. -/
+def compilePatchBay (text : String) :
+    Except String (Plan.FlatPlan × Array (Array (Option Ir.Stage))) := do
+  let st ← Session.bootRegistry.mapError (·.toJson.compress)
+  match (Session.compilePatch text).runOn st with
+  | (.ok r, _) => .ok r
+  | (.error f, _) => .error f.toJson.compress
 
 private def compile (arena : Ir.Arena) (resolved : Array (String × Ir.ProgramIdx))
-    (graph : String) (anchored : Bool) :
+    (graph : String) (anchored : Bool) (patchBay : Bool := false) :
     Except String Playground.CompiledPatch := do
-  let j ← Lean.Json.parse graph
-  let c ← Playground.compilePlanPure arena resolved j
+  let c ← if patchBay then do
+      let (plan, stageBlocks) ← compilePatchBay graph
+      pure { plan, taps := #[], stageBlocks : Playground.CompiledPatch }
+    else Playground.compilePlanPure arena resolved (← Lean.Json.parse graph)
   if anchored then pure c
   else pure { c with plan := { c.plan with paramDisciplines := #[] } }
 
@@ -180,7 +195,7 @@ private structure Outcome where
 /-- Run one case. -/
 private def runCase (arena : Ir.Arena) (resolved : Array (String × Ir.ProgramIdx))
     (c : Case) : IO (Except String Outcome) := do
-  let compiled ← match compile arena resolved c.graph c.anchored with
+  let compiled ← match compile arena resolved c.graph c.anchored c.patchBay with
     | .error e => return .error s!"compile: {firstLine e}"
     | .ok p => pure p
   let live ← Ffi.Runtime.new c.frames.toUInt32
@@ -282,7 +297,7 @@ private def runCase (arena : Ir.Arena) (resolved : Array (String × Ir.ProgramId
           for t in touched do
             writeSlot ref t (← readSlot live t 0)
     | .reload graph =>
-      let next ← match compile arena resolved graph c.anchored with
+      let next ← match compile arena resolved graph c.anchored c.patchBay with
         | .error e => return .error s!"reload compile: {firstLine e}"
         | .ok p => pure p
       -- The prediction across a structural edit: an oscillator the new graph
@@ -321,6 +336,37 @@ private def sinePlusSawGraph (freq : Float) : String :=
 private def sawGraph : String :=
   "{\"nodes\":[{\"id\":\"osc\",\"kind\":\"saw\",\"params\":{\"freq\":220}}," ++
   "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"osc\"]}}],\"out\":\"out\"}"
+
+/-- A patch-bay spline voice (`design/host-param-dispatch.md`, "Patch-bay
+    params"): a `ClockPhasor` on τ, its `freq` the param `pitch` declared
+    `anchor`, reading a periodic Catmull-Rom spline. The spline's output is a
+    function of the phase word alone, so the kernel continuity check applies. -/
+def splineVoicePatch (discipline : Option String := some "anchor")
+    (fanOut : Bool := false) (keyTrack : Bool := false) : String :=
+  let disc := match discipline with
+    | some d => s!",\"discipline\":\"{d}\""
+    | none => ""
+  let voice := fun (ph wave : String) (coeffs : String) =>
+    "{\"op\":\"instanceDecl\",\"name\":\"" ++ ph ++ "\",\"program\":\"ClockPhasor\",\"inputs\":{" ++
+    "\"clk\":{\"op\":\"clock\"},\"freq\":{\"op\":\"param\",\"name\":\"pitch\"}}}," ++
+    "{\"op\":\"instanceDecl\",\"name\":\"" ++ wave ++ "\",\"program\":\"PeriodicCatmullRom8\",\"inputs\":{" ++
+    "\"phase\":{\"op\":\"toInt\",\"args\":[{\"op\":\"mul\",\"args\":[" ++
+    "{\"op\":\"ref\",\"instance\":\"" ++ ph ++ "\",\"output\":\"phase\"},4294967296]}]}," ++ coeffs ++ "}}"
+  let assign := fun (inst : String) =>
+    "{\"op\":\"outputAssign\",\"name\":\"dac.out\"," ++
+    "\"expr\":{\"op\":\"ref\",\"instance\":\"" ++ inst ++ "\",\"output\":\"out\"}}"
+  -- key tracking: the voice's gain reads the pitch through an expression
+  let vca :=
+    ",{\"op\":\"instanceDecl\",\"name\":\"vca\",\"program\":\"VCA\",\"inputs\":{" ++
+    "\"audio\":{\"op\":\"ref\",\"instance\":\"wave\",\"output\":\"out\"}," ++
+    "\"cv\":{\"op\":\"mul\",\"args\":[{\"op\":\"param\",\"name\":\"pitch\"},0.002]}}}"
+  "{\"schema\":\"tropical_program_2\",\"name\":\"spline_voice\",\"body\":{\"op\":\"block\",\"decls\":[" ++
+  "{\"op\":\"paramDecl\",\"name\":\"pitch\",\"value\":220" ++ disc ++ "}," ++
+  voice "ph" "wave" "\"c0\":0,\"c1\":0.5,\"c2\":0.6,\"c3\":0.2,\"c4\":-0.1,\"c5\":-0.5,\"c6\":-0.4,\"c7\":-0.2" ++
+  (if fanOut then "," ++ voice "ph2" "wave2" "\"c0\":0.3,\"c1\":-0.2,\"c2\":0.1,\"c3\":0.4,\"c4\":0,\"c5\":-0.3,\"c6\":0.2,\"c7\":-0.1" else "") ++
+  (if keyTrack then vca else "") ++ "]," ++
+  "\"assigns\":[" ++ assign (if keyTrack then "vca" else "wave") ++
+  (if fanOut then "," ++ assign "wave2" else "") ++ "]}}"
 
 private def velocity : String := Playground.Metadata.masterVelocityParam
 private def tauBase : String := Playground.Metadata.masterTauBaseParam
@@ -391,6 +437,31 @@ def cases : Array Case := #[
     steps := #[.render 3, .write "osc.freq" 660, .render 2,
       .reload (sinePlusSawGraph 660), .render 3]
     xfail := some "a hot-swap starts every slot from the fresh plan's defaults, so `#phase` returns to 0; carrying it needs a design decision (see the PR)" },
+  -- A patch-bay spline voice: the `anchor` discipline from the paramDecl and
+  -- the ClockPhasor's port declaration, on the sample clock. A retune near
+  -- the start, ~265 days out in τ, and to negative frequencies.
+  { label := "anchor-continuity/patch-bay-spline"
+    graph := splineVoicePatch
+    patchBay := true
+    steps := #[.render 3, .write "pitch" 330, .render 2,
+      .seek 1099511627776, .render 2, .write "pitch" 523.25, .render 2,
+      .write "pitch" (-110), .render 2, .write "pitch" (-1001.7), .render 2,
+      .write "pitch" 97, .render 2] },
+  -- One anchored param fanned out to two phasors: one companion on both
+  -- offsets, so the output (a sum of two splines of the shared phase) is
+  -- continuous only if both read it.
+  { label := "anchor-continuity/patch-bay-fan-out"
+    graph := splineVoicePatch (fanOut := true)
+    patchBay := true
+    steps := #[.render 2, .write "pitch" 330, .render 2,
+      .seek 1099511627776, .render 2, .write "pitch" (-523.25), .render 2] },
+  -- The same patch with the table stripped: the raw write jumps by the
+  -- predicted amount.
+  { label := "anchor-continuity/patch-bay-raw-jumps"
+    graph := splineVoicePatch
+    patchBay := true
+    anchored := false
+    steps := #[.seek 1099511627776, .render 2, .write "pitch" 330, .render 2] },
   -- (e) raw: the same re-pitch with the discipline table stripped. The phase
   -- offset is untouched, so the phase jumps by Φ(inc₁,C) − Φ(inc₀,C).
   { label := "anchor-continuity/raw-jumps"

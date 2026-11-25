@@ -104,9 +104,22 @@ tools read and mutate:
   relowering).
 - `paramTypes` — the declared format of each typed param (`int32` or `int`
   with `frac_bits`); a param not listed is `float`.
+- `paramDisciplines` — the params a patch declares `"discipline": "anchor"`
+  (a phasor frequency retuned without a phase jump); a param not listed is
+  `raw`. An anchored param is read only bare and only by inputs that
+  declare an `anchor` (`ClockPhasor.freq` on `{op:'clock'}`); the compile
+  refuses any other read, so a pitch that must also drive something else
+  needs a second, raw param. One that nothing reads is raw until wired. The
+  compile adds its `#phase` companion (`design/host-param-dispatch.md`,
+  "Patch-bay params").
+  The trade-off: a raw pitch jumps at every retune but never at a hot-swap;
+  an anchored one is continuous at a retune, but its companion reseeds to 0
+  on the next structural edit, so that edit jumps. In a session with frequent
+  structural edits, anchoring trades a click per retune for a click per
+  structural edit after a retune.
 
-The `raw`, `glide`, `anchor`, `anchor_clock`, or `velocity` dispatch metadata is not session
-state: the loaded plan carries it (`param_disciplines`).
+What a host dispatches is the loaded plan's `param_disciplines` table; the
+companion slots it moves are not session params.
 
 The engine environment also owns the native runtime handle and a DAC created
 lazily on first `start_audio`.

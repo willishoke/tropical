@@ -45,6 +45,8 @@ structure AInputDecl where
   fracBits : Nat := 0
   /-- The real interval the input is defined on (`InputDecl.interval?`). -/
   interval? : Option Tropical.PortInterval := none
+  /-- A phasor frequency's anchoring (`InputDecl.anchor?`). -/
+  anchor? : Option Tropical.PortAnchor := none
 deriving Inhabited, Repr
 
 /-- The complete state needed while authoring one program.  Expression IDs are
@@ -275,7 +277,7 @@ def assemble (arena : Arena) (name : String) (outputs : Array OutputDecl)
   let (body, builder) ← build.run initial
   let inputs : Array InputDecl := body.inputs.map fun decl =>
     { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
-      fracBits := decl.fracBits, interval? := decl.interval? }
+      fracBits := decl.fracBits, interval? := decl.interval?, anchor? := decl.anchor? }
   let decls : Array BodyDecl := builder.decls.map fun decl =>
     .inst decl.name decl.programName (decl.inputs.map fun input =>
       { port := input.port, value := input.value })
@@ -299,7 +301,7 @@ def assembleCompleteWithResult {α : Type} (arena : Arena) (name : String)
   let ((body, result), builder) ← build.run initial
   let inputs : Array InputDecl := body.inputs.map fun decl =>
     { name := decl.name, type? := decl.type?, default? := decl.defaultSig,
-      fracBits := decl.fracBits, interval? := decl.interval? }
+      fracBits := decl.fracBits, interval? := decl.interval?, anchor? := decl.anchor? }
   let decls : Array BodyDecl := builder.decls.map fun decl =>
     .inst decl.name decl.programName (decl.inputs.map fun input =>
       { port := input.port, value := input.value })

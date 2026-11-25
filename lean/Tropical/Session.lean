@@ -112,6 +112,16 @@ structure GraphOutput where
   sourceOutput : String
 deriving Inhabited, Repr
 
+/-- The write discipline a patch-bay param declares (`paramDecl`'s
+    `discipline`, `design/host-param-dispatch.md`, "Patch-bay params"). -/
+inductive ParamWrite where
+  | raw
+  | anchor
+deriving BEq, Repr, Inhabited
+
+def ParamWrite.wire : ParamWrite → String
+  | .raw => "raw" | .anchor => "anchor"
+
 structure SessionSt where
   /-- Program registration order (stdlib, then exported session types). -/
   catalogOrder : Array String := #[]
@@ -131,6 +141,11 @@ structure SessionSt where
       `params` is the real value; the compile encodes it to the word
       (`Kernel.encodeWord`). -/
   paramTypes   : Array (String × Tropical.PortFormat) := #[]
+  /-- The write discipline each param declares (`paramDecl`'s `discipline`);
+      a param not listed is `raw`. Only `anchor` is declarable on a patch-bay
+      param; the compile checks it against the ports the param is wired into
+      (`Session.anchorParams`). -/
+  paramDisciplines : Array (String × ParamWrite) := #[]
   nameCounters : Std.HashMap String Nat := {}
   /-- The typed store: every registered program's post-strata resolved IR,
       left where strata appended it (`adoptResolved`). The arena only ever
@@ -191,6 +206,10 @@ def nextName (st : SessionSt) (prefix' : String) : SessionSt × String :=
 /-- The declared format of param `name` (`float` when undeclared). -/
 def paramFormat (st : SessionSt) (name : String) : Tropical.PortFormat :=
   ((st.paramTypes.find? (·.1 == name)).map (·.2)).getD {}
+
+/-- The declared write discipline of param `name` (`raw` when undeclared). -/
+def paramDiscipline (st : SessionSt) (name : String) : ParamWrite :=
+  ((st.paramDisciplines.find? (·.1 == name)).map (·.2)).getD .raw
 
 def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
   match st.params.findIdx? (·.1 == name) with

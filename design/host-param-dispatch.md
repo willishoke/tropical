@@ -151,9 +151,15 @@ against both an exact model of the kernel (lockstep reference) and the
 kernel itself (the first audible sample after the write equals the old
 oscillator's sample at `now`). Known exceptions:
 
-- Metal: slots reach the kernel as f32 and the increment is computed on the
-  f32 value path, so the host's f64 bump is not the kernel's; continuity
-  there is within the f32 tolerance, not bit-exact.
+- Metal (known issue, both `anchor` and `anchor_clock`): slots reach the
+  kernel as f32, and a slot-driven increment `trunc(f·2³²/SR)` is computed
+  on the f32 value path in-kernel (`Ir/EmitMsl.lean`: only constant-folded
+  landings carry exact i64 increments). The kernel's increment then differs
+  from the host's f64 one by some `δ`, and the phase step at a write is
+  about `(δ₁ − δ₀)·n / 2³²` cycles at sample `n`: it grows with τ, and an
+  hour in it can be as large as a raw write's jump. The fix is either an
+  exact increment on Metal (the param landing on the i64 rail) or refusing
+  anchored disciplines on Metal plans; neither is built.
 - `harmonic` partials: partial `k` takes `⌊k·P / 2¹⁶⌋` of the fundamental's
   phase with the clock's fraction bits kept (`EmitArrow.Spectral`), so when
   the clock has fraction bits (velocity ≠ 1 or a fractional origin) partial
@@ -167,6 +173,80 @@ If the `#phase` companion is absent from the loaded plan, degrade to `raw`.
 
 A hot-swap does not carry `#phase`: the fresh plan seeds it with 0, so an
 oscillator retuned by anchored writes jumps at the next structural edit.
+
+### Patch-bay params
+
+A `tropical_program_2` patch (the JSON front door, `save`, every MCP
+session) gets `anchor` from two declarations, one by the type and one by the
+patch, and the session compile checks one against the other.
+
+The registered type declares, on its frequency input, which sibling inputs
+are that phasor's phase offset and clock (`InputDecl.anchor?`, a
+`PortAnchor`; the type's catalog entry carries it as the input's `anchor`). The stdlib
+`ClockPhasor` declares `freq: { phase: "offset", clock: "clk" }`: its phase
+is `Φ(trunc(freq·2³²/SR), clk) + trunc(offset·2³²)`, the formula above.
+
+The patch opts a param in with `"discipline": "anchor"` on its `paramDecl`
+(absent or `"raw"` is raw; `save` writes it back):
+
+```json
+{ "op": "paramDecl", "name": "pitch", "value": 220, "discipline": "anchor" },
+{ "op": "instanceDecl", "name": "ph", "program": "ClockPhasor",
+  "inputs": { "clk": { "op": "clock" }, "freq": { "op": "param", "name": "pitch" } } }
+```
+
+The compile (`Session.anchorParams`) then adds a companion param
+`pitch#phase` (seeded 0), wires it into `ph.offset`, and lists
+`{ name: "pitch", discipline: "anchor", companions: ["pitch#phase"] }` in
+the plan. The rule is strict: an anchored param is read only bare, and only
+by inputs that declare an `anchor`. The check sees one hop from the param and
+cannot look inside a type, so any other reader could integrate the value as a
+frequency (a `FixedSinOsc.freq`, which declares no anchor, or a `ClockPhasor`
+fed through a VCA) and click on every retune unannounced. The compile
+refuses, naming the wire:
+
+- an integer param (`int32`/`int`): written raw, as `portError?` says;
+- a read through an expression, or through a lifted wire (the `__wire_N`
+  program an array literal becomes), into any input;
+- a bare read into an input that declares no `anchor`;
+- a consumer whose clock input is not wired to `{op:'clock'}` (τ).
+  `anchor` is the sample-clock identity `C = now·2¹⁶`; a `ClockPhasor`
+  reading a scrubbed or warped clock steps by a different amount. Such a
+  phasor's pitch param is written raw (no declaration). `anchor_clock`, the
+  master-clock form, needs a velocity param with an origin companion, which
+  patch-bay programs do not declare; it is not declarable on a `paramDecl`
+  today, nor are `glide` and `velocity`;
+- a consumer whose phase input is wired (other than to its declared
+  default), or claimed by another anchored param: the companion takes it;
+- any read of the companion's name (`pitch#phase`), declared or not;
+- the same param declared twice with different disciplines.
+
+A pitch param that must also drive something else (a filter cutoff, a gain)
+needs a second, raw param. A param declared `anchor` that nothing reads gets
+no companion and no table entry: it is raw until wired, so an edit session
+is not refused while its phasor is being rewired.
+
+A sound relaxation would need two things not built: a transitive dependency
+check over the session graph, for reads that reach an anchor-declaring input
+through other instances; and an `anchor?` on every input a type integrates
+as a frequency — at least `FixedSinOsc`, `MorphOsc` and `PluckedMorphOsc`
+(the playground already anchors these through `phasePort`), plus a decision
+on exported types whose phase input is not exposed.
+
+A param fanned out bare to several anchored inputs, all on τ, shares one
+companion: the bump depends on the param's value and the clock only. The
+companion is not a session param: `list_params` and `save` do not show it,
+and `set_param` refuses it by name. Like the playground's, an anchored
+param's companion reseeds to 0 on a hot-swap, so after a retune the next
+structural edit jumps (a raw param does not).
+
+The playground does not read this declaration yet: its port table
+(`Playground/VocabularyMetadata.lean`, `discipline := .anchor`) and its voice
+table (`Playground/Vocabulary.lean`, `phasePort`) say the same thing for its
+own node kinds, and its generators read the master clock (`anchor_clock`).
+`export_program` carries `anchor?` onto an exported input when the inner
+phasor's phase and clock inputs are exposed too (under their exposed names);
+otherwise the exported frequency input declares no anchor.
 
 ## `velocity` — master-clock re-base
 

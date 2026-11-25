@@ -964,3 +964,34 @@ describe('success envelope shape', () => {
     expect((data as unknown[]).length).toBeGreaterThan(0)
   })
 })
+
+// ─── Anchored params (design/host-param-dispatch.md, "Patch-bay params") ─────
+// Last in the file: `load` replaces the session.
+
+describe('anchored param', () => {
+  const patch = (discipline: string) => ({
+    schema: 'tropical_program_2', name: 'anchored',
+    body: { op: 'block', decls: [
+      { op: 'paramDecl', name: 'pitch', value: 220, discipline },
+      { op: 'instanceDecl', name: 'ph', program: 'ClockPhasor',
+        inputs: { clk: { op: 'clock' }, freq: { op: 'param', name: 'pitch' } } },
+    ], assigns: [{ op: 'outputAssign', name: 'dac.out', expr: { op: 'ref', instance: 'ph', output: 'phase' } }] },
+  })
+
+  test('set_param writes the param; its companion is refused by name; save keeps the declaration', async () => {
+    await client.callOk('load', { program: patch('anchor') })
+    await client.callOk('set_param', { name: 'pitch', value: 330 })
+    const env = await client.callError('set_param', { name: 'pitch#phase', value: 0.5 })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('name')
+    expect(env.message).toContain("phase companion of the anchored param 'pitch'")
+    const saved = JSON.stringify(await client.callOk('save'))
+    expect(saved).toContain('"discipline":"anchor"')
+    expect(saved).not.toContain('pitch#phase')
+  })
+
+  test('a discipline a patch cannot declare is refused at load', async () => {
+    const env = await client.callError('load', { program: patch('glide') })
+    expect(env.message).toContain("discipline 'glide' is not declarable on a patch-bay param")
+  })
+})

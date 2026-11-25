@@ -132,19 +132,22 @@ master clock for `anchor_clock`, which playground knobs declare). Companions,
 discipline or a bad `clock` is refused when the writer is built. A glide's discipline
 sits on a base name with no port, so the kernel type cannot carry it; a
 playable knob is therefore a `knob` node (raw, or anchor when it feeds a
-freq inlet). A `tropical_program_2` patch's params are all raw: a
-`paramDecl` cannot declare a discipline and the session compile attaches
-none. So a program-2 knob is continuous only where a raw write is. A clock's
-phase is `inc·τ`, so a raw write to a frequency re-evaluates the whole past
-under the new frequency and moves the phase by `Δinc·τ`: at τ a minute in,
-one slider step of `spline-voice`'s 2 Hz pulse rate moves the envelope by
-about 0.64 of a cycle, to an effectively arbitrary point. The frequency
-knobs of the spline patches (`pitch`, the pulse `rate`, the `lfo` rate) are
-discontinuous this way; a control point, `width`, `depth` or `level` steps
-the output by its own change at the current phase, which is smaller. These
-knobs become continuous once a patch can declare an anchored frequency
-(declared write disciplines for patch-bay params are in progress on
-`feat/patch-disciplines`); the patches stay raw until then. `build_patches.ts` fails the build on a knob that names no
+freq inlet), or in a `tropical_program_2` patch a `paramDecl`: raw, or
+`"discipline": "anchor"` when it is wired bare into a `ClockPhasor.freq`
+whose `clk` is τ (host-param-dispatch.md, "Patch-bay params"). A raw write
+to a frequency is discontinuous: a clock's phase is `inc·τ`, so the write
+re-evaluates the whole past under the new frequency and moves the phase by
+`Δinc·τ`. At τ a minute in, one slider step of `spline-voice`'s 2 Hz pulse
+rate moves the envelope by about 0.64 of a cycle, to an effectively
+arbitrary point. An anchored write moves the phasor's `#phase` offset by
+that jump instead, so the phase is continuous. The shipped spline patches
+still declare no anchor, so their frequency knobs (`pitch`, the pulse
+`rate`, the `lfo` rate) still click; a control point, `width`, `depth` or
+`level` steps the output only by its own change at the current phase. The
+remaining step is their displays: a `display`'s `freqParam` must be raw,
+because the page computes the cycle start from the frequency assuming
+offset 0. Anchoring those knobs needs the display to take its cycle start
+from the kernel (or to add the `#phase` offset). `build_patches.ts` fails the build on a knob that names no
 param or a discipline the player cannot write. Writes are messages, so the
 demo still needs no COOP/COEP and deploys as plain static files.
 

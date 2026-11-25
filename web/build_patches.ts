@@ -92,12 +92,16 @@ for (const { slug, title, description, knobs, audio: declaredAudio, displays } o
   // knob that names nothing, or a discipline the player does not implement,
   // fails the build rather than becoming a dead slider.
   const kernelType = JSON.parse(k.stdout.toString()) as {
-    inputs: { name: string; discipline?: { discipline: string } }[]
+    inputs: { name: string; discipline?: { discipline: string; companions?: string[] } }[]
     outputs: { shape: number[] }[]
   }
   for (const knob of knobs ?? []) {
     const port = kernelType.inputs.find((p) => p.name === `param:${knob.param}`)
     if (!port) throw new Error(`${slug}: knob '${knob.label}' names param '${knob.param}', which the kernel does not have`)
+    // A companion slot is the host's, moved by its owner's discipline.
+    const owner = kernelType.inputs.find((p) => p.discipline?.companions?.includes(knob.param))
+    if (owner)
+      throw new Error(`${slug}: knob '${knob.label}' names '${knob.param}', a companion of ${owner.name}'s ${owner.discipline!.discipline} discipline; a knob writes the param itself`)
     const d = port.discipline?.discipline ?? 'raw'
     if (d !== 'raw' && d !== 'anchor' && d !== 'anchor_clock')
       throw new Error(`${slug}: knob '${knob.label}' (${knob.param}) has discipline '${d}'; the player writes raw, anchor and anchor_clock params only`)
